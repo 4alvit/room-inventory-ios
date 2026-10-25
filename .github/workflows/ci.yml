@@ -33,5 +33,6 @@ jobs:
         with:
           name: simulator-test-results-${{ github.run_attempt }}
           path: .build/*.xcresult
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14

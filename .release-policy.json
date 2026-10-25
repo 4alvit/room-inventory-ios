@@ -1,0 +1,20 @@
+{
+  "repository": "4alvit/room-inventory-ios",
+  "mode": "release",
+  "visibility": "public",
+  "default_branch": "main",
+  "validation_workflows": ["ci.yml", "codeql.yml"],
+  "single_entry_ci": true,
+  "local_checks": ["bash scripts/ci.sh"],
+  "artifact_pattern": "release-assets*",
+  "version_file": "VERSION",
+  "release_notes": "CHANGELOG.md",
+  "toolkit_revision": "755c2e66fb1e79fc67d9e4c85ecffcc046b967db",
+  "notes": [
+    "GitHub artifacts contain source and an unsigned iOS Simulator preview. They are not device-installable IPAs, App Store releases, insurance appraisals, or evidence of real purchases.",
+    "The app and source archive retain the committed numeric base version. Candidate channel, source commit, build tool versions and payload hashes identify the preview separately.",
+    "Free access permits one room and ten items in total. The planned non-consumable Pro purchase has a USD 19.99 local StoreKit test price; production availability and prices require App Store Connect configuration.",
+    "Inventory storage is bounded to 80 MiB of originals. Restore remaps a recovered attachment when a regular original filename collides with different contents, preserving prior bytes and the home/room/item identities. Unsafe symlink collisions are rejected.",
+    "Stable source/simulator promotion needs acceptance of the exact RC. Physical-device testing, signing, Apple agreements, production StoreKit configuration and App Review remain separate release requirements."
+  ]
+}

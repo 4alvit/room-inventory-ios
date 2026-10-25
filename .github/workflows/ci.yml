@@ -1,0 +1,37 @@
+name: iOS validation
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  ios:
+    name: Core and iOS tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install locked workflow validation dependency
+        run: |
+          python3 -m pip install --require-hashes --only-binary=:all: -r .github/requirements-workflow-contracts.txt
+      - name: Report selected toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun simctl list runtimes
+      - name: Run source contracts, Core tests, Simulator build and app tests
+        run: bash scripts/ci.sh
+      - name: Preserve Simulator test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: simulator-test-results-${{ github.run_attempt }}
+          path: .build/*.xcresult
+          if-no-files-found: ignore
+          retention-days: 14

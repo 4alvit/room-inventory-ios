@@ -1,0 +1,39 @@
+name: Build unsigned Simulator preview
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  package:
+    name: Source and Simulator preview
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Build committed preview assets
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: bash scripts/package-release.sh "$RELEASE_VERSION" "$RELEASE_CHANNEL"
+      - name: Verify payload hashes
+        working-directory: release-dist
+        run: shasum -a 256 -c SHA256SUMS
+      - name: Preserve candidate artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets-simulator
+          path: release-dist/*
+          if-no-files-found: error
+          retention-days: 30

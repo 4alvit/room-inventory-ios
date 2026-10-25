@@ -143,6 +143,16 @@ are currently retained internally for safety; automatic cleanup is not implement
 See [storage details](Core/README.md), [privacy](docs/privacy.md) and
 [support/recovery](docs/support.md).
 
+The hand icon on the main screen opens **Privacy and support** without Pro.
+Its English and Russian explanations are bundled for offline reading, including
+deletion/retention limits, unencrypted exports, recovery and public-support guidance.
+Optional browser links open only when tapped. The app links to published,
+revision-pinned preview documents while final operator/contact details and stable
+App Store policy URLs remain release requirements. No private support email is assumed.
+`PrivacySupportTests` checks the packaged resources and standalone page dependencies;
+`PrivacySupportUITests` checks EN/RU navigation, scrolling, links and large text.
+These checks do not disable the device network or replace a physical VoiceOver audit.
+
 ## Preview release
 
 The release engine is vendored from

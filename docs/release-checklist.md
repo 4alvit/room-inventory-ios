@@ -40,6 +40,7 @@ evidence that UI, purchases or physical devices passed acceptance.
 - [ ] Validate StoreKit sandbox/TestFlight purchase, restoration and revocation paths independently of local `.storekit` simulations.
 - [ ] Confirm privacy manifest/API reasons and App Privacy disclosures against the release binary.
 - [ ] Publish reachable privacy/support pages and complete app icon, screenshots, accessibility and store metadata review.
+- [ ] Verify bundled EN/RU privacy/support reading without Pro, review it against the signed build, and replace preview links with verified final policy/support destinations when operator/contact details are complete.
 - [ ] Create a signed archive with the team's credentials, validate/export it in Xcode and upload through authorized App Store tooling.
 - [ ] Complete TestFlight acceptance and Apple's review; confirm actual storefront availability before claiming release or sales.
 

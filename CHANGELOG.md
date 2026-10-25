@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add an offline English and Russian privacy/support page from the main screen, available without Pro. It explains local data, deletion, sharing, backups and public support, with optional links to published preview documents.
+
 ## [0.1.0] - development preview
 
 ### Added

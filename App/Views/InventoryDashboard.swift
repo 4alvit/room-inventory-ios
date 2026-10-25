@@ -7,6 +7,7 @@ struct InventoryDashboard: View {
     @Environment(ProStore.self) private var pro
     @State private var addingHome = false
     @State private var showingPro = false
+    @State private var showingPrivacy = false
     @State private var renamingHome: InventoryHome?
     @State private var deletingHome: InventoryHome?
 
@@ -72,9 +73,20 @@ struct InventoryDashboard: View {
             .navigationTitle(UIL10n.text("Room Inventory"))
             .scrollContentBackground(.hidden)
             .background(InventoryTheme.background)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { InventoryExportMenu() } }
             .overlay { if store.isBusy { ProgressView(UIL10n.text("Saving your inventory…")).padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } }
             .disabled(store.isBusy)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showingPrivacy = true } label: {
+                        Label(UIL10n.text("privacy.entry"), systemImage: "hand.raised")
+                    }
+                    .accessibilityIdentifier("inventory.privacySupport")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    InventoryExportMenu().disabled(store.isBusy)
+                }
+            }
+            .sheet(isPresented: $showingPrivacy) { PrivacySupportView() }
             .sheet(isPresented: $addingHome) {
                 NameEntrySheet(title: UIL10n.text("Add a home"), placeholder: UIL10n.text("Home name"), explanation: UIL10n.text("For example, Main home or Apartment.")) { await store.addHome(name: $0) }
             }

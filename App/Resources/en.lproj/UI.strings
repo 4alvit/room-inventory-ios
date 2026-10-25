@@ -206,3 +206,33 @@
 "count.apply.few" = "Apply %@";
 "count.apply.many" = "Apply %@";
 "count.apply.other" = "Apply %@";
+
+/* Bundled privacy and support. External links require an explicit tap. */
+"privacy.entry" = "Privacy and support";
+"privacy.title" = "Privacy & support";
+"privacy.intro.title" = "About this preview";
+"privacy.intro.body" = "You can read this page without internet access or Pro. It is included in the app. Public developer profile: alvit / 4alvit. This is a development preview; final operator and contact details for the App Store release are not yet supplied.";
+"privacy.storage.title" = "Saved on your device";
+"privacy.storage.body" = "Item descriptions, amounts, serial numbers, notes, selected photos, labels and receipt images are stored in the app’s local sandbox. No Room Inventory account is required. The app has no developer-operated server, cloud sync, advertising SDK or analytics SDK. These inventory features do not send your content to the developer.";
+"privacy.capture.title" = "Photos, files and text recognition";
+"privacy.capture.body" = "Camera access is requested when you take a photo. The photo picker supplies only the items you select, without requiring unrestricted access to your library. Files import preserves the bytes received; Photos may supply an edited or converted version, and camera capture creates a JPEG. Images can retain metadata such as date or location.\n\nApple Vision recognizes text on your device. Suggestions start unselected: review and choose values before applying them. Recognition can be wrong and does not establish ownership, value or insurance coverage.";
+"privacy.sharing.title" = "Sharing and backup copies";
+"privacy.sharing.body" = "PDF, CSV, ZIP and .roominventory exports are not encrypted. This app is not a separate encrypted vault and does not provide end-to-end encrypted backups. Choose recipients and storage locations carefully. Files providers, shared destinations, Photos and device backups may keep copies according to their settings; this app does not control those copies.\n\nExports create temporary copies inside the app. On a later export, the app attempts to remove export folders older than 24 hours. This is not scheduled deletion or a guaranteed retention period.";
+"privacy.deletion.title" = "Deleting records and files";
+"privacy.deletion.body" = "Deleting a home, room, item or attachment removes records or links from the active inventory. Unlinked original files are retained internally to protect recovery from interrupted operations. There is no automatic cleanup or in-app browser for these retained files. New backups include only currently linked originals, not previously removed records or links.\n\nThe 80 MiB limit covers originals linked to the current inventory; retained originals and temporary exports can use more storage. Uninstalling removes the app’s device sandbox. Manage exported copies and device or cloud backups separately. Save a usable backup before deleting records or uninstalling.";
+"privacy.apple.title" = "Apple services and Pro";
+"privacy.apple.body" = "Apple handles App Store product availability, purchases and purchase restoration and processes purchase information under its own policies. The app checks verified StoreKit transactions for Pro access; App Store features may use the network. See Apple’s App Store privacy information in the links below.\n\nRestoring a purchase restores Pro access, not your inventory. Existing records, editing, backup restoration and basic exports remain accessible without Pro, within the app’s storage limits. A local test purchase is a simulation, not a real sale.";
+"privacy.limits.title" = "Storage and import limits";
+"privacy.limits.body" = "Image input accepts JPEG, PNG and HEIC/HEIF up to 20 MB (20,000,000 bytes), 64 megapixels and 16,384 pixels per side. A stored original is limited to 25 MiB, currently linked originals to 80 MiB, and a backup to 128 MiB. Retained files can use additional space. PDF reports are limited to 500 pages; an oversized report is not partially exported. These limits also apply with Pro. Import an image of a PDF receipt rather than the PDF itself.";
+"privacy.recovery.title" = "Restore your inventory";
+"privacy.recovery.body" = "To save a restorable copy, choose Export and backup → Restorable backup + originals. To restore, choose Restore a backup from the same menu, select a .roominventory file in Files, then review the replacement warning. A PDF or report ZIP cannot restore your inventory.\n\nRestore replaces the active inventory, so export the current one first if you need to keep it. Keep the original backup if a restore fails. When storage is full or unavailable, check the current inventory, free space and retry; do not uninstall as the first recovery step.";
+"privacy.support.title" = "Public support";
+"privacy.support.body" = "Support issues on GitHub are public and visible to everyone. Never upload private inventories, receipts, serial numbers, photographs, backups, credentials or private documents. Use synthetic examples, the app and iOS versions, device model and a non-sensitive description of the problem.\n\nGitHub hosts the discussion and describes its data handling in its privacy statement, linked below. No confidential general-support contact is listed for this preview. No fixed response or correspondence-deletion time is promised.";
+"privacy.links.title" = "Optional online links";
+"privacy.links.footer" = "These links open your browser only when tapped and require internet access. The app’s privacy and support documents are published preview copies, not final App Store policies. All information above remains available offline.";
+"privacy.link.policy" = "Preview privacy document";
+"privacy.link.support" = "Preview support document";
+"privacy.link.issues" = "Open public GitHub issues";
+"privacy.link.apple" = "Apple: App Store & Privacy (English)";
+"privacy.link.github" = "GitHub privacy statement (English)";
+"privacy.link.hint" = "Opens an external website in your browser. Internet access is required.";

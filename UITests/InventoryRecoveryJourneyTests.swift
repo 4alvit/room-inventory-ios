@@ -41,7 +41,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         application = app
         // Async teardown crosses to this class's MainActor explicitly and also
         // runs after XCTest failures that can bypass a Swift defer statement.
-        addTeardownBlock { [self] in try await finishEvidence() }
+        addTeardownBlock { @MainActor [self] () async throws in try finishEvidence() }
         bridge = try RecoveryJourneyBridge(journeyID: journeyID, sourceID: sourceID, targetID: targetID)
         app.launchArguments = ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         activeRunID = sourceID

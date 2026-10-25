@@ -102,27 +102,97 @@ def validate_host(env, profile, root, *, machine=None, system=None):
             "image_os": env["ImageOS"], "image_version": env["ImageVersion"]}
 
 
-def validate_event(event, env):
-    repository = event.get("repository", {})
-    require(repository.get("full_name") == env["GITHUB_REPOSITORY"], "Event repository differs", Failure)
+MISSING = object()
+SHA40 = r"[0-9a-f]{40}"
+REPOSITORY = r"(?!\.{1,2}/)[A-Za-z0-9_.-]{1,100}/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}"
+
+
+class IdentityAudit:
+    """Small allowlisted evidence, including failures before directory admission."""
+    def __init__(self):
+        self.stage, self.checks, self.observed = "host", {}, {}
+
+    def observe(self, name, value=MISSING, pattern=None):
+        kind = ("missing" if value is MISSING else "null" if value is None else
+                "boolean" if type(value) is bool else "integer" if type(value) is int else
+                "string" if isinstance(value, str) else "object" if isinstance(value, dict) else
+                "array" if isinstance(value, list) else "other")
+        item = {"type": kind}
+        if isinstance(value, str):
+            item["length"] = len(value)
+            if len(value) <= 256 and pattern and re.fullmatch(pattern, value):
+                item["value"] = value
+        elif type(value) is bool or (type(value) is int and 0 < value <= 2**53 - 1):
+            item["value"] = value
+        self.observed[name] = item
+
+    def check(self, name, condition):
+        self.checks[name] = bool(condition)
+        require(condition, "Identity check failed: " + name, Failure)
+
+    def snapshot(self):
+        value = {"schema_version": 1, "stage": self.stage,
+                 "checks": dict(self.checks), "observed": dict(self.observed)}
+        if len(json.dumps(value).encode()) > 8192:
+            # Keys are source constants; never truncate an arbitrary raw value.
+            value = {"schema_version": 1, "stage": self.stage,
+                     "checks": dict(list(self.checks.items())[-64:]), "observed": {},
+                     "observations_omitted_for_size": True}
+        return value
+
+
+def valid_text(value, pattern):
+    return isinstance(value, str) and len(value) <= 256 and re.fullmatch(pattern, value) is not None
+
+
+def validate_event(event, env, audit=None):
+    audit = audit or IdentityAudit()
+    audit.stage = "event"
+    audit.observe("event", event)
+    audit.check("event_object", isinstance(event, dict))
+    repository = event.get("repository", MISSING)
+    audit.observe("repository", repository)
+    audit.check("event_repository_object", isinstance(repository, dict))
+    audit.observe("event_repository", repository.get("full_name", MISSING), REPOSITORY)
+    audit.check("event_repository_matches", repository.get("full_name") == env["GITHUB_REPOSITORY"])
     kind, commit, ref = env["GITHUB_EVENT_NAME"], env["GITHUB_SHA"], env["GITHUB_REF"]
     identity = {"kind": kind, "source_commit": commit, "ref": ref}
     if kind == "pull_request":
-        pr = event.get("pull_request", {})
+        pr = event.get("pull_request", MISSING)
+        audit.observe("pull_request", pr)
+        audit.check("pr_object", isinstance(pr, dict))
         number = event.get("number")
-        require(type(number) is int and number > 0 and ref == f"refs/pull/{number}/merge"
-                and pr.get("merge_commit_sha") == commit
-                and pr.get("base", {}).get("repo", {}).get("full_name") == repository["full_name"],
-                "PR merge identity differs", Failure)
+        audit.observe("number", event.get("number", MISSING))
+        audit.check("pr_number", type(number) is int and 0 < number <= 2**53 - 1)
+        audit.check("pr_merge_ref", ref == f"refs/pull/{number}/merge")
+        merge = pr.get("merge_commit_sha", MISSING)
+        audit.observe("merge_commit_sha", merge, SHA40)
+        audit.check("pr_merge_metadata_type", merge is MISSING or merge is None or valid_text(merge, SHA40))
+        # Webhook snapshot metadata is not an atomic identity for the run.
+        audit.observe("merge_metadata_matches_run", merge == commit)
+        identity["merge_metadata_matches_run"] = merge == commit
+        identity["merge_metadata_state"] = "missing" if merge is MISSING else "null" if merge is None else "sha"
+        if valid_text(merge, SHA40):
+            identity["merge_commit_sha"] = merge
         for side in ("base", "head"):
-            item = pr.get(side, {})
-            require(re.fullmatch(r"[0-9a-f]{40}", item.get("sha", ""))
-                    and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", item.get("repo", {}).get("full_name", "")),
-                    "PR source identity missing", Failure)
-            identity[side] = {"sha": item["sha"], "repository": item["repo"]["full_name"]}
+            item = pr.get(side, MISSING)
+            audit.observe(side, item)
+            audit.check("pr_" + side + "_object", isinstance(item, dict))
+            sha = item.get("sha")
+            audit.observe(side + "_sha", item.get("sha", MISSING), SHA40)
+            audit.check("pr_" + side + "_sha", valid_text(sha, SHA40))
+            repo = item.get("repo", MISSING)
+            audit.observe(side + "_repo", repo)
+            audit.check("pr_" + side + "_repo_object", isinstance(repo, dict))
+            name = repo.get("full_name")
+            audit.observe(side + "_repository", repo.get("full_name", MISSING), REPOSITORY)
+            audit.check("pr_" + side + "_repository", valid_text(name, REPOSITORY))
+            identity[side] = {"sha": sha, "repository": name}
+        audit.check("pr_base_repository_matches", identity["base"]["repository"] == repository["full_name"])
         identity["number"] = number
     elif kind == "merge_group":
         group = event.get("merge_group", {})
+        audit.check("merge_group_object", isinstance(group, dict))
         require(group.get("head_sha") == commit and group.get("head_ref") == ref
                 and ref.startswith("refs/heads/gh-readonly-queue/"), "Merge-group identity differs", Failure)
         identity["base_ref"] = group.get("base_ref")
@@ -134,7 +204,9 @@ def validate_event(event, env):
         branch = repository.get("default_branch")
         require(isinstance(branch, str) and branch and ref == "refs/heads/" + branch,
                 "Scheduled/manual run must use default branch", Failure)
-        expected = (event.get("inputs") or {}).get("expected_sha") if kind == "workflow_dispatch" else None
+        inputs = event.get("inputs") or {}
+        audit.check("event_inputs_object", isinstance(inputs, dict))
+        expected = inputs.get("expected_sha") if kind == "workflow_dispatch" else None
         require(not expected or expected == commit, "Manual expected_sha differs", Failure)
         identity["default_branch"] = branch
     return identity
@@ -184,7 +256,7 @@ class Discovery:
         require(self.disk_usage(self.output).free >= POLICY["abort_free_bytes"], "Hosted disk abort floor reached")
         self.alarm.check()
 
-    def command(self, args, name, cap=20):
+    def command(self, args, name, cap=20, *, retain_output=True):
         self.check()
         end = min(self.alarm.end, self.alarm.clock() + cap)
         require(end - self.alarm.clock() >= 8, "Insufficient discovery/cleanup budget", Deadline)
@@ -253,8 +325,13 @@ class Discovery:
                 self.check()
                 for suffix, data in zip(("stdout", "stderr"), buffers):
                     self.check()
-                    (self.output / (name + "." + suffix)).write_bytes(data)
-                    record[suffix + "_sha256"] = controller.sha(data)
+                    if retain_output:
+                        (self.output / (name + "." + suffix)).write_bytes(data)
+                        record[suffix + "_sha256"] = controller.sha(data)
+                    else:
+                        # Raw commit output includes names, email and message.
+                        record[suffix + "_bytes"] = len(data)
+                record["output_retained"] = retain_output
                 controller.write_json(self.output / "commands.json", self.records)
                 controller.tree_size(self.output, 16 * controller.MIB, self.check, max_entries=128)
                 self.check()
@@ -303,10 +380,53 @@ def select_runtime(inventory, sdk):
             "device_type": selected["identifier"], "patch_policy": "same-major-minor-newest-installed-patch"}
 
 
-def source_identity(discovery, env):
-    lines = discovery.command(["git", "rev-parse", "HEAD", "HEAD^{tree}"], "source-head", 10).decode().splitlines()
-    require(lines == [env["GITHUB_SHA"], env["RECOVERY_TESTED_TREE"]], "Checkout differs from iOS-tested source", Failure)
-    require(discovery.command(["git", "status", "--porcelain=v1"], "source-status", 10) == b"", "Checkout is not clean", Failure)
+def parse_commit_identity(raw, audit):
+    """Read only tree/parent headers, including in a depth-one checkout."""
+    audit.check("commit_object_bound", isinstance(raw, bytes) and len(raw) <= 4 * controller.MIB)
+    end = raw.find(b"\n\n", 0, 65538)
+    audit.check("commit_header_bound", 0 <= end <= 65536)
+    lines = raw[:end].split(b"\n")
+    trees = [line[5:] for line in lines if line.startswith(b"tree ")]
+    parents = [line[7:] for line in lines if line.startswith(b"parent ")]
+    audit.check("commit_tree_header", len(trees) == 1 and lines[0].startswith(b"tree ")
+                and re.fullmatch(rb"[0-9a-f]{40}", trees[0]) is not None)
+    audit.check("commit_parent_headers", len(parents) <= 2
+                and all(re.fullmatch(rb"[0-9a-f]{40}", p) is not None for p in parents))
+    identity = {"tree": trees[0].decode("ascii"), "parents": [p.decode("ascii") for p in parents]}
+    audit.observe("commit_tree", identity["tree"], SHA40)
+    for i, parent in enumerate(identity["parents"]):
+        audit.observe("commit_parent_" + str(i), parent, SHA40)
+    return identity
+
+
+def source_identity(discovery, env, event_identity=None, audit=None):
+    audit = audit or IdentityAudit()
+    audit.stage = "source"
+    lines = discovery.command(["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"],
+                              "source-head", 10).decode("ascii", errors="replace").splitlines()
+    audit.check("checkout_identity_shape", len(lines) == 2)
+    audit.observe("checkout_commit", lines[0], SHA40)
+    audit.observe("checkout_tree", lines[1], SHA40)
+    audit.check("checkout_commit_matches", lines[0] == env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"])
+    audit.check("checkout_tree_matches", lines[1] == env["RECOVERY_TESTED_TREE"])
+    audit.check("checkout_clean", discovery.command(["git", "status", "--porcelain=v1"], "source-status", 10) == b"")
+    if env["GITHUB_EVENT_NAME"] == "pull_request":
+        audit.check("pr_event_identity_available", isinstance(event_identity, dict) and event_identity.get("kind") == "pull_request")
+        raw = discovery.command(["git", "--no-replace-objects", "cat-file", "commit", env["GITHUB_SHA"]],
+                                "source-commit", 10, retain_output=False)
+        actual = parse_commit_identity(raw, audit)
+        audit.check("commit_tree_matches", actual["tree"] == lines[1])
+        audit.check("pr_parent_count", len(actual["parents"]) == 2)
+        audit.check("pr_head_is_parent", event_identity["head"]["sha"] in actual["parents"])
+        audit.check("pr_base_is_parent", event_identity["base"]["sha"] in actual["parents"])
+        # Conservative snapshot policy; base advancement can fail this gate.
+        # Parent order is observed, not assumed to be part of GitHub's contract.
+        audit.check("pr_snapshot_parents_match", sorted(actual["parents"]) ==
+                    sorted([event_identity["base"]["sha"], event_identity["head"]["sha"]]))
+        discovery.check()
+        controller.write_json(discovery.output / "source-identity.json", actual)
+        discovery.check()
+    audit.stage = "source_verified"
     return lines
 
 
@@ -341,13 +461,33 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
     outer_end = start + 2100
     work, upload, runner, discovery = None, None, None, None
     context, primary, code = {}, None, 1
+    audit = IdentityAudit()
     try:
         with Alarm(start + 120, clock) as alarm:
             profile, profile_raw = load_profile(root, expected)
             host = validate_host(env, profile, root)
-            event_path = Path(env.get("GITHUB_EVENT_PATH", ""))
-            require(event_path.is_absolute(), "Event path must be absolute", Failure)
-            host["event"] = validate_event(json.loads(bounded_read(event_path, 4 * controller.MIB)), env)
+            for key in ("GITHUB_SHA", "RECOVERY_TESTED_COMMIT", "RECOVERY_TESTED_TREE"):
+                audit.observe(key, env[key], SHA40)
+            audit.observe("run_ref", env["GITHUB_REF"], r"refs/[A-Za-z0-9_./-]+")
+            audit.stage = "event_read"
+            event_name = env.get("GITHUB_EVENT_PATH", "")
+            audit.check("event_path_type", isinstance(event_name, str))
+            event_path = Path(event_name)
+            audit.check("event_path_absolute", event_path.is_absolute())
+            try:
+                event_raw = bounded_read(event_path, 4 * controller.MIB)
+            except Failure:
+                audit.check("event_file_bounded_regular", False)
+            except (OSError, ValueError) as error:
+                audit.observe("event_file_errno", getattr(error, "errno", None))
+                audit.check("event_file_readable", False)
+            audit.check("event_file_bounded_regular", True)
+            try:
+                event = json.loads(event_raw)
+            except (ValueError, UnicodeError, RecursionError):
+                audit.check("event_json", False)
+            audit.check("event_json", True)
+            host["event"] = validate_event(event, env, audit)
             temporary = Path(env["RUNNER_TEMP"])
             proposed, upload = temporary / "room-recovery-work", temporary / "room-recovery-upload"
             require(not any(p.exists() or p.is_symlink() for p in (proposed, upload)), "Attempt output already exists", Failure)
@@ -368,7 +508,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             # OS/tool environment. Git identity checks need no credentials.
             child_env = {k: v for k, v in env.items() if k in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "DEVELOPER_DIR"}}
             discovery = Discovery(root, preflight, child_env, alarm, disk_usage=disk_usage)
-            source = source_identity(discovery, env)
+            source = source_identity(discovery, env, host["event"], audit)
             hashes = {name: controller.sha(bounded_read(root / "scripts" / path)) for name, path in {
                 "controller": "run-recovery-journey.py", "collector": "recovery_collector.py",
                 "adapter": "recovery_hosted.py", "retention": "recovery_retention.py",
@@ -417,6 +557,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
         context.setdefault("cleanup_errors", []).extend(discovery.cleanup_errors)
     if context.get("primary_error") or context.get("cleanup_errors"):
         code = code or 1
+    context["identity_audit"] = audit.snapshot()
     if work is not None:
         try:
             with Alarm(min(outer_end, clock() + 180), clock) as alarm:
@@ -437,7 +578,8 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
     if clock() >= outer_end:
         code = 124
     return {"exit_code": code, "status": "COMPLETE" if code == 0 else "INCOMPLETE", "primary_error": context.get("primary_error") or primary,
-            "upload_root": str(upload) if work is not None else None}
+            "upload_root": str(upload) if work is not None else None,
+            "identity_audit": audit.snapshot()}
 
 
 def main(argv=None):

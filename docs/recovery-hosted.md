@@ -48,6 +48,33 @@ this is the actual merge commit; the PR head is recorded separately. GitHub's
 defines this distinction. A prepared, uncommitted patch is never represented as
 having run on its unchanged base commit.
 
+For an open PR, the adapter requires the canonical `refs/pull/<number>/merge`
+ref, the event repository and base repository to match this repository, and
+well-formed base/head SHA and repository fields. A fork head repository may
+differ. The checked-out commit must equal both `GITHUB_SHA` and the preceding
+iOS job's tested commit; its tree must equal the tested tree.
+
+The event's `merge_commit_sha` is diagnostic metadata: missing, null, and a valid
+SHA differing from the run are allowed only while all authoritative source
+checks succeed. GitHub describes the event as the original
+[webhook payload](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context),
+while [mergeability is computed asynchronously](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request).
+Those contracts do not promise atomic equality between that payload field and
+the run's merge SHA. This does not establish which condition caused an earlier
+composite identity failure when its original payload was not retained.
+
+The adapter reads the actual commit object's tree and parent headers using
+`git --no-replace-objects cat-file commit`. Unlike history traversal, this works
+with the existing depth-one checkout without requiring parent objects or a
+network fetch. Raw author, committer, signature and message data are discarded;
+only the validated tree and at most two parent SHA values enter evidence.
+The actual tree must match the tested tree, and there must be exactly two
+parents whose multiset equals the event's base/head SHA values. Parent order is
+recorded but not required. Exact event-base equality is our conservative
+**snapshot policy**, not a guarantee of GitHub event/ref synchronization. A base
+advance can therefore produce a precise, intentional rejection. The adapter
+does not replace the original event with a current REST response or retry.
+
 The committed `scripts/recovery-hosted-profile.json` is SHA-256 pinned in the job's
 single adapter command. The hosted grant envelope binds the actual checkout,
 profile and workflow bytes, adapter/controller/collector/retention code, run ID,
@@ -123,7 +150,14 @@ hashes or timestamps, and no partial capture is promoted to a passing collection
 If configuration or container pinning never completed, the packet records that
 limitation with the available source/configuration/log evidence.
 Rejection before the adapter claims its fresh working directory produces only
-the workflow log; the missing required upload then fails explicitly. An abrupt
+the workflow log. The existing final JSON summary includes an `identity_audit`
+of at most 8 KiB with the validation stage, individual predicate outcomes, and
+allowlisted SHA/repository/ref values or field types. Invalid text is represented
+only by type and length; the full event, PR text and environment are never logged.
+After directory admission the same audit enters `preflight/adapter-result.json`.
+No directory is created merely to retain early diagnostics, so the existing disk
+and ownership guards remain in force. The missing required upload still fails
+explicitly; it does not replace the original adapter failure in the log. An abrupt
 runner loss can likewise prevent upload and never counts as retained evidence.
 
 Only data from the current hosted attempt may enter this upload. Private local

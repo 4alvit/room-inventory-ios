@@ -1,24 +1,31 @@
-# App Store submission draft — Room Inventory
+# App Store submission copy — Room Inventory
 
-Prepared 2026-10-21 for **English (U.S.)**. This is editable submission copy, not a submitted listing or a release-readiness declaration. Source baseline: `f09740524197889086519c99fa526859a22f5404`, plus the working tree inspected on this date. No App Store account, HCP, GitHub account or signing checks were made for this draft.
+Prepared **2026-10-25** for **English (U.S., en-US)** and **Russian (ru)**. Product baseline: [`68041c3f1f1c70f4c07207f443dd636a141f5f65`](https://github.com/4alvit/room-inventory-ios/commit/68041c3f1f1c70f4c07207f443dd636a141f5f65), version `0.1.0`. This is editable submission material; no listing, IAP, upload or release is created by this document.
 
-The baseline copy below describes the current product. **Pro batch image import and report options are required candidate scope under implementation and still need validation.** Do not advertise those features until the exact release build supports and passes them; use the conditional copy below only after that gate. Reconcile this draft with the final source SHA, UI labels, privacy text and actual purchase configuration before submission.
+Batch image import and custom PDF options are implemented in this baseline and are included in the copy below. Use the copy only for a signed candidate with the same verified behavior. Name availability and App Store Connect app/product registration remain owner checks.
 
-## App identity and placement
+## Source baseline and release boundary
 
-- Proposed App Store name: Room Inventory. Name availability has not been checked or reserved.
-- Bundle ID in the Xcode project: `com.alvit.roominventory`. Confirm it against the registered app and uploaded build; this draft does not establish ownership.
-- Minimum target: iOS 17. The project supports iPhone and iPad; retain both only after final layout and device validation.
-- Primary category suggestion: **Productivity**, because the core task is organizing records and producing reusable exports. Secondary suggestion: **Utilities**, if selected by the owner. These are editorial suggestions, not an Apple classification or ranking claim.
-- Developer/seller name, SKU, copyright owner/year, App Review contact details and age-rating questionnaire: **owner input required**. No personal contact data or fabricated answers are supplied here.
+[Hosted run 40154440680](https://github.com/4alvit/room-inventory-ios/actions/runs/40154440680) passed all eight jobs for the baseline: **263 tooling, 46 Core, 57 app tests (including four StoreKit tests), and three UI tests passed**. The iPad-only UI test was the single expected skip. The retained xcresult establishes iPhone 17 Pro / iOS 26.2 (23C54); the compile SDK was 18.5. The tested PR merge tree matched the signed source head.
 
-Apple documents 30-character name/subtitle limits in [App information](https://developer.apple.com/help/app-store-connect/reference/app-information/app-information). Promotional text is limited to 170 characters, description to 4,000, and keywords to **100 UTF-8 bytes**, according to [Platform version information](https://developer.apple.com/help/app-store-connect/reference/app-information/platform-version-information). Counts below were computed with Python `len(value)` and `len(value.encode("utf-8"))`; code-fence markers and the presentation newline after each value are excluded. Description and review-note paragraph breaks are included.
+This is Simulator evidence. A GitHub unsigned Simulator ZIP cannot be installed on a physical iPhone or submitted to App Store Connect. A signed Release archive, physical-device behavior, fresh signed-device Sandbox purchases and restoration, production product configuration, TestFlight and App Review remain separate gates. The existing green local StoreKit tests do not establish a production price or a sale. See [device handoff](device-release.md) and [release checklist](release-checklist.md).
 
-## Baseline product-page copy
+## Field limits and counting
+
+Apple references checked on **2026-10-25**:
+
+- [App information](https://developer.apple.com/help/app-store-connect/reference/app-information/app-information): name 2–30 characters; subtitle at most 30 characters.
+- [Platform version information](https://developer.apple.com/help/app-store-connect/reference/app-information/platform-version-information): promotional text at most 170 characters; plain-text description at most 4000 characters; keywords at most **100 bytes**, with each keyword longer than two characters; App Review Notes at most **4000 bytes**. App Review notes are one submission field, not separate localized product-page fields: choose one language below, do not concatenate both.
+- [In-App Purchase information](https://developer.apple.com/help/app-store-connect/reference/in-app-purchases-and-subscriptions/in-app-purchase-information): internal reference name at most 64 characters; product ID at most 100; localized display name 2–30; localized description at most 45; IAP Review Notes at most **4000 characters**. IAP notes are also alternatives, not two blocks to concatenate.
+
+Counts below include spaces, punctuation and internal paragraph breaks, but exclude Markdown fences and the newline after each field. Character counts use Unicode code points (`len(text)`); byte counts use UTF-8 (`len(text.encode("utf-8"))`). All fields are NFC-normalized and contain no emoji or combining sequences. Apple labels the two byte limits as bytes; UTF-8 is the encoding measured here. Recount after any edit and recheck the live form before submission.
+
+## English (U.S.) product page
 
 ### Name
 
-Count: **14 / 30 characters**.
+<!-- metadata:en-US:name -->
+Count: **14 / 30 characters; 14 UTF-8 bytes**.
 
 ```text
 Room Inventory
@@ -26,7 +33,8 @@ Room Inventory
 
 ### Subtitle
 
-Count: **28 / 30 characters**.
+<!-- metadata:en-US:subtitle -->
+Count: **28 / 30 characters; 28 UTF-8 bytes**.
 
 ```text
 Photos, receipts and records
@@ -34,7 +42,8 @@ Photos, receipts and records
 
 ### Keywords
 
-Count: **91 / 100 UTF-8 bytes**.
+<!-- metadata:en-US:keywords -->
+Count: **91 / 100 UTF-8 bytes; 91 characters**.
 
 ```text
 home,belongings,serial,organizer,moving,backup,property,checklist,documents,pdf,csv,offline
@@ -42,163 +51,305 @@ home,belongings,serial,organizer,moving,backup,property,checklist,documents,pdf,
 
 ### Promotional text
 
-Count: **132 / 170 characters**.
+<!-- metadata:en-US:promotional_text -->
+Count: **147 / 170 characters; 147 UTF-8 bytes**.
 
 ```text
-Photograph your belongings, review text from labels and receipts, and keep a portable inventory with local storage and easy exports.
+Photograph your belongings, keep receipts and serial numbers together, and make useful exports. Pro adds batch image import and custom PDF reports.
 ```
 
 ### Description
 
-Count: **2106 / 4000 characters**.
+<!-- metadata:en-US:description -->
+Count: **2975 / 4000 characters; 2975 UTF-8 bytes**.
 
 ```text
-Make a clear record of your belongings, one room at a time. Room Inventory brings item photos, label details and receipt images together so you can find them when you need them.
+Make a clear record of your belongings, one room at a time. Room Inventory keeps item photos, labels, receipt images and purchase details together so you can find them when you need them.
 
 BUILD YOUR INVENTORY
-Create a home and room, then add your belongings. Take a photo or select an image from Photos or Files. Keep the model, serial number, purchase amount, purchase date and notes with each item.
+Create homes and rooms, then add your belongings. Take a photo or select JPEG, PNG or HEIC images from Photos or Files. Record model and serial numbers, purchase amounts and dates, and notes. Suggested next steps help you spot missing details.
 
-REVIEW RECOGNIZED TEXT
-Text recognition runs on your device. Review suggestions from labels and receipts, select the values you want, and confirm before they update an item. Reminders help you spot missing photos, receipts and details.
+CHECK RECOGNIZED TEXT
+Text recognition runs on your device. Review suggestions from labels and receipts, select the values you want, then confirm before they update an item. English and Russian interfaces and recognition labels are supported. Recognition can make mistakes; your confirmation stays in control.
+
+START FREE, ADD PRO WHEN YOU NEED IT
+Free includes one room and ten items in total across all homes, with one image imported at a time. An optional, one-time Pro purchase adds more rooms and items within the app's limits, import of up to ten images at once into the same item, and custom PDF reports. Batch images share the chosen purpose; they do not create separate items or apply OCR automatically.
+
+With a custom PDF, choose rooms and include or omit serial numbers, purchase details, notes, and attachment names and paths. These choices change the exported PDF only, not your saved records. PDF reports do not embed the image files.
+
+Viewing, editing, deletion, standard exports and backup restoration remain available without Pro, including after an entitlement is revoked. Restore purchases through the App Store. Pro is not a subscription.
 
 KEEP A PORTABLE COPY
-Export a PDF report, CSV table or ZIP package containing your original files and their item associations. Save a separate .roominventory backup to restore your inventory and originals inside the app.
+Export a PDF report, a CSV table or a ZIP containing the report, CSV tables and saved original files with their item associations. A separate .roominventory backup restores the inventory and originals in the app. The report ZIP is not a restorable backup.
 
-START FREE
-Free includes one room and ten items across all homes. An optional, one-time Pro purchase allows more rooms and items within the app's storage limits. Viewing, editing, basic exports and backup restoration remain available without Pro. Purchases can be restored through the App Store.
+LOCAL STORAGE AND CLEAR LIMITS
+No app account is required. Inventory content stays in the app's local storage unless you share it or it is copied by device backups. Cloud locations you choose in Files follow their own settings.
 
-LOCAL STORAGE
-No app account is required. The app keeps inventory content on your device and does not send it to an app server. Device backups and any cloud locations you choose in Files may retain copies under their own settings.
+All plans share an 80 MiB limit for originals linked to the active inventory. Other global limits are 100 homes, 1,000 rooms, 10,000 items and 5,000 originals; storage and text limits may be reached first. Pro does not remove these limits. Removed originals remain in local recovery storage until the app is deleted and may use additional device space.
 
-Current inventories support up to 80 MiB of original files, including with Pro. Exports and backups are not encrypted. Stored images may contain capture dates or location. Files imports preserve the selected bytes; Photos supplies its current representation, which may include edits or conversions. Camera capture saves a JPEG. An untouched camera asset and all its original metadata are not guaranteed. Choose where you store and share them. Originals removed from item records remain in local recovery storage until the app is deleted; manage exported copies and device backups separately.
+Exports and backups are not encrypted. Images may retain dates or location metadata. Files imports preserve the selected bytes; Photos supplies its current representation, which may include edits or conversions. Camera capture saves a JPEG. The untouched camera asset and all original metadata are not guaranteed. Manage shared copies and device backups separately.
 
 Room Inventory records information you provide. It does not automatically value property or guarantee insurance coverage or payment.
 ```
 
-## Non-consumable in-app purchase
+## Русская страница приложения
 
-Type: **Non-consumable**, not a subscription. The local StoreKit configuration uses a USD 19.99 test price; that is a simulation, not a verified production price or sale. Configure the actual storefront availability and price in App Store Connect, then verify the localized price in the signed build. Do not place the test price in public copy or synthetic purchase screenshots.
+### Name
 
-The 30-character localized display-name and 45-character description limits, plus internal reference-name and product-ID constraints, are documented in [In-App Purchase information](https://developer.apple.com/help/app-store-connect/reference/in-app-purchases-and-subscriptions/in-app-purchase-information).
+<!-- metadata:ru:name -->
+Count: **14 / 30 characters; 14 UTF-8 bytes**.
 
-### Internal reference name
+```text
+Room Inventory
+```
 
-Count: **18 / 64 characters**.
+### Subtitle
+
+<!-- metadata:ru:subtitle -->
+Count: **29 / 30 characters; 52 UTF-8 bytes**.
+
+```text
+Фото, чеки и сведения о вещах
+```
+
+### Keywords
+
+<!-- metadata:ru:keywords -->
+Count: **85 / 100 UTF-8 bytes; 49 characters**.
+
+```text
+вещи,дом,опись,имущество,переезд,серийный,pdf,csv
+```
+
+### Promotional text
+
+<!-- metadata:ru:promotional_text -->
+Count: **141 / 170 characters; 252 UTF-8 bytes**.
+
+```text
+Храните фото вещей, чеки и серийные номера вместе. Создавайте отчёты и резервные копии. С Pro — групповой импорт изображений и настройка PDF.
+```
+
+### Description
+
+<!-- metadata:ru:description -->
+Count: **3155 / 4000 characters; 5702 UTF-8 bytes**.
+
+```text
+Соберите понятную опись вещей по комнатам. Room Inventory хранит вместе фотографии предметов, маркировку, изображения чеков и сведения о покупке, чтобы нужную запись было легко найти.
+
+СОЗДАЙТЕ ОПИСЬ
+Добавляйте дома, комнаты и предметы. Снимайте камерой или выбирайте изображения JPEG, PNG и HEIC из «Фото» и «Файлов». Записывайте модель, серийный номер, стоимость и дату покупки, заметки. Подсказки помогут заметить недостающие сведения.
+
+ПРОВЕРЯЙТЕ РАСПОЗНАННЫЙ ТЕКСТ
+Текст распознаётся на устройстве. Проверьте значения с маркировки или чека, выберите нужные и подтвердите изменения. Пока вы не подтвердите выбор, сведения о предмете не изменятся. Интерфейс и распознавание подписей полей поддерживают русский и английский языки. При распознавании возможны ошибки.
+
+НАЧНИТЕ БЕСПЛАТНО
+Бесплатная версия включает одну комнату и десять предметов суммарно во всех домах, а изображения импортируются по одному. Необязательная разовая покупка Pro позволяет добавлять больше комнат и предметов в пределах лимитов приложения, импортировать до десяти изображений за раз для одного предмета и настраивать PDF.
+
+Все изображения в группе получают выбранное назначение и прикрепляются к одному предмету. Отдельные предметы для них не создаются, автоматического распознавания всей группы нет.
+
+В настраиваемом PDF можно выбрать комнаты, включить или убрать серийные номера, сведения о покупке, заметки, имена и пути вложений. Эти настройки меняют только новый PDF, а не сохранённые записи. Файлы изображений в PDF не встраиваются.
+
+Просмотр, редактирование, удаление, обычный экспорт и восстановление резервных копий доступны без Pro, в том числе после отзыва покупки. Покупки можно восстановить через App Store. Pro не является подпиской.
+
+СОХРАНЯЙТЕ КОПИИ
+Экспортируйте PDF, таблицу CSV или ZIP с отчётом, таблицами и сохранёнными оригиналами, связанными с предметами. Отдельная резервная копия .roominventory восстанавливает записи и оригиналы в приложении. ZIP с отчётом не подходит для восстановления.
+
+ЛОКАЛЬНОЕ ХРАНЕНИЕ И ЛИМИТЫ
+Учётная запись приложения не нужна. Содержимое хранится локально, пока вы не поделитесь им или оно не попадёт в резервную копию устройства. Облачные хранилища, выбранные в «Файлах», используют собственные настройки.
+
+Во всех версиях действует лимит 80 МиБ оригиналов, связанных с текущими записями. Другие общие лимиты: 100 домов, 1000 комнат, 10 000 предметов и 5000 оригиналов. Ограничения объёма файлов и текста могут быть достигнуты раньше. Pro не снимает эти лимиты. Удалённые оригиналы остаются в локальном хранилище восстановления до удаления приложения и могут занимать дополнительное место.
+
+Экспорт и резервные копии не зашифрованы. В изображениях могут остаться дата съёмки и геолокация. Импорт из «Файлов» сохраняет выбранные байты. «Фото» передаёт текущую версию, иногда с изменениями или преобразованием формата. Камера сохраняет JPEG. Неизменённый исходник камеры и все его метаданные не гарантируются. Управляйте отправленными копиями и резервными копиями устройства отдельно.
+
+Приложение записывает введённые вами сведения. Оно не оценивает имущество автоматически и не гарантирует страховое покрытие или выплату.
+```
+
+## Non-consumable IAP
+
+Type: **Non-consumable**. The product grants Pro without a subscription or trial. The local StoreKit price is a test fixture; no numeric price from it is included here. Confirm actual storefront availability and localized `Product.displayPrice` in the signed candidate after configuring App Store Connect. Do not publish a test price or present a simulated purchase as a real transaction.
+
+### Internal IAP reference name
+
+<!-- metadata:shared:iap_reference_name -->
+Count: **18 / 64 characters; 18 UTF-8 bytes**.
 
 ```text
 Room Inventory Pro
 ```
 
-### Product ID
+### IAP product ID
 
-Count: **27 / 100 characters**.
+<!-- metadata:shared:iap_product_id -->
+Count: **27 / 100 characters; 27 UTF-8 bytes**.
 
 ```text
 com.alvit.roominventory.pro
 ```
 
-### Localized display name
+## English (U.S.) IAP
 
-Count: **18 / 30 characters**.
+### Localized IAP display name
+
+<!-- metadata:en-US:iap_display_name -->
+Count: **18 / 30 characters; 18 UTF-8 bytes**.
 
 ```text
 Room Inventory Pro
 ```
 
-### Baseline localized description
+### Localized IAP description
 
-Count: **39 / 45 characters**.
-
-```text
-More rooms and items. One-time upgrade.
-```
-
-### Conditional Pro copy — not yet approved for submission
-
-Only after batch import and report options pass on the exact release build, replace the START FREE paragraph in the description with this paragraph. Confirm the actual batch cap and available report controls first; this copy makes no unlimited-import or unlimited-storage promise.
-
-### Candidate replacement paragraph
-
-Count: **335 characters**.
-
-```text
-Free includes one room and ten items across all homes. An optional, one-time Pro purchase adds more rooms and items, batch import of selected images, and report options within the app's storage limits. Viewing, editing, basic exports and backup restoration remain available without Pro. Purchases can be restored through the App Store.
-```
-
-Full description with this replacement: **2157 / 4,000 characters**.
-
-### Candidate localized IAP description
-
-Count: **44 / 45 characters**.
+<!-- metadata:en-US:iap_description -->
+Count: **44 / 45 characters; 44 UTF-8 bytes**.
 
 ```text
 More rooms, batch import and report options.
 ```
 
-Before using the candidate paragraph, record evidence for: bounded multi-image selection and limits; per-image error handling; cancellation/interruption; correct item-to-image associations; Pro purchase/restore/revocation behavior; actual report controls; and continued access to basic exports without Pro. Do not add unsupported options such as automatic estimates, 3D scans, family sharing, hosted sync or PDF-document import to this copy.
+### IAP Review Notes
 
-## App Review notes
-
-The following text is for a configured, signed candidate. Keep it in draft until the payment and device gates below pass. Update step numbers and exact labels if the final UI changes. App sign-in required: **No**. Apple purchase authentication is separate. Enter the real review contact in App Store Connect; do not invent demo credentials.
-
-### Review notes draft
-
-Count: **2677 characters**.
+<!-- metadata:en-US:iap_review_notes -->
+Count: **730 / 4000 characters; 730 UTF-8 bytes**.
 
 ```text
-Room Inventory is a local inventory utility. No app account, login, invitation or developer server is required. Purchases use Apple's standard StoreKit flow; no developer-issued test credentials are needed.
-
-Suggested review path:
-1. Launch the app, add a home called Demo Home, add a room called Office, and add an item called Demo Camera.
-2. Open the item and choose Add photo or document image. Take a photo, select an image from Photos, or import an image from Files. Choose Item photo, Model / serial label, or Receipt as appropriate. The current capture UI accepts JPEG, PNG and HEIC images, not PDF documents.
-3. Use a clear synthetic label or receipt image. Open Recognize text, review the suggestions, select the values to use, and tap Apply. OCR runs on-device. Suggestions start unselected and do not update item fields without confirmation.
-4. Return to the main screen and open Export and backup. Try the PDF report, CSV table, original-file ZIP package and separate restorable .roominventory backup. Use the system share sheet to save to Files. To restore, use Export and backup > Restore a backup inside the app. Opening the backup directly from Files is not supported. Restore replaces the active inventory after confirmation.
-5. Free access allows one room and ten items in total across all homes. Attempting to add beyond this opens the Pro offer. Pro uses the non-consumable product com.alvit.roominventory.pro. The price comes from StoreKit. Use Restore purchases in the Pro screen to restore an existing entitlement.
-6. Viewing, editing, deletion, basic exports and backup restoration remain available without an active Pro entitlement. A pending or cancelled purchase does not unlock Pro. Existing records remain available after revocation.
-
-There is no automatic property valuation or insurance coverage/payment decision. The app stores user-entered information and images. Stored images can retain metadata. Files imports preserve the selected bytes. Photos supplies its current representation, which may include edits or conversion, and camera capture creates a JPEG; preservation of an untouched camera asset and all its original metadata is not guaranteed. Exports and backups are not encrypted. Device backups and user-selected Files providers may retain copies. Removed originals remain in local recovery storage until the app is deleted.
-
-The active inventory supports up to 80 MiB of originals, including with Pro. Capture imports are limited to 20 MB, 64 megapixels and 16,384 pixels per side. PDF reports are limited to 500 pages, CSV exports to 16 MiB and backups to 128 MiB; oversized operations return an error rather than truncated content.
+Room Inventory Pro is a non-consumable one-time upgrade, product ID com.alvit.roominventory.pro. Open Explore Pro, reach a Free quota, or select Custom PDF report to see the offer. It adds more rooms/items within global limits, up to ten images per batch for the same item, and custom PDF room/detail options. Free is one room and ten items globally. The 80 MiB active-originals limit and other storage/structural caps also apply to Pro. Restore purchases is on the offer screen. Pending/cancelled purchases do not unlock; revocation retains existing records and standard exports. No subscription or trial. Price comes from StoreKit; no fixed price is asserted here. Supply the actual candidate's IAP review screenshot separately.
 ```
 
-If candidate Pro features ship, add their verified navigation steps and concrete limits to these review notes. For batch import, state whether images attach to the selected item or create separate items, matching the implementation. For report options, list only the controls actually exposed. Attach synthetic label/receipt examples and a real IAP review screenshot when preparing the submission; none are created or attached by this document.
+## Русская локализация IAP
 
-## Screenshot shot list
+### Localized IAP display name
 
-Capture the actual final build with synthetic data. Proposed dataset: **Demo Home → Office** with **Demo Camera**, **Desk Lamp**, **Monitor** and **Headphones**. Use a printed label such as `Model: DEMO-C100 / Serial: DEMO-000123`, a receipt visibly marked `SAMPLE`, and invented amounts and dates. No household photos, addresses, real receipts or real serial numbers. Maintain one consistent inventory across the set.
+<!-- metadata:ru:iap_display_name -->
+Count: **18 / 30 characters; 18 UTF-8 bytes**.
 
-1. **Know what you have.** Room screen with the four sample items and their file/detail counts. Show a finished small room, not a first-launch blank state. First screenshot communicates the central task.
-2. **Keep the details together.** Demo Camera detail with a photo, label and receipt image plus confirmed model, serial and user-entered amount. No automatic-value badge or insurance endorsement.
-3. **Check the text before saving.** Actual **Review recognized text** screen with readable text and a candidate value from the synthetic image. The original image is available in the separate attachment preview, not on this review screen. Show the selection controls and Apply action; do not imply perfect OCR.
-4. **See what is still missing.** An item with clear suggested next steps. Capture reminders as optional guidance, not insurance requirements.
-5. **Export a useful record.** Actual **Export and backup** menu or in-app/system preview of the generated PDF. Caption may say **PDF, CSV and original files**. Verify the displayed report and ZIP/CSV paths correspond to the same synthetic inventory.
-6. **Keep a restorable copy.** In-app backup/restore flow with the `.roominventory` selection and confirmation visible. Avoid implying that a report ZIP restores the app or that backups sync automatically.
-7. **One purchase, more room.** Actual Pro screen after production product configuration. Any shown price must be the real localized StoreKit value for the captured storefront. Show the restore-purchases path and the absence of a subscription. Until price loading is validated, this shot is internal-only.
-8. **Candidate only: Add several images.** Capture the real bounded Pro batch selector/progress/result after validation. Display the actual cap and per-image outcomes if the UI exposes them. Do not mock an unimplemented workflow.
-9. **Candidate only: Choose your report.** Capture the final Pro report-options screen and matching output after validation. Captions must name only verified options.
+```text
+Room Inventory Pro
+```
 
-Use the strongest six or seven baseline shots; add candidate shots only when the features ship. Capture readable iPhone and iPad compositions separately rather than stretching one layout. Retain raw captures, source SHA, build/version, simulator or device model, runtime, locale, appearance and pixel dimensions as release evidence.
+### Localized IAP description
 
-As checked on 2026-10-21, Apple's [Screenshot specifications](https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications) require an iPhone Dynamic Island medium-display set and, for iPad support, a 13-inch iPad set. Concrete capture targets accepted by that reference are **1206 × 2622** portrait for the iPhone set and **2064 × 2752** portrait (or **2752 × 2064** landscape) for the iPad set. Use a simulator/device that naturally produces the selected size, verify actual pixels and omit alpha/transparency. Recheck requirements in App Store Connect at upload; this is not evidence that any screenshots have been captured or accepted.
+<!-- metadata:ru:iap_description -->
+Count: **45 / 45 characters; 80 UTF-8 bytes**.
 
-## Privacy and support URL gate
+```text
+Больше комнат, пакетный импорт, настройка PDF
+```
 
-- **Privacy Policy URL: UNSET — submission gate.** Publish the final, build-matched privacy statement and verify the exact public HTTPS page opens without sign-in. Source draft: [privacy.md](privacy.md).
-- **Support URL: UNSET — submission gate.** Publish a reachable page with actual support contact information and the recovery instructions. Source draft: [support.md](support.md). Apple's [Platform version information](https://developer.apple.com/help/app-store-connect/reference/app-information/platform-version-information) describes the support-contact requirement. Existing repository references to GitHub issues are not a verified live support destination in this draft; public reachability was not checked here.
-- **Marketing URL: not proposed.** Supply one only if an actual product page is published and checked. Do not paste an illustrative or anticipated URL into App Store Connect.
-- Public copy must match actual local storage, on-device OCR, Apple-handled purchases, user-selected sharing, retained removed originals, imported bytes, possible image metadata and the Photos/camera representation limits. Do not claim an encrypted vault, zero metadata, automatic deletion of all copies, or private-by-default behavior of external Files providers.
-- The current privacy manifest declares no collected-data entries and no tracking; source inspection also shows no app server or analytics/advertising SDK. These are inputs for the owner to review against the final binary and dependencies, **not a completed App Privacy questionnaire or a legal/compliance attestation**. Review required-reason API declarations and actual purchase behavior before submitting disclosures.
+### IAP Review Notes
 
-## Unresolved submission gates
+<!-- metadata:ru:iap_review_notes -->
+Count: **751 / 4000 characters; 1299 UTF-8 bytes**.
 
-- [ ] Final batch import and report-option implementation passes; choose baseline or conditional copy accordingly and reconcile README/product docs. The README describes the implemented candidate features; final runtime acceptance is still required.
-- [ ] Exact candidate SHA, version/build and archive selected; current repository/unsigned Simulator artifacts do not constitute a device submission.
-- [ ] Cold-install StoreKit tests are reproducible. The current README records a fresh-Simulator purchase-routing failure on Xcode 27.0 / iOS 27.0; a pass on a previously used simulator does not close it. Validate purchase, cancellation, pending approval, restore, refund/revocation and offline access on the intended signed sandbox/TestFlight build.
-- [ ] Existing inventory, basic exports and restore remain usable without Pro, including an inventory above Free quotas after revocation. The 80 MiB inventory-originals limit is shown before purchase and matches store copy.
-- [ ] Camera permissions, denied access, selected-image import, OCR confirmation, background interruption, low storage, corrupt backup handling, iPhone/iPad layouts and accessibility are exercised on the release build and supported physical devices.
-- [ ] Baseline and any candidate screenshots are captured from the actual build; IAP review screenshot and any review attachments contain synthetic data only.
-- [ ] Public privacy/support URLs and real contact details are supplied and verified; final App Privacy, age-rating and encryption/export questions are reviewed by the owner from actual behavior.
-- [ ] The owner supplies the enrolled Developer team, app/product registration and valid signing setup. Any required legal, paid-app, banking or tax agreements are completed by an authorized human. This draft neither accepts them nor asserts compliance.
-- [ ] Final localized store price, product ID/type and availability are confirmed; upload, TestFlight acceptance, App Review and actual storefront availability are verified separately before claiming a release or revenue.
+```text
+Room Inventory Pro — разовая покупка (non-consumable) com.alvit.roominventory.pro, не подписка. Предложение открывается через «Подробнее о Pro», при достижении бесплатной квоты или выборе настраиваемого PDF. Pro добавляет больше комнат/предметов в пределах общих лимитов, импорт до десяти изображений для одного предмета и выбор комнат/полей PDF. Бесплатно доступны одна комната и десять предметов суммарно. Лимит 80 МиБ связанных оригиналов и другие ограничения действуют и с Pro. На экране есть «Восстановить покупки». Отменённая или ожидающая покупка не открывает Pro. Отзыв покупки сохраняет записи и обычный экспорт. Пробного периода нет. Цена загружается из StoreKit. Отдельно приложите снимок предложения из фактической сборки для проверки IAP.
+```
 
-This draft creates no external listing, product, purchase, support page or release.
+## App Review instructions
+
+For the configured signed candidate: **app sign-in required — No**. Do not supply invented demo credentials. Apple purchase authentication is separate. Real App Review contact name, email and phone must be supplied by the owner. Use one of the following notes fields after the signed-device/Sandbox gates pass; attach actual candidate screenshots and synthetic examples separately.
+
+## English (U.S.) — review
+
+### App Review Notes
+
+<!-- metadata:en-US:app_review_notes -->
+Count: **2725 / 4000 UTF-8 bytes; 2725 characters**.
+
+```text
+Room Inventory is a local inventory utility. No app account, login, invitation or developer server is required. Apple purchase authentication is separate; no developer-issued credentials are needed.
+
+Suggested review path (English UI):
+1. Add Demo Home, an Office room and a Demo Camera item. Add a photo or document image; choose Item photo, Model / serial label, or Receipt. Camera, Photos and Files accept JPEG/PNG/HEIC images, not PDF documents.
+2. Import a synthetic label or receipt. A single label/receipt opens text review after saving; alternatively long-press an attachment and choose Recognize text. OCR runs on-device. Suggestions start unselected; select values and use Apply to confirm changes.
+3. Free allows one room and ten items globally across all homes. Add beyond a quota or open Explore Pro to see the offer. Product com.alvit.roominventory.pro is non-consumable; price is loaded from StoreKit. Restore purchases is on the Pro screen.
+4. With Pro, select up to ten images in Photos or Files for one existing item. All use the selected purpose. Import results show saved/failed images; retry affects failed images only. No item-per-image creation or automatic batch OCR is performed.
+5. Open Export and backup. Standard PDF/CSV/ZIP and the separate .roominventory backup remain available without Pro. Restore via Restore a backup inside the app; direct opening from Files is not supported. Restore replaces the active inventory after confirmation; an invalid backup retains it.
+6. With Pro, open Custom PDF report. Select rooms and toggle serial numbers, purchase prices/dates, notes, and attachment names/paths. These options affect this PDF only. The PDF does not embed image files.
+7. Existing records, editing, deletion, standard exports and backup restoration remain available after Pro revocation. Pending or cancelled purchases do not unlock Pro. No subscription or trial is offered.
+
+Limits apply to Free and Pro: 80 MiB of linked originals per active inventory; globally 100 homes, 1,000 rooms, 10,000 items and 5,000 originals. Capture imports: 20 MB, 64 megapixels, 16,384 pixels per side. Storage: 25 MiB per original, 4 MiB inventory text, 64 KiB per field. Backups/report ZIPs: 128 MiB; CSV: 16 MiB; PDF: 500 pages. Smaller limits can be reached first; oversized operations fail rather than truncate.
+
+Exports/backups are not encrypted. Files preserves imported bytes; Photos may supply edits/conversions, and camera capture creates JPEG. Images may contain date/location metadata. Removed originals are retained locally until app deletion and can use extra storage. Device backups and selected cloud Files providers may retain copies. There is no automatic valuation or insurance decision.
+```
+
+## Русский — review
+
+### App Review Notes
+
+<!-- metadata:ru:app_review_notes -->
+Count: **3592 / 4000 UTF-8 bytes; 2040 characters**.
+
+```text
+Room Inventory не требует учётной записи или сервера разработчика. Авторизация покупки Apple выполняется отдельно.
+
+1. Добавьте дом «Пример», комнату «Кабинет» и предмет «Камера». Прикрепите тестовое изображение JPEG/PNG/HEIC из камеры, «Фото» или «Файлов». PDF не импортируется.
+2. Одиночная маркировка или чек открывает проверку текста; также можно удерживать вложение и выбрать «Распознать текст». Распознавание локальное. Значения изначально не выбраны и меняют запись только после выбора и подтверждения.
+3. Бесплатно: одна комната и десять предметов суммарно во всех домах. Превышение лимита или «Подробнее о Pro» открывает предложение. com.alvit.roominventory.pro — разовая покупка, не подписка. Цена поступает из StoreKit; доступна кнопка «Восстановить покупки».
+4. Pro: до десяти изображений из «Фото»/«Файлов» для одного предмета с общим назначением. Результаты показывают ошибки; повторяются только неудачные импорты. Предметы не создаются автоматически, группового распознавания нет.
+5. «Экспорт и резервная копия»: обычные PDF/CSV/ZIP и копия .roominventory доступны без Pro. Восстановление запускается внутри приложения и заменяет записи после подтверждения; неверная копия их сохраняет.
+6. «Настраиваемый отчёт PDF · Pro»: выбор комнат, серийных номеров, покупки, заметок, имён/путей вложений. Меняется только PDF; изображения не встраиваются.
+
+После отзыва Pro записи, редактирование, удаление, обычный экспорт и восстановление доступны. Ожидающая или отменённая покупка не активирует Pro. Пробного периода нет.
+
+Для всех версий: 80 МиБ связанных оригиналов; всего до 100 домов, 1000 комнат, 10 000 предметов, 5000 оригиналов. Импорт: 20 МБ, 64 Мп, сторона 16 384 пикселя. Меньший лимит может сработать раньше.
+
+Экспорт и копии не зашифрованы. В изображениях возможны метаданные. «Фото» может передать изменённую версию, камера создаёт JPEG. Удалённые оригиналы остаются до удаления приложения и занимают дополнительное место. Копии устройства и облачных провайдеров управляются отдельно. Автооценки и страховых решений нет.
+```
+
+## Product and storage facts to preserve in every locale
+
+The Free quota is **one room and ten items across the entire active inventory**, not per home. Pro adds room/item capacity, up to ten selected images per batch for one existing item, and custom PDF options. Each batch uses one attachment purpose. A batch does not create separate items or automatically recognize all images. Failed images may be retried without resaving successful ones.
+
+Custom PDF options select rooms and control serial numbers, purchase prices/dates, notes and attachment names/paths. They change only the new PDF; they do not redact stored data or other export formats. PDF reports do not embed image files. Basic PDF/CSV/ZIP and restorable backup export/restore remain available without Pro, including for an inventory above Free quotas after revocation. Restoring an app backup does not restore an Apple purchase entitlement.
+
+Independent limits apply to both Free and Pro; reaching any one stops the operation:
+
+- Across the active inventory: **100 homes, 1000 rooms, 10,000 items, 5000 originals, 80 MiB of linked original bytes**.
+- Stored data: **25 MiB per original, 4 MiB of inventory text, 64 KiB per text field**. Current capture/import UI is narrower: **20 MB (20,000,000 bytes), 64 megapixels and 16,384 pixels per side**, JPEG/PNG/HEIC only.
+- Output: **128 MiB per backup/report ZIP, 16 MiB per CSV, 500 PDF pages**. Oversized operations fail rather than silently truncate; smaller file/text limits can apply before the structural caps.
+- Removed originals remain in local recovery storage until app deletion. They can use extra device storage beyond the active inventory's 80 MiB. Exported copies and operating-system/cloud backups must be managed separately.
+
+No app account or developer server is required. OCR is on-device and suggested field changes require explicit selection and confirmation. Exports and backups are **not encrypted**. Files preserves selected bytes; Photos can supply an edited/converted representation, and camera capture creates JPEG. The app does not promise an untouched camera asset, stripped metadata, unlimited storage, hosted sync, automatic valuation or insurance approval.
+
+Source anchors: [Free quotas](../App/InventoryStore.swift), [batch import](../App/BatchImageImport.swift), [attachment UI](../App/Views/AttachImageSheet.swift), [report controls](../App/Views/CustomReportSheet.swift), [report projection](../Core/Sources/InventoryCore/InventoryReportOptions.swift), [global limits](../Core/Sources/InventoryCore/InventoryError.swift), [image limits](../App/ImageInput.swift), [exports](../App/ExportService.swift), [StoreKit](../App/ProStore.swift), [localization](localization.md), [privacy](privacy.md) and [recovery/support](support.md).
+
+## Screenshot handoff
+
+Capture the actual candidate in each language using one consistent synthetic inventory: Demo Home / Office / Demo Camera, Desk Lamp, Monitor and Headphones; Russian equivalents may be used. Mark the sample receipt SAMPLE / ОБРАЗЕЦ, use invented serial numbers and amounts, and include no household photos, addresses or private documents.
+
+1. Finished room with recognizable items: the main task.
+2. Item photo, label, receipt and confirmed model/serial/purchase details.
+3. Text review with unselected/selectable suggestions and the confirmation action. The original image is in the separate attachment preview, not on this review screen.
+4. Suggested missing details, shown as optional guidance.
+5. Up to ten selected images for the same item and the real batch-result screen.
+6. Custom PDF room/detail controls, followed by the matching generated output.
+7. Standard exports and the separate restorable backup flow; do not imply that the report ZIP restores the app.
+8. Actual Pro offer with Restore purchases. Any visible price must be the verified localized StoreKit value for that candidate/storefront; keep simulated-price screenshots internal.
+
+The [screenshot candidate set](app-store/screenshots/README.md) contains seven real captures with EN/RU iPhone and 13-inch iPad coverage. Its manifest retains source SHA, build, device/runtime, locale, dimensions and raw/candidate hashes. Select the strongest accurate set for the final signed build. These Simulator assets do not establish upload acceptance or physical-device accessibility validation; no selected image shows simulated IAP pricing.
+
+## Public repository candidates and final URL gates
+
+The review branch provides the following candidate document locations in the public repository. These are changeable review URLs; the acceptance report records their unauthenticated response and exact committed-content URLs after push. They are not a claim that App Store Connect has accepted them or that `main` already contains this version.
+
+- [Privacy policy candidate — English](https://github.com/4alvit/room-inventory-ios/blob/feat/initial-public-preview-20261024/docs/privacy.md)
+- [Privacy policy candidate — Russian](https://github.com/4alvit/room-inventory-ios/blob/feat/initial-public-preview-20261024/docs/privacy.ru.md)
+- [Support candidate — English](https://github.com/4alvit/room-inventory-ios/blob/feat/initial-public-preview-20261024/docs/support.md)
+- [Support candidate — Russian](https://github.com/4alvit/room-inventory-ios/blob/feat/initial-public-preview-20261024/docs/support.ru.md)
+- [Public issue channel](https://github.com/4alvit/room-inventory-ios/issues): only non-sensitive reports; never post receipts, personal inventory or identity/payment information.
+
+The owner must still confirm the final Privacy Policy URL, final Support URL and actual support contact information. Stable `main` document URLs depend on the reviewed PR being merged and its contents being verified. A separate marketing URL is not supplied.
+
+Apple's [app-information reference](https://developer.apple.com/help/app-store-connect/reference/app-information/app-information) requires a privacy policy URL for iOS; its [version-information reference](https://developer.apple.com/help/app-store-connect/reference/app-information/platform-version-information) requires a support URL leading to actual contact information. Repository issue links do not supply a person's email, phone or legal identity. No personal contact details have been invented here.
+
+## Remaining owner and submission gates
+
+- Select the exact signed Release archive/source/build, confirm enrolled team ownership of `com.alvit.roominventory` and registration/type of `com.alvit.roominventory.pro`.
+- Validate the signed candidate on supported physical iPhone/iPad devices, and record fresh-install Sandbox purchase, cancellation, pending approval, restoration and revocation behavior. Check retained records/basic exports without Pro, offline access, camera/Photos/Files permissions, OCR confirmation, interrupted imports, low storage and corrupt backups. Do not substitute Simulator or unsigned-device compilation evidence for these gates.
+- Confirm the actual localized StoreKit price and product availability; prepare real IAP review screenshots. No numeric production price, trial, Family Sharing entitlement or revenue is asserted by this copy.
+- Owner selects the App Store primary language, the app-level download price and country/region availability separately from IAP pricing/availability, and the release setting: manual, automatic after approval, or automatic no earlier than an owner-selected date. These choices remain unset in this draft.
+- Supply developer/seller identity, SKU, copyright owner/year, review/support contact details and any required owner-managed agreements. Category suggestions remain Productivity (primary) and Utilities (optional secondary); the owner chooses the actual classification.
+- Review final App Privacy, age-rating, content-rights and encryption/export questionnaire answers against the shipped binary and dependencies. This document supplies no fabricated legal answers or compliance attestation. Use the build-matched privacy/support text and verified public URLs.
+- Review final EN/RU copy and screenshots, upload through the authorized Apple workflow, and separately confirm TestFlight, App Review and storefront availability. Current source and CI evidence establish none of those external states.

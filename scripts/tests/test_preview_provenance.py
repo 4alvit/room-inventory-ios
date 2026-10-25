@@ -521,11 +521,31 @@ class PreviewWorkflowTests(unittest.TestCase):
             "PREVIEW_TESTED_COMMIT": "${{ inputs.tested-commit }}",
             "PREVIEW_TESTED_TREE": "${{ inputs.tested-tree }}",
         })
-        checkout = next(step for step in package["steps"] if step.get("uses", "").startswith("actions/checkout@"))
-        self.assertEqual(checkout["with"]["ref"], "${{ inputs.source-ref }}")
         caller = self.workflows["release-pipeline.yml"]["jobs"]["build"]
         self.assertEqual(caller["uses"], "./.github/workflows/release-build.yml")
         self.assertEqual(set(caller["with"]), {"version", "channel"})
+
+    def test_checkout_revisions_come_only_from_their_explicit_event_context(self):
+        steps = self.release["jobs"]["package"]["steps"]
+        checkouts = [step for step in steps if step.get("uses", "").startswith("actions/checkout@")]
+        self.assertEqual(len(checkouts), 2)
+        by_event = {step.get("if"): step for step in checkouts}
+        self.assertEqual(set(by_event), {
+            "${{ github.event_name != 'pull_request' }}",
+            "${{ github.event_name == 'pull_request' }}",
+        })
+        self.assertEqual(by_event["${{ github.event_name != 'pull_request' }}"]["with"], {
+            "persist-credentials": "false", "ref": "${{ github.sha }}",
+        })
+        self.assertEqual(by_event["${{ github.event_name == 'pull_request' }}"]["with"], {
+            "persist-credentials": "false", "ref": "${{ github.event.pull_request.head.sha }}",
+        })
+        for step in checkouts:
+            self.assertNotIn("inputs.", step["with"]["ref"])
+            self.assertNotIn("continue-on-error", step)
+            self.assertLess(steps.index(step), next(
+                i for i, value in enumerate(steps) if value.get("run")
+            ))
 
     def test_upload_follows_provenance_and_checksum_validation(self):
         steps = self.release["jobs"]["package"]["steps"]

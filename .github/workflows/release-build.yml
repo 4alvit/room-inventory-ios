@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       source-ref:
-        description: Immutable PR head SHA; empty retains the release caller checkout
+        description: Expected immutable PR head SHA for provenance; never selects a checkout
         required: false
         type: string
         default: ''
@@ -35,10 +35,18 @@ jobs:
       PREVIEW_TESTED_COMMIT: ${{ inputs.tested-commit }}
       PREVIEW_TESTED_TREE: ${{ inputs.tested-tree }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout release event revision
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.source-ref }}
+          ref: ${{ github.sha }}
+      - name: Checkout immutable PR head
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'

@@ -163,6 +163,17 @@ The reviewed policy is [`.release-policy.json`](.release-policy.json). Follow th
 and the signing handoff are described in [device release](docs/device-release.md);
 [App Store copy](docs/app-store-submission.md) remains an unsubmitted draft.
 
+Same-repository pull requests also build an unsigned Simulator candidate on
+GitHub-hosted macOS after the iOS tests pass. The existing CI entry point calls
+the preview builder with the immutable PR head; the build fails if its tree
+differs from the merge commit tested by CI. The run's `pr-simulator-<PR>-<head>-<attempt>`
+artifact includes source, the Simulator ZIP, checksums and `preview-provenance.json`
+with both commits, their trees, the run identity and payload hashes. This is a
+build record, not a signed attestation. Check the complete CI gate and CodeQL
+results as well: an uploaded artifact alone does not prove those checks passed.
+No GitHub Release, device signing or App Store upload occurs. Running the exact
+downloaded ZIP on a Simulator remains a separate acceptance step.
+
 From a clean, committed checkout with an empty `release-dist/`:
 
 ```bash

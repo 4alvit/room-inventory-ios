@@ -26,6 +26,7 @@ struct ItemDetailView: View {
                     detail(UIL10n.text("Purchase date"), value: InventoryDisplay.purchaseDate(item.purchaseDate))
                     if !item.notes.isEmpty { Text(item.notes).font(.body) }
                     Button(UIL10n.text("Edit details"), systemImage: "pencil") { editing = true }
+                        .accessibilityIdentifier("item.editDetails")
                 }
                 Section {
                     ForEach(item.attachments) { attachment in
@@ -40,6 +41,7 @@ struct ItemDetailView: View {
                                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
                             }
                         }.foregroundStyle(.primary)
+                        .accessibilityIdentifier("item.attachment.\(attachment.id)")
                         .contextMenu {
                             Button(UIL10n.text("Recognize text"), systemImage: "text.viewfinder") { recognize(attachment) }
                             Button(UIL10n.text("Remove file"), systemImage: "trash", role: .destructive) { deletingAttachment = attachment }
@@ -47,6 +49,7 @@ struct ItemDetailView: View {
                         .swipeActions { Button(UIL10n.text("Remove"), role: .destructive) { deletingAttachment = attachment } }
                     }
                     Button(UIL10n.text("Add photo or document image"), systemImage: "camera.badge.ellipsis") { attaching = true }
+                        .accessibilityIdentifier("item.addAttachment")
                 } header: { Text(UIL10n.text("Photos & documents")) } footer: {
                     Text(UIL10n.text("Capture the item, its model label, and its receipt. Text recognition happens on your device. Long-press a file to recognize its text again."))
                 }
@@ -145,18 +148,24 @@ private struct EditItemSheet: View {
                 Section(UIL10n.text("Item")) {
                     TextField(UIL10n.text("Name"), text: $draft.name)
                     TextField(UIL10n.text("Model"), text: $draft.model).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .accessibilityIdentifier("itemEditor.model")
                     TextField(UIL10n.text("Serial number"), text: $draft.serialNumber).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .accessibilityIdentifier("itemEditor.serial")
                 }
                 Section {
                     TextField(UIL10n.text("Purchase price, e.g. USD 199.00"), text: $draft.purchasePrice)
+                        .accessibilityIdentifier("itemEditor.price")
                     TextField(UIL10n.text("Purchase date, YYYY-MM-DD"), text: $draft.purchaseDate).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .accessibilityIdentifier("itemEditor.date")
                 } header: { Text(UIL10n.text("Purchase")) } footer: { Text(UIL10n.text("Include a currency with the price. Leave unknown details blank.")) }
-                Section(UIL10n.text("Notes")) { TextField(UIL10n.text("Details worth keeping"), text: $draft.notes, axis: .vertical).lineLimit(3...8) }
+                Section(UIL10n.text("Notes")) { TextField(UIL10n.text("Details worth keeping"), text: $draft.notes, axis: .vertical).lineLimit(3...8)
+                    .accessibilityIdentifier("itemEditor.notes") }
                 if let saveError { Section { Text(saveError).foregroundStyle(.red) } }
             }
             .navigationTitle(UIL10n.text("Edit item")).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(UIL10n.text("Cancel")) { if draft != item { discarding = true } else { dismiss() } }.disabled(store.isBusy) }
+                ToolbarItem(placement: .cancellationAction) { Button(UIL10n.text("Cancel")) { if draft != item { discarding = true } else { dismiss() } }.disabled(store.isBusy)
+                    .accessibilityIdentifier("itemEditor.cancel") }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(UIL10n.text("Save")) {
                         Task {
@@ -164,6 +173,7 @@ private struct EditItemSheet: View {
                             else { saveError = store.errorMessage ?? UIL10n.text("Your changes could not be saved. Try again."); store.errorMessage = nil }
                         }
                     }.disabled(store.isBusy || draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("itemEditor.save")
                 }
             }
             .disabled(store.isBusy)
@@ -204,7 +214,9 @@ struct OCRReviewSheet: View {
                         ForEach($result.suggestions) { $suggestion in
                             VStack(alignment: .leading, spacing: 8) {
                                 Toggle(UIL10n.format("ocr.use.field", suggestion.field.title), isOn: $suggestion.isSelected)
+                                    .accessibilityIdentifier("ocr.select.\(suggestion.field.rawValue)")
                                 TextField(suggestion.field.title, text: $suggestion.value).textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .accessibilityIdentifier("ocr.value.\(suggestion.field.rawValue)")
                                 if let old = existing(suggestion.field), !old.isEmpty { Text(UIL10n.format("ocr.current.value", old)).font(.caption).foregroundStyle(.secondary) }
                             }.padding(.vertical, 4)
                         }
@@ -221,6 +233,7 @@ struct OCRReviewSheet: View {
                         applying = true
                         Task { if await apply(selected) { dismiss() } else { failed = true }; applying = false }
                     }.disabled(selected.isEmpty || applying)
+                    .accessibilityIdentifier("ocr.apply")
                 }
             }
             .disabled(applying).interactiveDismissDisabled(applying)
@@ -262,10 +275,12 @@ private struct AttachmentPreview: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let image { Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(attachment.kind.title) }
+                    if let image { Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(attachment.kind.title)
+                        .accessibilityIdentifier("attachment.originalImage") }
                     else if let error { ContentUnavailableView(UIL10n.text("Preview unavailable"), systemImage: "exclamationmark.triangle", description: Text(error)) }
                     else { ProgressView(UIL10n.text("Loading original…")) }
                     Text(attachment.originalName).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        .accessibilityIdentifier("attachment.originalName")
                     Button(UIL10n.text("Recognize text"), systemImage: "text.viewfinder", action: recognize).buttonStyle(.borderedProminent).disabled(image == nil)
                 }.padding()
             }

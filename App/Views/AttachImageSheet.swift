@@ -35,6 +35,7 @@ struct AttachImageSheet: View {
                         Text(UIL10n.text("Model / serial label")).tag(AttachmentKind.label)
                         Text(UIL10n.text("Receipt")).tag(AttachmentKind.receipt)
                     }
+                    .accessibilityIdentifier("import.purpose")
                 } header: { Text(UIL10n.text("What are you adding?")) } footer: {
                     Text(kind == .photo ? UIL10n.text("Photograph the whole item so it is easy to identify later.") : UIL10n.text("Fill the frame with clear, well-lit text. A single image opens text review after saving. For a batch, open each saved image to recognize its text."))
                 }
@@ -45,6 +46,7 @@ struct AttachImageSheet: View {
                         Label(UIL10n.text("Choose from Photos"), systemImage: "photo.on.rectangle")
                     }
                     .accessibilityHint(pro.isPro ? UIL10n.text("Select up to 10 images for this item.") : UIL10n.text("Select one image for this item."))
+                    .accessibilityIdentifier("import.photos")
                     Button(pro.isPro ? UIL10n.text("Import images from Files") : UIL10n.text("Import image from Files"), systemImage: "folder") { importingFile = true }
                 } footer: {
                     Text(UIL10n.text("JPEG, PNG, or HEIC images up to 20 MB and 64 megapixels, with each side no longer than 16,384 pixels. Imported bytes are kept with this item and included in backups. Camera photos are saved as JPEGs. Photograph PDF receipts or import an image of the receipt."))

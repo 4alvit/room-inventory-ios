@@ -66,6 +66,7 @@ struct InventoryDashboard: View {
                     Button { showingPro = true } label: {
                         Label(pro.isPro ? UIL10n.text("Room Inventory Pro is active") : UIL10n.text("Explore Pro"), systemImage: pro.isPro ? "checkmark.seal.fill" : "sparkles")
                     }
+                    .accessibilityIdentifier("inventory.proStatus")
                 } footer: {
                     Text(UIL10n.text("The app stores photos and documents locally and does not upload them to an app server. Your device backup settings may include these files. Keep an exported backup somewhere safe. Records do not guarantee an insurance payment or a property valuation."))
                 }
@@ -244,9 +245,11 @@ struct InventoryExportMenu: View {
         Menu {
             Section(UIL10n.text("Export all homes")) {
                 Button(UIL10n.text("Inventory package · ZIP"), systemImage: "archivebox") { prepare(.package) }
+                    .accessibilityIdentifier("export.package")
                 Button(UIL10n.text("Report · PDF"), systemImage: "doc.richtext") { prepare(.pdf) }
                 Button(UIL10n.text("Item table · CSV"), systemImage: "tablecells") { prepare(.csv) }
                 Button(UIL10n.text("Restorable backup + originals"), systemImage: "externaldrive") { prepare(.backup) }
+                    .accessibilityIdentifier("export.backup")
             }.disabled(!store.hasLoaded)
             Section {
                 Button(UIL10n.text("Custom PDF report · Pro"), systemImage: "slider.horizontal.3") {
@@ -254,7 +257,8 @@ struct InventoryExportMenu: View {
                     else { showingPro = true }
                 }.disabled(!store.hasLoaded)
             }
-            Section { Button(UIL10n.text("Restore a backup"), systemImage: "arrow.clockwise") { importing = true }.disabled(store.repository == nil) }
+            Section { Button(UIL10n.text("Restore a backup"), systemImage: "arrow.clockwise") { importing = true }.disabled(store.repository == nil)
+                .accessibilityIdentifier("export.restore") }
         } label: {
             Label(isPreparing ? UIL10n.text("Preparing export") : UIL10n.text("Export and backup"), systemImage: isPreparing ? "hourglass" : "square.and.arrow.up")
         }
@@ -273,6 +277,7 @@ struct InventoryExportMenu: View {
                 if let url = pendingBackup { Task { await store.restore(url: url) } }
                 pendingBackup = nil
             }
+            .accessibilityIdentifier("restore.confirm")
         } message: { Text(UIL10n.text("A valid backup replaces all homes, rooms, items, and file links on this device. Export your current inventory as a backup first if you want to keep it. An invalid backup leaves your current inventory intact.")) }
     }
     private enum Format { case package, pdf, csv, backup }

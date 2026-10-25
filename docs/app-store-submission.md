@@ -1,12 +1,14 @@
 # App Store submission copy — Room Inventory
 
-Prepared **2026-10-25** for **English (U.S., en-US)** and **Russian (ru)**. Product baseline: [`68041c3f1f1c70f4c07207f443dd636a141f5f65`](https://github.com/4alvit/room-inventory-ios/commit/68041c3f1f1c70f4c07207f443dd636a141f5f65), version `0.1.0`. This is editable submission material; no listing, IAP, upload or release is created by this document.
+Prepared **2026-10-25** for **English (U.S., en-US)** and **Russian (ru)**. Current preview baseline: [`d49d2ec21e5faf1ce5916f102fef4596b7fa25bf`](https://github.com/4alvit/room-inventory-ios/commit/d49d2ec21e5faf1ce5916f102fef4596b7fa25bf), version `0.1.0`. The product copy was drafted against `68041c3` and is retained below. This is editable submission material; no listing, IAP, upload or release is created by this document.
 
 Batch image import and custom PDF options are implemented in this baseline and are included in the copy below. Use the copy only for a signed candidate with the same verified behavior. Name availability and App Store Connect app/product registration remain owner checks.
 
 ## Source baseline and release boundary
 
-[Hosted run 40154440680](https://github.com/4alvit/room-inventory-ios/actions/runs/40154440680) passed all eight jobs for the baseline: **263 tooling, 46 Core, 57 app tests (including four StoreKit tests), and three UI tests passed**. The iPad-only UI test was the single expected skip. The retained xcresult establishes iPhone 17 Pro / iOS 26.2 (23C54); the compile SDK was 18.5. The tested PR merge tree matched the signed source head.
+[Hosted run 40166125021](https://github.com/4alvit/room-inventory-ios/actions/runs/40166125021) passed all nine workflow jobs and all ten PR checks for the current preview: **296 tooling, 46 Core, 61 app and six UI tests passed**, with one expected iPad-only skip. The tested merge tree matched source head `d49d2ec`; the Simulator package contains arm64 and x86_64 slices. Build provenance and SHA256SUMS accompany the [downloaded candidate](https://github.com/4alvit/room-inventory-ios/actions/runs/40166125021/artifacts/12588624005).
+
+On 2026-10-25 the exact Simulator ZIP (`77bab6eaf93ea5f83454602ee67cebfd636983b8f2e3352dad5d994f5dbf231e`) passed one install, one ordinary launch and an English dashboard capture on iPhone 17 Pro / iOS 27.0. Independent execution and image reviews passed. The 18 installed files matched the ZIP; inventory and original-file contents were unchanged. Only the permitted numeric `SKTransactionUpdatesLastChecked` preference advanced. Process cleanup and device shutdown passed. This scoped smoke did not repeat import, OCR, export, backup/restore, live privacy navigation or purchases.
 
 This is Simulator evidence. A GitHub unsigned Simulator ZIP cannot be installed on a physical iPhone or submitted to App Store Connect. A signed Release archive, physical-device behavior, fresh signed-device Sandbox purchases and restoration, production product configuration, TestFlight and App Review remain separate gates. The existing green local StoreKit tests do not establish a production price or a sale. See [device handoff](device-release.md) and [release checklist](release-checklist.md).
 

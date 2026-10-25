@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "4alvit/room-inventory-ios",
+  "job_id": "recovery",
+  "runner_label": "macos-15",
+  "image_os": "macos15",
+  "workflow_path": ".github/workflows/ci.yml",
+  "allowed_caller_workflows": [
+    ".github/workflows/quality-gate.yml",
+    ".github/workflows/release-pipeline.yml"
+  ],
+  "allowed_events": [
+    "pull_request",
+    "push",
+    "merge_group",
+    "schedule",
+    "workflow_dispatch"
+  ],
+  "discovery_seconds": 120,
+  "recovery_seconds": 1800,
+  "retention_seconds": 180,
+  "job_timeout_minutes": 45,
+  "admission_free_bytes": 25769803776,
+  "abort_free_bytes": 8589934592,
+  "device_cap_bytes": 8589934592,
+  "derived_data_cap_bytes": 4294967296,
+  "output_cap_bytes": 1073741824
+}

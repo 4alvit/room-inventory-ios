@@ -59,9 +59,44 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  recovery:
+    name: Recovery journey
+    needs: ios
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      RECOVERY_TESTED_COMMIT: ${{ needs.ios.outputs.tested-commit }}
+      RECOVERY_TESTED_TREE: ${{ needs.ios.outputs.tested-tree }}
+    steps:
+      - name: Checkout validated event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Run one bounded hosted recovery journey
+        timeout-minutes: 36
+        run: python3 scripts/recovery_hosted.py --profile-sha256 9a18d38065f8e6d9b7e15a693c02be8cf1665df3d95fb014bd65f48d4d5bd484
+      - name: Preserve compact recovery evidence
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: recovery-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/room-recovery-upload/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   preview:
     name: PR Simulator candidate
-    needs: ios
+    needs: [ios, recovery]
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     permissions:
       contents: read

@@ -446,7 +446,7 @@ class PreviewWorkflowTests(unittest.TestCase):
 
     def test_preview_is_nested_under_ios_success_and_same_repository_pr_only(self):
         preview = self.ci["jobs"]["preview"]
-        self.assertEqual(preview["needs"], "ios")
+        self.assertEqual(preview["needs"], ["ios", "recovery"])
         self.assertEqual(preview["uses"], "./.github/workflows/release-build.yml")
         self.assertEqual(" ".join(preview["if"].split()),
                          "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}")

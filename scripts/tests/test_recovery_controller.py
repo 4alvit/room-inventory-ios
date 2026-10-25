@@ -9,6 +9,7 @@ import importlib.util
 import json
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,33 @@ class FakeProcess:
         if self.running:
             raise subprocess.TimeoutExpired("fake-owned-process", timeout)
         return 0
+
+
+def resource_info(size=0, blocks=0, mode=stat.S_IFREG, inode=1):
+    return SimpleNamespace(st_size=size, st_blocks=blocks, st_mode=mode,
+                           st_dev=1, st_ino=inode)
+
+
+@contextmanager
+def injected_resource_tree(trees):
+    """DirEntry metadata only: no file allocation, traversal or stat calls."""
+    entries = {}
+    for root, children in trees.items():
+        for name, info in children:
+            entry = SimpleNamespace(path=str(root / name), stat=Mock(return_value=info))
+            entries[Path(entry.path)] = entry
+
+    @contextmanager
+    def scan(root):
+        yield iter(entries[Path(root) / name] for name, _ in trees.get(Path(root), []))
+
+    with (patch.object(Path, "exists", return_value=True),
+          patch.object(Path, "is_dir", return_value=True),
+          patch.object(Path, "is_symlink", return_value=False),
+          patch.object(Path, "stat", side_effect=AssertionError("extra stat forbidden")) as extra_stat,
+          patch.object(Path, "lstat", side_effect=AssertionError("extra lstat forbidden")) as extra_lstat,
+          patch.object(controller.os, "scandir", side_effect=scan) as scans):
+        yield SimpleNamespace(entries=entries, scans=scans, extra_stat=extra_stat, extra_lstat=extra_lstat)
 
 
 class ControllerCase(unittest.TestCase):
@@ -384,6 +412,215 @@ class ResourceAndDeadlineTests(ControllerCase):
         tick.assert_called_once()
 
 
+class ResourceCapObservationTests(ControllerCase):
+    def crossing(self, run, root, cap, category="derived_data", **kwargs):
+        with self.assertRaises(controller.RunFailure) as caught:
+            run.resource_size(category, root, cap, **kwargs)
+        self.assertIs(type(caught.exception), controller.RunFailure)
+        self.assertEqual(str(caught.exception), "Owned resource byte cap reached: " + str(root))
+        return run.record.get("resource_cap_crossing")
+
+    def test_logical_equality_crossing_is_partial_and_uses_already_read_info(self):
+        run = self.run_fixture()
+        run.tick = Mock()
+        run.disk_usage = Mock(side_effect=AssertionError("extra disk query forbidden"))
+        info = resource_info(size=1024, blocks=0)
+        with injected_resource_tree({run.derived: [("sparse", info)]}) as tree:
+            observation = self.crossing(run, run.derived, 1024)
+            tree.scans.assert_called_once_with(run.derived)
+            tree.entries[run.derived / "sparse"].stat.assert_called_once_with(follow_symlinks=False)
+            tree.extra_stat.assert_not_called()
+            tree.extra_lstat.assert_not_called()
+        self.assertEqual(run.tick.call_count, 2)  # Existing directory and entry ticks only.
+        run.disk_usage.assert_not_called()
+        self.popen.assert_not_called()
+        self.assertEqual(observation["traversal"], "partial")
+        self.assertEqual(observation["category"], "derived_data")
+        self.assertEqual((observation["cap_bytes"], observation["logical_bytes"], observation["allocated_bytes"], observation["entries"]),
+                         (1024, 1024, 0, 1))
+        self.assertEqual(observation["current_entry"]["type"], "regular_file")
+        self.assertEqual(observation["current_entry"]["size_bytes"], 1024)
+        self.assertEqual(observation["current_entry"]["blocks_512"], 0)
+
+    def test_allocated_directory_equality_crosses_without_counting_directory_size_or_descending(self):
+        run = self.run_fixture()
+        directory = resource_info(size=99999, blocks=2, mode=stat.S_IFDIR)
+        child = run.derived / "directory"
+        with injected_resource_tree({run.derived: [("directory", directory)], child: [("never-read", resource_info(1))]}) as tree:
+            observation = self.crossing(run, run.derived, 1024)
+            tree.scans.assert_called_once_with(run.derived)
+            tree.entries[child / "never-read"].stat.assert_not_called()
+        self.assertEqual((observation["logical_bytes"], observation["allocated_bytes"]), (0, 1024))
+        self.assertEqual(observation["current_entry"]["type"], "directory")
+        self.assertEqual(observation["current_entry"]["size_bytes"], 99999)
+
+    def test_crossing_accumulates_prior_entries_and_stops_before_next_entry(self):
+        run = self.run_fixture()
+        first, second, third = resource_info(4), resource_info(6), resource_info(999)
+        with injected_resource_tree({run.derived: [("first", first), ("second", second), ("third", third)]}) as tree:
+            observation = self.crossing(run, run.derived, 10)
+            tree.entries[run.derived / "first"].stat.assert_called_once_with(follow_symlinks=False)
+            tree.entries[run.derived / "second"].stat.assert_called_once_with(follow_symlinks=False)
+            tree.entries[run.derived / "third"].stat.assert_not_called()
+        self.assertEqual((observation["logical_bytes"], observation["entries"]), (10, 2))
+        self.assertEqual(observation["current_entry"]["relative_path"], "second")
+        self.assertEqual(observation["current_entry"]["size_bytes"], 6)
+
+    def test_symlink_is_counted_without_following_its_target(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("external-link", resource_info(8, 0, stat.S_IFLNK))]}) as tree:
+            observation = self.crossing(run, run.derived, 8)
+            tree.scans.assert_called_once_with(run.derived)
+            tree.entries[run.derived / "external-link"].stat.assert_called_once_with(follow_symlinks=False)
+        self.assertEqual(observation["current_entry"]["type"], "symlink")
+        self.assertEqual(observation["logical_bytes"], 8)
+
+    def test_hardlinks_keep_existing_per_entry_allocation_accounting(self):
+        run = self.run_fixture()
+        same_inode = resource_info(7, 1, inode=101)
+        with injected_resource_tree({run.derived: [("original", same_inode), ("hardlink", same_inode)]}):
+            observation = self.crossing(run, run.derived, 1024)
+        self.assertEqual((observation["logical_bytes"], observation["allocated_bytes"], observation["entries"]), (14, 1024, 2))
+
+    def test_sparse_file_keeps_logical_length_even_when_no_blocks_are_allocated(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("sparse", resource_info(controller.GIB, 0))]}):
+            observation = self.crossing(run, run.derived, controller.GIB)
+        self.assertEqual(observation["logical_bytes"], controller.GIB)
+        self.assertEqual(observation["allocated_bytes"], 0)
+
+    def test_excluded_entry_is_not_statted_counted_or_descended(self):
+        run = self.run_fixture()
+        excluded = run.output / "DerivedData"
+        run.tick = Mock()
+        with injected_resource_tree({run.output: [("DerivedData", resource_info(99999, 999, stat.S_IFDIR)),
+                                                  ("kept", resource_info(3))]}) as tree:
+            observation = self.crossing(run, run.output, 3, "output", excluded=(excluded,))
+            tree.entries[excluded].stat.assert_not_called()
+            tree.scans.assert_called_once_with(run.output)
+        self.assertEqual(observation["entries"], 1)
+        self.assertEqual(observation["allocated_bytes"], 0)
+        self.assertEqual(run.tick.call_count, 3)
+
+    def test_callback_gets_exact_already_read_metadata_only_on_byte_crossing(self):
+        root = self.root / "virtual"
+        info = resource_info(11, 0)
+        callback, tick = Mock(), Mock()
+        with injected_resource_tree({root: [("entry", info)]}):
+            with self.assertRaises(controller.RunFailure):
+                controller.tree_size(root, 11, tick, on_cap=callback)
+        callback.assert_called_once_with(root, 11, 11, 0, 1, root / "entry", info)
+        self.assertIs(callback.call_args.args[-1], info)
+        self.assertEqual(tick.call_count, 2)
+        callback.reset_mock()
+        with injected_resource_tree({root: [("entry", info)]}):
+            self.assertEqual(controller.tree_size(root, 12, lambda: None, on_cap=callback)["logical_bytes"], 11)
+        callback.assert_not_called()
+
+    def test_entry_count_and_deadline_failures_do_not_create_byte_crossing_observations(self):
+        root = self.root / "virtual"
+        for mode in ("entry", "deadline"):
+            callback = Mock()
+            tick = Mock(side_effect=[None, controller.DeadlineFailure("scan expired")]) if mode == "deadline" else Mock()
+            with self.subTest(mode=mode), injected_resource_tree({root: [("large", resource_info(999))]}) as tree:
+                with self.assertRaises(controller.RunFailure) as caught:
+                    controller.tree_size(root, 1, tick, max_entries=0 if mode == "entry" else 10, on_cap=callback)
+                self.assertIn("entry-count" if mode == "entry" else "scan expired", str(caught.exception))
+                callback.assert_not_called()
+                if mode == "deadline":
+                    tree.entries[root / "large"].stat.assert_not_called()
+
+    def test_callback_base_exceptions_preserve_original_failure_type_and_message(self):
+        root = self.root / "virtual"
+        for secondary in (ValueError("format failed"), KeyboardInterrupt("cancel formatting"), SystemExit(91)):
+            with self.subTest(secondary=type(secondary).__name__), injected_resource_tree({root: [("entry", resource_info(1))]}):
+                with self.assertRaises(controller.RunFailure) as caught:
+                    controller.tree_size(root, 1, lambda: None, on_cap=Mock(side_effect=secondary))
+            self.assertIs(type(caught.exception), controller.RunFailure)
+            self.assertEqual(str(caught.exception), "Owned resource byte cap reached: " + str(root))
+
+    def test_first_observation_is_retained_after_later_crossings(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("first", resource_info(10))], run.output: [("later", resource_info(20))]}):
+            first = self.crossing(run, run.derived, 10)
+            self.crossing(run, run.output, 20, "output")
+        self.assertTrue(run.resource_cap_observed)
+        self.assertIs(run.record["resource_cap_crossing"], first)
+        self.assertEqual(first["current_entry"]["relative_path"], "first")
+
+    def test_failed_first_formatting_claims_slot_and_is_never_retried(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("too-wide-integer", resource_info(1 << 128))],
+                                     run.output: [("later-valid", resource_info(2))]}):
+            self.assertIsNone(self.crossing(run, run.derived, 1))
+            self.assertTrue(run.resource_cap_observed)
+            self.assertIsNone(self.crossing(run, run.output, 2, "output"))
+        self.assertNotIn("resource_cap_crossing", run.record)
+
+    def test_128_bit_integer_boundary_is_serialized_within_whole_wrapper_cap(self):
+        run = self.run_fixture()
+        value = (1 << 128) - 1
+        with injected_resource_tree({run.derived: [("max-integer", resource_info(value))]}):
+            observation = self.crossing(run, run.derived, value)
+        self.assertEqual(observation["logical_bytes"], value)
+        raw = json.dumps({"resource_cap_crossing": observation}, indent=2, ensure_ascii=True, allow_nan=False).encode("ascii")
+        self.assertLessEqual(len(raw), 4096)
+
+    def test_hostile_unicode_and_surrogate_path_is_escaped_relative_and_bounded(self):
+        run = self.run_fixture()
+        name = "\x1b[31m\n\r\t\\\u202e\ud800\U0001f600" + "界" * 300
+        with injected_resource_tree({run.derived: [(name, resource_info(1))]}):
+            observation = self.crossing(run, run.derived, 1)
+        entry = observation["current_entry"]
+        self.assertTrue(entry["path_truncated"])
+        self.assertEqual(entry["path_encoding"], "unicode_escape")
+        self.assertTrue(entry["relative_path"].isascii())
+        self.assertLessEqual(len(entry["relative_path"]), 1024)
+        self.assertEqual(entry["relative_path"], name[:256].encode("unicode_escape").decode("ascii")[:1024])
+        self.assertNotIn("\n", entry["relative_path"])
+        self.assertNotIn("\x1b", entry["relative_path"])
+        self.assertNotIn(str(run.derived), entry["relative_path"])
+        self.assertLessEqual(len(json.dumps({"resource_cap_crossing": observation}, indent=2, ensure_ascii=True).encode("ascii")), 4096)
+
+    def test_serialization_error_or_cancellation_never_replaces_cap_failure(self):
+        for secondary in (TypeError("cannot serialize"), KeyboardInterrupt("cancel serialization")):
+            run = self.run_fixture(output=False)
+            with self.subTest(secondary=type(secondary).__name__), injected_resource_tree({run.derived: [("entry", resource_info(1))]}), \
+                    patch.object(controller.json, "dumps", side_effect=secondary):
+                self.assertIsNone(self.crossing(run, run.derived, 1))
+                self.assertTrue(run.resource_cap_observed)
+
+    def test_oversized_serialized_observation_is_discarded_without_changing_cap_failure(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("entry", resource_info(1))]}), \
+                patch.object(controller.json, "dumps", return_value="x" * 4097):
+            self.assertIsNone(self.crossing(run, run.derived, 1))
+        self.assertTrue(run.resource_cap_observed)
+
+    def test_relative_path_formatting_error_preserves_cap_failure(self):
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("entry", resource_info(1))]}), \
+                patch.object(Path, "relative_to", side_effect=ValueError("bad relative path")):
+            self.assertIsNone(self.crossing(run, run.derived, 1))
+        self.assertTrue(run.resource_cap_observed)
+
+    def test_guard_records_derived_category_without_a_failure_path_write_or_extra_disk_query(self):
+        run = self.run_fixture()
+        run.disk_usage = Mock(return_value=SimpleNamespace(free=24 * controller.GIB))
+        with injected_resource_tree({run.output: [("DerivedData", resource_info(0, 0, stat.S_IFDIR))],
+                                     run.derived: [("crossing", resource_info(controller.DERIVED_CAP))]}) as tree, \
+                patch.object(controller, "write_json") as write:
+            with self.assertRaises(controller.RunFailure):
+                run.guard(force=True)
+            tree.entries[run.derived].stat.assert_not_called()  # Excluded during output scan.
+            self.assertEqual(tree.scans.call_args_list, [((run.output,),), ((run.derived,),)])
+            write.assert_not_called()
+        self.assertEqual(run.disk_usage.call_count, 2)
+        self.assertEqual(run.record["resource_cap_crossing"]["category"], "derived_data")
+        self.assertEqual(run.last_samples, [])
+        self.popen.assert_not_called()
+
+
 class CommandFailureTests(ControllerCase):
     @contextmanager
     def fake_child(self, *, active=False):
@@ -413,6 +650,119 @@ class CommandFailureTests(ControllerCase):
               patch.object(controller, "kill_owned", return_value=cleanup) as stop):
             yield SimpleNamespace(process=process, selector=selector, start=start, stop=stop,
                                   log_streams=log_streams, cleanup=cleanup)
+
+    def assert_cap_cleanup_precedes_receipt(self, receipt_error=None):
+        run = self.run_fixture()
+        original_errors, receipts = [], []
+        def guard_after_spawn():
+            if run.groups:
+                try:
+                    run.resource_size("derived_data", run.derived, 10)
+                except controller.RunFailure as error:
+                    original_errors.append(error)
+                    raise
+        run.guard = Mock(side_effect=guard_after_spawn)
+        with self.fake_child(active=True) as child, \
+                injected_resource_tree({run.derived: [("crossing", resource_info(10))]}):
+            def receipt():
+                crossing = run.record.get("resource_cap_crossing")
+                receipts.append(deepcopy(crossing))
+                if crossing is not None:
+                    child.stop.assert_called_once()
+                    self.assertTrue(run.record["commands"][0]["cleanup"]["success"])
+                    if receipt_error is not None:
+                        raise receipt_error
+                    json.dumps(run.record, ensure_ascii=True, allow_nan=False)
+            run.flush = Mock(side_effect=receipt)
+            with self.assertRaises(controller.RunFailure) as caught:
+                run.command(["injected-child"], "cap-during-build", cap=20)
+            child.start.assert_called_once()
+            child.stop.assert_called_once()
+            child.process.stdout.close.assert_called_once()
+            child.process.stderr.close.assert_called_once()
+        self.assertEqual(len(original_errors), 1)
+        self.assertIs(caught.exception, original_errors[0])
+        self.assertIs(type(caught.exception), controller.RunFailure)
+        self.assertEqual(str(caught.exception), "Owned resource byte cap reached: " + str(run.derived))
+        self.assertIsNone(receipts[0])
+        self.assertEqual(receipts[1]["category"], "derived_data")
+        self.assertEqual(run.record["commands"][0]["primary_error"],
+                         {"type": "RunFailure", "message": str(caught.exception)})
+        if receipt_error is not None:
+            self.assertTrue(any(item["operation"] == "command_receipt" for item in run.record["cleanup_errors"]))
+
+    def test_cap_observation_is_only_written_after_owned_group_cleanup(self):
+        self.assert_cap_cleanup_precedes_receipt()
+
+    def test_cap_primary_survives_receipt_oserror_after_required_cleanup(self):
+        self.assert_cap_cleanup_precedes_receipt(OSError("crossing receipt unavailable"))
+
+    def test_cap_primary_survives_receipt_serialization_error_after_required_cleanup(self):
+        self.assert_cap_cleanup_precedes_receipt(TypeError("crossing receipt cannot serialize"))
+
+    def test_cap_primary_survives_receipt_cancellation_after_required_cleanup(self):
+        self.assert_cap_cleanup_precedes_receipt(KeyboardInterrupt("cancel crossing receipt"))
+
+    def test_active_cap_keeps_primary_through_diagnostic_deadline_and_receipt_error(self):
+        run = self.run_fixture()
+        original_errors, format_attempts, final_attempts = [], [], []
+        real_dumps = json.dumps
+        def diagnostic_serialization(value, *args, **kwargs):
+            if isinstance(value, dict) and set(value) == {"resource_cap_crossing"}:
+                format_attempts.append(value)
+                raise controller.DeadlineFailure("diagnostic formatting deadline")
+            return real_dumps(value, *args, **kwargs)
+        def guard_after_spawn():
+            if run.groups:
+                try:
+                    run.resource_size("derived_data", run.derived, 10)
+                except controller.RunFailure as error:
+                    original_errors.append(error)
+                    raise
+        run.guard = Mock(side_effect=guard_after_spawn)
+        with self.fake_child(active=True) as child, \
+                injected_resource_tree({run.derived: [("crossing", resource_info(10))]}), \
+                patch.object(controller.json, "dumps", side_effect=diagnostic_serialization):
+            def receipt():
+                if run.groups:
+                    child.stop.assert_called_once()
+                    final_attempts.append(True)
+                    raise OSError("secondary receipt unavailable")
+            run.flush = Mock(side_effect=receipt)
+            with self.assertRaises(controller.RunFailure) as caught:
+                run.command(["injected-child"], "cap-diagnostic-failure", cap=20)
+            child.start.assert_called_once()
+            child.stop.assert_called_once()
+        self.assertEqual(len(format_attempts), 1)
+        self.assertEqual(final_attempts, [True])
+        self.assertEqual(len(original_errors), 1)
+        self.assertIs(caught.exception, original_errors[0])
+        self.assertIs(type(caught.exception), controller.RunFailure)
+        self.assertEqual(str(caught.exception), "Owned resource byte cap reached: " + str(run.derived))
+        self.assertTrue(run.resource_cap_observed)
+        self.assertNotIn("resource_cap_crossing", run.record)
+        self.assertEqual(run.record["commands"][0]["primary_error"],
+                         {"type": "RunFailure", "message": str(caught.exception)})
+        self.assertTrue(any(item["operation"] == "command_receipt" for item in run.record["cleanup_errors"]))
+
+    def test_in_command_log_scan_uses_observation_wrapper_and_cleans_before_receipt(self):
+        run = self.run_fixture()
+        run.guard = Mock()
+        logs = run.output / "logs"
+        with self.fake_child(active=True) as child, \
+                injected_resource_tree({logs: [("large-log", resource_info(controller.LOG_CAP))]}):
+            child.selector.select.return_value = []
+            def receipt():
+                if "resource_cap_crossing" in run.record:
+                    child.stop.assert_called_once()
+            run.flush = Mock(side_effect=receipt)
+            with self.assertRaises(controller.RunFailure) as caught:
+                run.command(["injected-child"], "cap-in-logs", cap=20)
+            child.stop.assert_called_once()
+        self.assertIs(type(caught.exception), controller.RunFailure)
+        self.assertEqual(str(caught.exception), "Owned resource byte cap reached: " + str(logs))
+        self.assertEqual(run.record["resource_cap_crossing"]["category"], "logs")
+        self.assertEqual(run.record["resource_cap_crossing"]["cap_bytes"], controller.LOG_CAP)
 
     def test_expired_phase_skips_command_receipt_write(self):
         run = self.run_fixture()
@@ -747,6 +1097,63 @@ class ActiveTimerTests(ControllerCase):
         for name in ("prepare", "build", "prepare_device", "test_and_collect", "cleanup"):
             setattr(run, name, Mock())
         return run
+
+    def assert_cap_primary_survives_finalization(self, secondary):
+        run = self.staged_run()
+        def cap_during_build():
+            run.resource_size("derived_data", run.derived, 10)
+        run.build.side_effect = cap_during_build
+        final_receipts = []
+        def final_receipt():
+            run.cleanup.assert_called_once()
+            final_receipts.append(deepcopy(run.record))
+            raise secondary
+        run.flush = Mock(side_effect=final_receipt)
+        with injected_resource_tree({run.derived: [("entry", resource_info(10))]}):
+            code = run.execute()
+        self.assertEqual(code, 1)
+        self.assertEqual(run.record["primary_error"], {"type": "RunFailure", "message": "Owned resource byte cap reached: " + str(run.derived)})
+        self.assertEqual(run.record["status"], "FAIL")
+        self.assertEqual(run.record["exit_code"], 1)
+        self.assertEqual(final_receipts[0]["status"], "FAIL")
+        self.assertEqual(final_receipts[0]["resource_cap_crossing"]["category"], "derived_data")
+        self.assertEqual(run.record["finalization_error"]["type"], type(secondary).__name__)
+        run.prepare_device.assert_not_called()
+        run.test_and_collect.assert_not_called()
+        self.popen.assert_not_called()
+        self.assertFalse(run.timer_enabled)
+        self.assertEqual(self.handlers.call_args.args, (signal.SIGALRM, self.previous_handler))
+
+    def test_cap_failure_cannot_become_success_after_final_receipt_oserror(self):
+        self.assert_cap_primary_survives_finalization(OSError("final crossing receipt unavailable"))
+
+    def test_cap_failure_cannot_become_success_after_final_serialization_error(self):
+        self.assert_cap_primary_survives_finalization(TypeError("final crossing receipt cannot serialize"))
+
+    def test_cap_failure_cannot_become_success_after_final_receipt_cancellation(self):
+        self.assert_cap_primary_survives_finalization(KeyboardInterrupt("cancel final crossing receipt"))
+
+    def test_cap_observation_reaches_real_result_json_through_existing_flush(self):
+        run = self.staged_run()
+        run.build.side_effect = lambda: run.resource_size("derived_data", run.derived, 10)
+        with injected_resource_tree({run.derived: [("entry", resource_info(10))]}):
+            code = run.execute()
+        self.assertEqual(code, 1)
+        run.cleanup.assert_called_once()
+        run.prepare_device.assert_not_called()
+        run.test_and_collect.assert_not_called()
+        saved = json.loads((run.output / "result.json").read_text())
+        self.assertEqual(saved["status"], "FAIL")
+        self.assertEqual(saved["exit_code"], 1)
+        self.assertEqual(saved["primary_error"],
+                         {"type": "RunFailure", "message": "Owned resource byte cap reached: " + str(run.derived)})
+        self.assertEqual(saved["resource_cap_crossing"], run.record["resource_cap_crossing"])
+        self.assertEqual(saved["resource_cap_crossing"]["traversal"], "partial")
+        self.assertEqual(saved["resource_cap_crossing"]["category"], "derived_data")
+        self.assertEqual(saved["resource_cap_crossing"]["logical_bytes"], 10)
+        self.assertEqual(saved["resource_cap_crossing"]["current_entry"]["relative_path"], "entry")
+        self.assertEqual(saved["cleanup_errors"], [])
+        self.popen.assert_not_called()
 
     def test_execute_arms_timer_and_restores_previous_handler_after_success(self):
         run = self.staged_run()

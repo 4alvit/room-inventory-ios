@@ -107,7 +107,7 @@ def validate_grant(grant, *, now, script_root):
     return grant
 
 
-def tree_size(root, cap, tick, *, max_entries=100000, excluded=()):
+def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None):
     """Bounded lstat traversal. Do not follow symlinks or require native size probes."""
     if not root.exists() and not root.is_symlink():
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0}
@@ -133,7 +133,16 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=()):
                     pending.append(path)
                 else:
                     logical += info.st_size
-                require(max(logical, allocated) < cap, "Owned resource byte cap reached: " + str(root))
+                if max(logical, allocated) >= cap:
+                    primary = RunFailure("Owned resource byte cap reached: " + str(root))
+                    try:
+                        if on_cap is not None:
+                            on_cap(root, cap, logical, allocated, entries, path, info)
+                    except BaseException:
+                        # Diagnostics, including interruption while formatting,
+                        # must not replace this failure or prevent group cleanup.
+                        pass
+                    raise primary
     return {"logical_bytes": logical, "allocated_bytes": allocated, "entries": entries}
 
 
@@ -286,6 +295,7 @@ class RecoveryRun:
         self.groups = []
         self.last_resource_check = float("-inf")
         self.last_samples = []
+        self.resource_cap_observed = False
         self.cleanup_mode = False
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -307,6 +317,45 @@ class RecoveryRun:
     def tick(self):
         require(self.clock() < min(self.phase_end, self.outer_end, self.command_deadline or self.outer_end), "Absolute phase/outer deadline exceeded", DeadlineFailure)
 
+    def record_resource_cap(self, category, root, cap, logical, allocated, entries, path, info):
+        if self.resource_cap_observed:
+            return
+        # Claim the first crossing even if its optional formatting fails. Use
+        # only this traversal's data, never a retry or a second filesystem probe.
+        self.resource_cap_observed = True
+        numbers = (cap, logical, allocated, entries, info.st_size, info.st_blocks)
+        require(all(type(value) is int and value.bit_length() <= 128 for value in numbers),
+                "Resource observation integer out of bounds")
+        require(type(category) is str and len(category) <= 64 and category.isascii(),
+                "Resource observation category out of bounds")
+        relative = path.relative_to(root)
+        require(not relative.is_absolute() and ".." not in relative.parts,
+                "Resource observation path is not relative")
+        text = str(relative)
+        escaped = text[:256].encode("unicode_escape").decode("ascii")
+        entry_type = {stat.S_IFREG: "regular_file", stat.S_IFDIR: "directory",
+                      stat.S_IFLNK: "symlink", stat.S_IFIFO: "fifo", stat.S_IFSOCK: "socket",
+                      stat.S_IFCHR: "character_device", stat.S_IFBLK: "block_device"}.get(
+                          stat.S_IFMT(info.st_mode), "unknown")
+        observation = {
+            "traversal": "partial", "category": category, "cap_bytes": cap,
+            "logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
+            "current_entry": {"relative_path": escaped[:1024], "path_encoding": "unicode_escape",
+                              "path_truncated": len(text) > 256 or len(escaped) > 1024,
+                              "type": entry_type, "size_bytes": info.st_size,
+                              "blocks_512": info.st_blocks},
+        }
+        # Bound the complete JSON contribution before adding it to the existing
+        # receipt. This is memory-only; command cleanup still precedes its write.
+        encoded = json.dumps({"resource_cap_crossing": observation}, indent=2,
+                             ensure_ascii=True, allow_nan=False)
+        require(len(encoded) <= 4096, "Resource observation JSON out of bounds")
+        self.record["resource_cap_crossing"] = observation
+
+    def resource_size(self, category, root, cap, **kwargs):
+        return tree_size(root, cap, self.tick, **kwargs,
+                         on_cap=lambda *data: self.record_resource_cap(category, *data))
+
     def guard(self, force=False):
         self.tick()
         # Cleanup still enforces time but must remain possible after disk abort.
@@ -317,17 +366,17 @@ class RecoveryRun:
         if force or self.clock() - self.last_resource_check >= 2:
             self.last_resource_check = self.clock()
             sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
-                      "output": tree_size(self.output, OUTPUT_CAP, self.tick, excluded=(self.derived,)),
-                      "derived_data": tree_size(self.derived, DERIVED_CAP, self.tick)}
+                      "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,)),
+                      "derived_data": self.resource_size("derived_data", self.derived, DERIVED_CAP)}
             if self.device_root:
-                sample["device"] = tree_size(self.device_root, DEVICE_CAP, self.tick)
+                sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
             for name, root, limit in [
                 ("original_xcresult", self.output / "original.xcresult", XCRESULT_CAP),
                 ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP),
                 ("attachments", self.output / "evidence/collection/xcresult/attachments", ATTACHMENT_CAP),
                 ("logs", self.output / "logs", LOG_CAP),
             ]:
-                sample[name] = tree_size(root, limit, self.tick)
+                sample[name] = self.resource_size(name, root, limit)
             self.last_samples.append(sample)
             require(len(self.last_samples) <= 2000, "Resource observation cap exceeded")
             write_json(self.output / "resource-samples.json", self.last_samples)
@@ -406,7 +455,7 @@ class RecoveryRun:
                     require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
                     streams[index].write(data)
                     buffers[index].extend(data)
-                tree_size(logs, LOG_CAP, self.tick, max_entries=256)
+                self.resource_size("logs", logs, LOG_CAP, max_entries=256)
             record["exit_code"] = process.wait(timeout=0)
             require(record["exit_code"] in allowed_codes, "Command failed: " + name)
         except BaseException as error:

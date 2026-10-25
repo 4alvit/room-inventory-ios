@@ -148,6 +148,39 @@ not a claim about the combined live disk footprint. The free-space floor also
 applies while retaining evidence. Admission must leave room for the source data
 and retained copy to coexist.
 
+When a controller traversal reaches a byte cap, it attempts to add one
+`resource_cap_crossing` observation to the existing `result.json` receipt. It
+records the category and cap, accumulated logical and allocated bytes, entry
+count, and the current entry's relative path, type, size and 512-byte block
+count. These values come from the traversal and stat result already in memory;
+there is no additional walk, stat, disk query or command. The observation is
+explicitly a **partial traversal**, not the total tree size or a largest-file
+listing. The entry that crosses the threshold is not necessarily the largest
+entry or the cause of the resource growth.
+
+The first crossing claims this diagnostic slot even if formatting fails. Path
+text uses Python `unicode_escape` notation, bounded to the first 256 source
+characters and 1,024 escaped ASCII characters, with an explicit truncation flag.
+Numeric fields are bounded to 128 bits and the JSON contribution is limited to
+4 KiB. The observation contains no file contents or absolute entry path.
+Capture is memory-only: the existing command receipt writes after owned-group
+cleanup, and the existing final receipt/retention path carries available data.
+Formatting, interruption or receipt failure does not replace the original
+`RunFailure` message or bypass cleanup. An unsuccessful final receipt or upload
+can still leave this observation unavailable; its existence in memory is not
+proof of durable evidence. Complete `resource-samples.json` entries retain their
+existing meaning; a failed traversal is not appended as a complete sample.
+
+Accounting and enforcement are unchanged: reaching a cap exactly fails, logical
+bytes sum non-directory entry sizes, and allocated bytes sum every visited
+entry's block count times 512, including directories. Symlinks contribute their
+own metadata without following their targets. Hardlinks are counted per entry,
+without inode deduplication; sparse files can reach the logical cap while using
+fewer allocated blocks. Exclusions, entry/time limits and all storage caps remain
+unchanged. A cap failure alone does not establish physical disk exhaustion. For
+an earlier failure without a crossing observation, the last complete sample or
+last build-log line cannot identify the missing entry, exact size or cause.
+
 ## Retention on an ephemeral runner
 
 A hosted runner's live simulator and DerivedData will be unavailable after the

@@ -28,9 +28,15 @@ final class PrivacySupportUITests: XCTestCase {
         let evidencePrefix = "privacy-\(russian ? "ru" : "en")\(maximumDynamicType ? "-AXXXL" : "")"
         defer { keepEvidence(evidencePrefix + "-final", app: app) }
 
+        let dashboard = app.collectionViews.firstMatch
+        XCTAssertTrue(dashboard.waitForExistence(timeout: 10))
         let addHome = app.buttons["inventory.addFirstHome"]
+        // At accessibility text sizes, the empty-state explanation fills the
+        // viewport and List has not yet materialized the button below it.
+        reveal(addHome, in: dashboard, app: app, requiresHitTarget: true)
         XCTAssertTrue(addHome.waitForExistence(timeout: 10), "Expected a fresh isolated inventory")
         XCTAssertEqual(addHome.label, russian ? "Добавить первый дом" : "Add your first home")
+        XCTAssertTrue(addHome.isEnabled, "The fresh inventory must finish loading")
         let entry = app.buttons["inventory.privacySupport"]
         XCTAssertEqual(entry.label, russian ? "Конфиденциальность и поддержка" : "Privacy and support")
         tap(entry)
@@ -86,7 +92,10 @@ final class PrivacySupportUITests: XCTestCase {
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: content)
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 10), .completed)
         XCTAssertTrue(entry.isHittable, "The dashboard must remain reachable after dismissal")
+        reveal(addHome, in: dashboard, app: app, requiresHitTarget: true)
         XCTAssertTrue(addHome.exists, "Reading privacy information must not create inventory records")
+        XCTAssertEqual(addHome.label, russian ? "Добавить первый дом" : "Add your first home")
+        XCTAssertTrue(addHome.isEnabled)
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {

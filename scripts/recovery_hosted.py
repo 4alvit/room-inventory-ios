@@ -258,9 +258,12 @@ class Discovery:
 
     def command(self, args, name, cap=20, *, retain_output=True):
         self.check()
-        end = min(self.alarm.end, self.alarm.clock() + cap)
+        start = self.alarm.clock()
+        end = min(self.alarm.end, start + cap)
         require(end - self.alarm.clock() >= 8, "Insufficient discovery/cleanup budget", Deadline)
-        record = {"name": name, "args": [str(a) for a in args], "exit_code": None, "primary_error": None}
+        record = {"name": name, "args": [str(a) for a in args], "exit_code": None, "primary_error": None,
+                  "timing": {"start": start, "work_deadline": end - 4,
+                             "command_deadline": end, "requested_cap": cap}}
         self.records.append(record)
         buffers, process, selector, primary = [bytearray(), bytearray()], None, None, None
         state = {}
@@ -321,6 +324,9 @@ class Discovery:
                     self.cleanup_errors.append({"command": name, "operation": operation, "error": str(error)})
             signal.setitimer(signal.ITIMER_REAL, 0)
             try:
+                # Sample only after owned-group cleanup. Receipt failures must
+                # not prevent cleanup or replace an existing command error.
+                record["timing"]["finish"] = self.alarm.clock()
                 self.alarm.arm()
                 self.check()
                 for suffix, data in zip(("stdout", "stderr"), buffers):
@@ -491,14 +497,15 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             temporary = Path(env["RUNNER_TEMP"])
             proposed, upload = temporary / "room-recovery-work", temporary / "room-recovery-upload"
             require(not any(p.exists() or p.is_symlink() for p in (proposed, upload)), "Attempt output already exists", Failure)
-            require(disk_usage(temporary).free >= profile["admission_free_bytes"], "Admission requires 24 GiB free", Failure)
+            admission_free_bytes = disk_usage(temporary).free
+            require(admission_free_bytes >= profile["admission_free_bytes"], "Admission requires 24 GiB free", Failure)
             proposed.mkdir(mode=0o700)
             work = proposed
             preflight = work / "preflight"
             preflight.mkdir(mode=0o700)
             context = {"source_commit": env["GITHUB_SHA"], "source_tree": env["RECOVERY_TESTED_TREE"],
                        "profile_sha256": expected, "hosted_identity": host, "controller_exit_code": None,
-                       "primary_error": None, "cleanup_errors": []}
+                       "primary_error": None, "cleanup_errors": [], "admission_free_bytes": admission_free_bytes}
             workflow_raw = bounded_read(root / profile["workflow_path"])
             context["workflow_sha256"] = controller.sha(workflow_raw)
             (preflight / "recovery-hosted-profile.json").write_bytes(profile_raw)
@@ -525,7 +532,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             xcode_version = discovery.command(["xcodebuild", "-version"], "xcode-version", 10).decode().strip()
             require(re.fullmatch(r"Xcode [0-9.]+\nBuild version [A-Za-z0-9]+", xcode_version), "Invalid Xcode version response", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
-            inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 20))
+            inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 60))
             selection = select_runtime(inventory, sdk)
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)

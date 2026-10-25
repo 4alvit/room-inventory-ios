@@ -101,11 +101,44 @@ its own final 60-second cleanup reserve. The adapter step is capped at 36 minute
 upload at 5 minutes and the whole job at 45 minutes, leaving room for checkout and
 Python setup. Each boundary fails rather than beginning an unbounded retry.
 
+The single full `xcrun simctl list --json` inventory command has a nominal
+60-second cap: at most 56 seconds of work and the existing four seconds reserved
+for cleanup. This is a bounded allowance adjustment, not evidence that an earlier
+stall has been explained or fixed. Runtime and device compatibility validation
+still uses that complete response. No additional query or retry is performed.
+All other command caps remain unchanged. In particular, the XcodeGen installer
+requests 70 seconds within the same absolute 120-second discovery window.
+
+For each command, its deadline is the earlier of start plus its requested cap
+and the absolute discovery deadline; work must finish four seconds before that.
+The adapter refuses to start a command with fewer than eight seconds remaining
+in its effective cap. Command caps are ceilings, not reserved consecutive slots:
+their worst-case sum exceeds 120 seconds. If inventory returns at elapsed 90
+seconds, the installer has at most 26 seconds of work and four of cleanup; at
+elapsed 113 seconds it cannot start. A successful command or receipt does not
+renew the discovery window. Before constructing the controller the adapter still
+requires at least 1,980 seconds remaining in the overall 2,100-second envelope,
+preserving the full controller and retention budgets. Slow discovery fails
+instead of borrowing either reserve.
+
+Each command receipt adds only five numeric fields from the existing monotonic
+clock: start, work deadline, command deadline, requested cap in seconds, and
+finish. Finish is sampled after command cleanup and before receipt persistence;
+it is not the end of the adapter or retention phase. These clock values are
+local to this process and are not wall-clock timestamps. If receipt capture
+fails or is interrupted, cleanup has already been attempted and the existing
+primary error keeps precedence. Receipt failure cannot turn a command into a
+success. A recorded `group_probe` permission error remains a cleanup failure
+even if later observations say the group is absent and its leader was reaped.
+
 The controller's 24 GiB free-space admission, 8 GiB free-space abort floor, owned
 device/DerivedData/output caps and xcresult subcaps remain in force. Availability
 on a particular hosted runner is not guaranteed. Failure to meet admission is a
 failed scenario, not evidence that recovery passed. No unrelated SDKs, runtimes,
 devices or files are deleted to manufacture admission space.
+The numeric `admission_free_bytes` in the adapter context is the value from the
+existing admission disk query, not a second sample. It is retained only after
+the same 24 GiB guard has passed; no output directory is created before admission.
 
 The 1 GiB controller-output cap excludes its separately capped 4 GiB DerivedData
 and 8 GiB device. Hosted preflight data is separately limited to 16 MiB, compact

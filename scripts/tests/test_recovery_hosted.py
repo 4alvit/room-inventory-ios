@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import errno
 import importlib.util
 import json
 from pathlib import Path
@@ -233,6 +234,94 @@ class SelectionTests(HostedCase):
 
 
 class IntegrationTests(HostedCase):
+    def test_inventory_and_installer_request_fixed_caps_once(self):
+        self.fake_execution()
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 0, result)
+        calls = hosted.Discovery.command.call_args_list
+        inventory = [call for call in calls if call.args[2] == "simulator-inventory"]
+        installer = [call for call in calls if call.args[2] == "install-xcodegen"]
+        self.assertEqual(len(inventory), 1)
+        self.assertEqual(inventory[0].args[1], ["xcrun", "simctl", "list", "--json"])
+        self.assertEqual(inventory[0].args[3], 60)
+        self.assertEqual(len(installer), 1)
+        self.assertEqual(installer[0].args[3], 70)
+
+    def test_inventory_timeout_is_not_retried_or_followed_by_controller(self):
+        self.fake_execution()
+        ordinary = hosted.Discovery.command.side_effect
+        def timeout(instance, args, name, cap=20):
+            if name == "simulator-inventory":
+                self.calls.append((name, args, dict(instance.env)))
+                self.assertEqual(cap, 60)
+                raise hosted.Deadline("injected inventory work deadline")
+            return ordinary(instance, args, name, cap)
+        hosted.Discovery.command.side_effect = timeout
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 124)
+        self.assertEqual(sum(name == "simulator-inventory" for name, _, _ in self.calls), 1)
+        self.assertFalse(any(name == "install-xcodegen" for name, _, _ in self.calls))
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
+        self.assertIsNone(self.package.call_args.args[2]["controller_exit_code"])
+
+    def test_controller_is_refused_when_discovery_exit_leaves_less_than_1980_seconds(self):
+        self.fake_execution()
+        original_exit = hosted.Alarm.__exit__
+        def exit_with_scheduling_delay(alarm, *args):
+            original_exit(alarm, *args)
+            if alarm.end == 220.0:
+                self.clock.advance(120.001)
+        self.mock(hosted.Alarm, "__exit__", autospec=True, side_effect=exit_with_scheduling_delay)
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 124)
+        self.assertIn("Insufficient full controller and retention budget", result["primary_error"]["message"])
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
+
+    def test_exact_1980_seconds_remaining_allows_controller(self):
+        self.fake_execution()
+        original_exit = hosted.Alarm.__exit__
+        def exit_at_boundary(alarm, *args):
+            original_exit(alarm, *args)
+            if alarm.end == 220.0:
+                self.clock.advance(120)
+        self.mock(hosted.Alarm, "__exit__", autospec=True, side_effect=exit_at_boundary)
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 0, result)
+        self.runner.execute.assert_called_once()
+
+    def test_admission_exact_24_gib_retains_first_sample_without_requery(self):
+        self.fake_execution()
+        paths = []
+        def disk_usage(path):
+            paths.append(path)
+            if path == self.temp:
+                self.assertEqual(paths.count(self.temp), 1, "admission sample must not be read twice")
+                self.assertFalse((self.temp / "room-recovery-work").exists())
+                return SimpleNamespace(free=24 * hosted.controller.GIB)
+            return SimpleNamespace(free=8 * hosted.controller.GIB + 17)
+        result = hosted.run_hosted(self.profile_sha, root=self.root, env=self.env,
+                                   clock=self.clock, disk_usage=disk_usage)
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(paths.count(self.temp), 1)
+        context = self.package.call_args.args[2]
+        self.assertEqual(context["admission_free_bytes"], 24 * hosted.controller.GIB)
+        persisted = json.loads((self.temp / "room-recovery-work/preflight/adapter-result.json").read_text())
+        self.assertEqual(persisted["admission_free_bytes"], context["admission_free_bytes"])
+
+    def test_below_admission_is_sampled_once_and_never_creates_output(self):
+        self.fake_execution()
+        disk = Mock(return_value=SimpleNamespace(free=24 * hosted.controller.GIB - 1))
+        result = hosted.run_hosted(self.profile_sha, root=self.root, env=self.env,
+                                   clock=self.clock, disk_usage=disk)
+        self.assertEqual(result["exit_code"], 2)
+        disk.assert_called_once_with(self.temp)
+        self.assertFalse(list(self.temp.iterdir()))
+        self.assertFalse(self.calls)
+        self.runner_class.assert_not_called()
+        self.package.assert_not_called()
+
     def test_full_injected_path_validates_grant_and_packages_bound_source(self):
         self.fake_execution()
         validator = self.mock(hosted.controller, "validate_grant", wraps=hosted.controller.validate_grant)
@@ -412,6 +501,198 @@ class CommandTests(HostedCase):
         self.mock(hosted.selectors, "DefaultSelector", return_value=self.selector)
         self.mock(hosted.os, "set_blocking")
         self.cleanup = self.mock(hosted.controller, "kill_owned", return_value={"success": True})
+
+    def process_finishes_after(self, seconds):
+        """Advance the injected selector wait; no process or real wait occurs."""
+        self.fake_process()
+        self.selector.get_map.side_effect = [{"open-pipe": True}, {}]
+        def select(_timeout):
+            self.clock.advance(seconds)
+            return []
+        self.selector.select.side_effect = select
+
+    def assert_inventory_success_after(self, seconds):
+        discovery = self.discovery()
+        self.process_finishes_after(seconds)
+        def cleanup(*args, **kwargs):
+            self.clock.advance(.25)
+            return {"success": True}
+        self.cleanup.side_effect = cleanup
+        result = discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", cap=60)
+        self.assertEqual(result, b"")
+        timing = discovery.records[0]["timing"]
+        self.assertEqual(timing, {"start": 100.0, "work_deadline": 156.0,
+                                  "command_deadline": 160.0, "requested_cap": 60,
+                                  "finish": 100.0 + seconds + .25})
+        persisted = json.loads((discovery.output / "commands.json").read_text())
+        self.assertEqual(persisted[0]["timing"], timing)
+        self.cleanup.assert_called_once()
+        self.assertEqual(self.cleanup.call_args.args[1], 160.0)
+        self.popen.assert_called_once()
+
+    def test_inventory_success_after_26_seconds(self):
+        self.assert_inventory_success_after(26)
+
+    def test_inventory_success_after_34_seconds(self):
+        self.assert_inventory_success_after(34)
+
+    def test_inventory_success_after_55_seconds(self):
+        self.assert_inventory_success_after(55)
+
+    def test_inventory_timeout_at_56_seconds_preserves_four_second_cleanup_window(self):
+        discovery = self.discovery()
+        self.process_finishes_after(56)
+        def cleanup(*args, **kwargs):
+            self.assertEqual(self.clock(), 156.0)
+            self.assertEqual(args[1] - self.clock(), 4.0)
+            self.clock.advance(.5)
+            return {"success": True}
+        self.cleanup.side_effect = cleanup
+        with self.assertRaisesRegex(hosted.Deadline, "Discovery command deadline"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        record = discovery.records[0]
+        self.assertEqual(record["primary_error"]["type"], "DeadlineFailure")
+        self.assertEqual(record["timing"]["finish"], 156.5)
+        self.assertEqual(record["timing"]["command_deadline"], 160.0)
+        self.cleanup.assert_called_once()
+        self.popen.assert_called_once()
+
+    def test_inventory_cap_is_truncated_by_absolute_120_second_window(self):
+        discovery = self.discovery()
+        self.clock.advance(70)
+        self.process_finishes_after(46)
+        with self.assertRaises(hosted.Deadline):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        timing = discovery.records[0]["timing"]
+        self.assertEqual(timing["start"], 170.0)
+        self.assertEqual(timing["requested_cap"], 60)
+        self.assertEqual(timing["work_deadline"], 216.0)
+        self.assertEqual(timing["command_deadline"], 220.0)
+        self.assertEqual(self.cleanup.call_args.args[1], 220.0)
+        self.assertEqual(discovery.alarm.end, 220.0)
+
+    def test_installer_70_second_request_shares_absolute_120_second_deadline(self):
+        discovery = self.discovery()
+        self.clock.advance(90)
+        self.process_finishes_after(25)
+        discovery.command(["fake-installer"], "install-xcodegen", cap=70)
+        timing = discovery.records[0]["timing"]
+        self.assertEqual(timing, {"start": 190.0, "work_deadline": 216.0,
+                                  "command_deadline": 220.0, "requested_cap": 70, "finish": 215.0})
+        self.assertEqual(self.cleanup.call_args.args[1], 220.0)
+        self.assertEqual(discovery.alarm.end, 220.0)
+
+    def test_installer_stops_at_truncated_work_deadline(self):
+        discovery = self.discovery()
+        self.clock.advance(90)
+        self.process_finishes_after(26)
+        with self.assertRaises(hosted.Deadline):
+            discovery.command(["fake-installer"], "install-xcodegen", cap=70)
+        self.assertEqual(discovery.records[0]["timing"]["work_deadline"], 216.0)
+        self.assertEqual(self.cleanup.call_args.args[1], 220.0)
+        self.popen.assert_called_once()
+
+    def test_installer_is_refused_with_less_than_eight_seconds_remaining(self):
+        discovery = self.discovery()
+        self.clock.advance(112.001)
+        self.fake_process()
+        with self.assertRaisesRegex(hosted.Deadline, "Insufficient discovery/cleanup budget"):
+            discovery.command(["fake-installer"], "install-xcodegen", cap=70)
+        self.popen.assert_not_called()
+        self.cleanup.assert_not_called()
+        self.assertEqual(discovery.records, [])
+
+    def test_cancellation_before_spawn_leaves_no_owned_group(self):
+        discovery = self.discovery()
+        self.fake_process()
+        self.mock(hosted.selectors, "DefaultSelector", side_effect=KeyboardInterrupt("cancel before spawn"))
+        with self.assertRaisesRegex(KeyboardInterrupt, "cancel before spawn"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        self.popen.assert_not_called()
+        self.cleanup.assert_not_called()
+        self.assertEqual(discovery.records[0]["primary_error"]["type"], "KeyboardInterrupt")
+        self.assertEqual(discovery.records[0]["timing"]["finish"], 100.0)
+
+    def test_cancellation_after_spawn_still_cleans_owned_group(self):
+        discovery = self.discovery()
+        self.fake_process()
+        self.selector.register.side_effect = KeyboardInterrupt("cancel after spawn")
+        with self.assertRaisesRegex(KeyboardInterrupt, "cancel after spawn"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        self.popen.assert_called_once()
+        self.cleanup.assert_called_once()
+        self.process.stdout.close.assert_called_once()
+        self.process.stderr.close.assert_called_once()
+        self.assertEqual(discovery.records[0]["primary_error"]["type"], "KeyboardInterrupt")
+
+    def assert_primary_survives_eperm_and_finish_failure(self, finish_error):
+        discovery = self.discovery()
+        actual_cleanup = hosted.controller.kill_owned
+        self.fake_process()
+        self.process.wait.return_value = 7
+        probes = []
+        def killpg(pgid, sig):
+            probes.append((pgid, sig))
+            if sig == 0:
+                if len([item for item in probes if item[1] == 0]) == 1:
+                    raise PermissionError(errno.EPERM, "injected probe denied")
+                raise ProcessLookupError(errno.ESRCH, "injected final absence")
+        self.cleanup.side_effect = lambda process, end, **kwargs: actual_cleanup(
+            process, end, state=kwargs["state"], clock=kwargs["clock"],
+            sleep=self.clock.advance, killpg=killpg)
+        fail_next = False
+        def cancel_finish():
+            nonlocal fail_next
+            fail_next = True
+        def clock():
+            nonlocal fail_next
+            if fail_next:
+                fail_next = False
+                raise finish_error
+            return self.clock()
+        discovery.alarm.clock = clock
+        self.process.stderr.close.side_effect = cancel_finish
+        with self.assertRaisesRegex(hosted.controller.RunFailure, "Discovery command failed: simulator-inventory"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        record = discovery.records[0]
+        cleanup = record["cleanup"]
+        self.assertFalse(cleanup["success"])
+        self.assertEqual(cleanup["group_state"], "absent")
+        self.assertTrue(cleanup["leader_reaped"])
+        self.assertEqual(cleanup["errors"][0]["errno"], errno.EPERM)
+        self.assertEqual(record["primary_error"]["type"], "RunFailure")
+        self.assertNotIn("finish", record["timing"])
+        self.assertEqual([error["operation"] for error in discovery.cleanup_errors], ["owned_group", "receipt"])
+        self.cleanup.assert_called_once()
+        self.assertTrue(probes, "the real cleanup algorithm must use only the injected probe")
+
+    def test_primary_failure_survives_sticky_eperm_and_finish_clock_error(self):
+        self.assert_primary_survives_eperm_and_finish_failure(RuntimeError("finish clock failed"))
+
+    def test_primary_failure_survives_sticky_eperm_and_finish_cancellation(self):
+        self.assert_primary_survives_eperm_and_finish_failure(KeyboardInterrupt("cancel finish metadata"))
+
+    def test_finish_metadata_cancellation_after_success_is_not_swallowed(self):
+        discovery = self.discovery()
+        self.fake_process()
+        fail_next = False
+        def last_close():
+            nonlocal fail_next
+            fail_next = True
+        def clock():
+            nonlocal fail_next
+            if fail_next:
+                fail_next = False
+                raise KeyboardInterrupt("cancel finish after cleanup")
+            return self.clock()
+        discovery.alarm.clock = clock
+        self.process.stderr.close.side_effect = last_close
+        with self.assertRaisesRegex(KeyboardInterrupt, "cancel finish after cleanup"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=60)
+        self.cleanup.assert_called_once()
+        self.assertTrue(discovery.records[0]["cleanup"]["success"])
+        self.assertEqual(discovery.cleanup_errors[-1]["operation"], "receipt")
+        self.assertNotIn("finish", discovery.records[0]["timing"])
 
     def test_no_popen_when_insufficient_time_or_disk(self):
         discovery = self.discovery()

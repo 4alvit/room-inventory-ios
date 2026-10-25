@@ -21,6 +21,7 @@ acceptance and App Review remain separate requirements.
 
 ### Fixed
 
+- Unsigned Release previews omit build-machine paths and code-coverage data; packaging rejects app payloads that retain them.
 - PDF fonts preserve exact Cyrillic text for copying and searching, including the letter к.
 
 - Singular inventory counts and word-aware PDF line wrapping.

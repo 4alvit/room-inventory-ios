@@ -236,6 +236,27 @@ acceptance gate after the bounded run;
 separately. The test's own deadline is a backstop, not a substitute for the outer
 controller. No result from an interrupted attempt may be promoted to PASS.
 
+Exception receipts may add `exception_origin` beside the unchanged `primary_error`
+object, or inside an existing cleanup/finalization error receipt. This optional
+metadata records a closed reason, capture site and last reached stage, plus at
+most eight source basename/line pairs from at most 32 traceback nodes. Only the
+four recovery modules are mapped; external frames have no filename or line.
+No exception values, arguments, locals, source text or absolute host paths are
+added. Fixed labels, frame counts and line bounds keep each observation below
+2 KiB, including its indentation in the existing JSON receipts. Truncated or
+unmapped origins are marked explicitly; an unreached innermost frame is unknown.
+
+`last_stage` is a checkpoint, not proof of the instruction that raised: a finally
+block may advance it before an outer catch. Compare the source frames and the
+earliest command/cleanup observation with the outer observation. A child's zero
+exit and successful group cleanup still do not establish successful command
+return, device boot or shutdown. These diagnostics do not change deadlines,
+signals, commands, cleanup or acceptance. Capture is best effort after an error
+is recorded and uses existing receipt writes only; failed/interrupted final
+writes may leave the observation only in memory. Retention preserves `run/result.json`
+bytes and accepts additive fields without relaxing its existing gates. The hosted
+adapter's summary is not a substitute for that retained controller receipt.
+
 ### Owned cleanup
 
 After evidence collection, terminate only the app/test runner and groups launched

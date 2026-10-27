@@ -51,6 +51,55 @@ class ResourceAccountingFailure(RunFailure):
     """An allocated disk budget cannot be established from this filesystem stat."""
 
 
+# Diagnostic labels are closed; never derive them from commands or exception text.
+ORIGIN_SOURCES = {str(Path(__file__).with_name(name)): name for name in (
+    "run-recovery-journey.py", "recovery_hosted.py", "recovery_collector.py", "recovery_retention.py")}
+ORIGIN_FILENAME_LIMIT = max(map(len, ORIGIN_SOURCES))
+ORIGIN_STAGES = frozenset((
+    "unstarted", "prepare", "build", "prepare_device", "test_collect", "phase",
+    "precommand", "command_setup", "command_spawn", "command_loop", "command_wait",
+    "command_cleanup", "selector_cleanup", "stream_cleanup", "group_cleanup",
+    "command_receipt", "command_return", "cleanup", "device_initial_state",
+    "device_shutdown", "device_final_state", "final_group_cleanup", "final_receipt"))
+ORIGIN_SITES = frozenset(("command", "command_cleanup", "operation", "device_cleanup", "cleanup", "finalization"))
+
+
+def exception_origin(error, site, stage):
+    """Bounded metadata only: no traceback formatting, source reads or values.
+
+    Visit at most 32 nodes and retain at most eight frames. If the innermost
+    frame was not reached or mapped, do not claim a known origin. Stage is the
+    last reached checkpoint; a finally block may have advanced it after a throw.
+    """
+    reason = ("deadline" if isinstance(error, DeadlineFailure) else
+              "configuration" if isinstance(error, ConfigurationFailure) else
+              "run_failure" if isinstance(error, RunFailure) else
+              "os_error" if isinstance(error, OSError) else
+              "interruption" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "exception")
+    frames, visited, unmapped = [], 0, False
+    node = BaseException.__traceback__.__get__(error)
+    while node is not None and visited < 32:
+        # A fixed filename allowlist excludes absolute paths and external names.
+        filename = node.tb_frame.f_code.co_filename
+        source = ORIGIN_SOURCES.get(filename, "external") if len(filename) <= ORIGIN_FILENAME_LIMIT else "external"
+        line = node.tb_lineno if source != "external" and 0 < node.tb_lineno <= 9999999 else 0
+        unmapped = unmapped or source == "external" or line == 0
+        frames.append({"source": source, "line": line})
+        if len(frames) > 8:
+            del frames[0]
+        visited += 1
+        node = node.tb_next
+    return {
+        "reason": reason,
+        "capture_site": site if type(site) is str and len(site) <= 32 and site in ORIGIN_SITES else "unknown",
+        "last_stage": stage if type(stage) is str and len(stage) <= 32 and stage in ORIGIN_STAGES else "unknown",
+        "frames": frames, "frames_truncated": visited > 8 or node is not None,
+        "tail_unvisited": node is not None, "traceback_unavailable": visited == 0,
+        "unmapped_frames": unmapped,
+        "origin_known": bool(frames and node is None and frames[-1]["line"] > 0),
+    }
+
+
 def require(condition, message, kind=RunFailure):
     if not condition:
         raise kind(message)
@@ -327,6 +376,7 @@ class RecoveryRun:
         self.last_samples = []
         self.resource_cap_observed = False
         self.cleanup_mode = False
+        self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
         self.record = {"started_at": utc_now().isoformat(), "ids": self.ids, "commands": [], "primary_error": None,
@@ -334,6 +384,14 @@ class RecoveryRun:
         self.environment = {key: value for key, value in os.environ.items() if not key.startswith(("DYLD_", "SIMCTL_", "TEST_RUNNER_", "RECOVERY_", "UITEST_", "RUN_INVENTORY_"))}
         self.environment["DEVELOPER_DIR"] = grant["developer_dir"]
         self.environment["NSUnbufferedIO"] = "YES"
+
+    def record_exception_origin(self, target, error, site):
+        # Best effort only after an error is already recorded. A secondary
+        # diagnostic failure must not replace that error or skip owned cleanup.
+        try:
+            target["exception_origin"] = exception_origin(error, site, self.diagnostic_stage)
+        except BaseException:
+            pass
 
     def arm(self, deadline):
         if self.timer_enabled:
@@ -417,6 +475,7 @@ class RecoveryRun:
             write_json(self.output / "resource-samples.json", self.last_samples)
 
     def phase(self, name):
+        self.diagnostic_stage = "phase"
         self.phase_end = min(self.clock() + PHASE_SECONDS[name], self.work_end)
         self.arm(self.phase_end - 4)
         self.tick()
@@ -428,11 +487,13 @@ class RecoveryRun:
 
     def command(self, args, name, *, cap=60, on_poll=None, allowed_codes=(0,)):
         """One owned process group, bounded pipe draining, sticky cleanup result."""
+        self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
         self.guard()
         end = min(self.phase_end, self.clock() + cap)
         require(end - self.clock() >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
         # Include log creation and the pre-spawn receipt in this command's cap.
+        self.diagnostic_stage = "command_setup"
         self.arm(end - 4)
         logs = self.output / "logs"
         logs.mkdir(exist_ok=True)
@@ -447,14 +508,17 @@ class RecoveryRun:
         self.command_deadline = end - 4
 
         def cleanup_error(operation, error):
-            self.record["cleanup_errors"].append({"command": name, "operation": operation,
-                                                  "error": type(error).__name__ + ": " + str(error)})
+            observation = {"command": name, "operation": operation,
+                           "error": type(error).__name__ + ": " + str(error)}
+            self.record["cleanup_errors"].append(observation)
+            self.record_exception_origin(observation, error, "command_cleanup")
 
         try:
             self.arm(end - 4)
             for suffix in ("stdout", "stderr"):
                 streams.append((logs / (name + "." + suffix)).open("xb", buffering=0))
             self.guard()
+            self.diagnostic_stage = "command_spawn"
             # Block only alarm delivery while registering ownership. A pending
             # deadline is delivered after the PID/group has entered our ledger.
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}) if self.timer_enabled else None
@@ -471,6 +535,7 @@ class RecoveryRun:
             for index, pipe in enumerate((process.stdout, process.stderr)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, index)
+            self.diagnostic_stage = "command_loop"
             while selector.get_map() or process.poll() is None:
                 self.guard()
                 self.tick()
@@ -491,15 +556,19 @@ class RecoveryRun:
                     streams[index].write(data)
                     buffers[index].extend(data)
                 self.resource_size("logs", logs, LOG_CAP, max_entries=256)
+            self.diagnostic_stage = "command_wait"
             record["exit_code"] = process.wait(timeout=0)
             require(record["exit_code"] in allowed_codes, "Command failed: " + name)
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+            self.record_exception_origin(record, error, "command")
         finally:
+            self.diagnostic_stage = "command_cleanup"
             self.disarm()
             self.command_deadline = previous_deadline
             try:
+                self.diagnostic_stage = "selector_cleanup"
                 require(self.clock() < end, "Selector cleanup deadline expired", DeadlineFailure)
                 self.arm(end)
                 selector.close()
@@ -507,6 +576,7 @@ class RecoveryRun:
                 cleanup_error("selector_close", error)
             for stream in streams + ([process.stdout, process.stderr] if process else []):
                 try:
+                    self.diagnostic_stage = "stream_cleanup"
                     require(self.clock() < end, "Stream cleanup deadline expired", DeadlineFailure)
                     self.arm(end)
                     stream.close()
@@ -514,6 +584,7 @@ class RecoveryRun:
                     cleanup_error("stream_close", error)
             if process:
                 try:
+                    self.diagnostic_stage = "group_cleanup"
                     if self.clock() < end:
                         self.arm(end)
                     cleanup = kill_owned(process, end, state=entry["state"], clock=self.clock)
@@ -527,6 +598,7 @@ class RecoveryRun:
             record["elapsed_seconds"] = self.clock() - self.start - record["start_elapsed"]
             record["stdout_sha256"], record["stderr_sha256"] = [sha(bytes(value)) for value in buffers]
             try:
+                self.diagnostic_stage = "command_receipt"
                 receipt_end = min(self.phase_end, self.outer_end)
                 require(self.clock() < receipt_end, "Command receipt deadline expired", DeadlineFailure)
                 self.arm(receipt_end)
@@ -536,6 +608,7 @@ class RecoveryRun:
                 cleanup_error("command_receipt", error)
                 if primary is None:
                     primary = error
+        self.diagnostic_stage = "command_return"
         if primary:
             raise primary
         require(record.get("cleanup", {}).get("success"), "Owned process cleanup uncertain: " + name)
@@ -673,6 +746,7 @@ class RecoveryRun:
         self.guard(force=True)
 
     def cleanup(self):
+        self.diagnostic_stage = "cleanup"
         self.disarm()
         self.cleanup_mode = True
         self.phase_end = self.outer_end
@@ -685,34 +759,46 @@ class RecoveryRun:
         if self.device_id:
             already_shutdown = False
             try:
+                self.diagnostic_stage = "device_initial_state"
                 before = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-cleanup-before", cap=10))
                 states = [d for values in before["devices"].values() for d in values if d.get("udid") == self.device_id]
                 require(len(states) == 1, "Owned device missing or ambiguous during cleanup")
                 already_shutdown = states[0].get("state") == "Shutdown"
             except BaseException as error:
-                self.record["cleanup_errors"].append({"device": self.device_id, "operation": "initial_state", "error": str(error)})
+                observation = {"device": self.device_id, "operation": "initial_state", "error": str(error)}
+                self.record["cleanup_errors"].append(observation)
+                self.record_exception_origin(observation, error, "device_cleanup")
             # Failure to read state must not skip shutdown of our known UUID.
             if not already_shutdown:
                 try:
+                    self.diagnostic_stage = "device_shutdown"
                     self.command(["xcrun", "simctl", "shutdown", self.device_id], "shutdown-owned-device", cap=25)
                 except BaseException as error:
-                    self.record["cleanup_errors"].append({"device": self.device_id, "operation": "shutdown", "error": str(error)})
+                    observation = {"device": self.device_id, "operation": "shutdown", "error": str(error)}
+                    self.record["cleanup_errors"].append(observation)
+                    self.record_exception_origin(observation, error, "device_cleanup")
             try:
+                self.diagnostic_stage = "device_final_state"
                 listing = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-final-state", cap=15))
                 observed = [d for values in listing["devices"].values() for d in values if d.get("udid") == self.device_id]
                 require(len(observed) == 1 and observed[0].get("state") == "Shutdown", "Owned simulator shutdown not established")
                 self.record["device_final_state"] = "Shutdown"
             except BaseException as error:
-                self.record["cleanup_errors"].append({"device": self.device_id, "operation": "final_state", "error": str(error)})
+                observation = {"device": self.device_id, "operation": "final_state", "error": str(error)}
+                self.record["cleanup_errors"].append(observation)
+                self.record_exception_origin(observation, error, "device_cleanup")
         # Each group retains its first cleanup deadline and sticky EPERM state.
         # Never restart a timed-out group's cleanup allowance.
         for entry in self.groups:
             if not entry["record"].get("cleanup", {}).get("success"):
                 try:
+                    self.diagnostic_stage = "final_group_cleanup"
                     report = kill_owned(entry["process"], self.outer_end, state=entry["state"], clock=self.clock)
                     self.record["cleanup_errors"].append({"command": entry["record"]["name"], "final_observation": report})
                 except BaseException as error:
-                    self.record["cleanup_errors"].append({"command": entry["record"]["name"], "operation": "final_group_cleanup", "error": str(error)})
+                    observation = {"command": entry["record"]["name"], "operation": "final_group_cleanup", "error": str(error)}
+                    self.record["cleanup_errors"].append(observation)
+                    self.record_exception_origin(observation, error, "cleanup")
         self.record["finished_at"] = utc_now().isoformat()
         self.record["elapsed_seconds"] = self.clock() - self.start
 
@@ -731,20 +817,27 @@ class RecoveryRun:
         self.timer_enabled = True
         try:
             try:
+                self.diagnostic_stage = "prepare"
                 self.arm(self.phase_end - 4)
                 self.prepare()
+                self.diagnostic_stage = "build"
                 self.build()
+                self.diagnostic_stage = "prepare_device"
                 self.prepare_device()
+                self.diagnostic_stage = "test_collect"
                 self.test_and_collect()
             except BaseException as error:
                 code = error.exit_code if isinstance(error, RunFailure) else 1
                 self.record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+                self.record_exception_origin(self.record, error, "operation")
             self.disarm()
             if self.owns_output:
                 try:
                     self.cleanup()
                 except BaseException as error:
-                    self.record["cleanup_errors"].append({"operation": "cleanup", "error": str(error)})
+                    observation = {"operation": "cleanup", "error": str(error)}
+                    self.record["cleanup_errors"].append(observation)
+                    self.record_exception_origin(observation, error, "cleanup")
                     code = code or (error.exit_code if isinstance(error, RunFailure) else 1)
                 code = code or (1 if self.record["cleanup_errors"] else 0)
                 if self.clock() >= self.outer_end:
@@ -755,12 +848,14 @@ class RecoveryRun:
                 # Keep the absolute timer armed through the final fsync.
                 self.record["requires_process_exit_code_zero"] = True
                 try:
+                    self.diagnostic_stage = "final_receipt"
                     self.arm(self.outer_end)
                     self.flush()
                     require(self.clock() < self.outer_end, "Final receipt exceeded outer deadline", DeadlineFailure)
                 except BaseException as error:
                     code = 124 if isinstance(error, DeadlineFailure) or self.clock() >= self.outer_end else (code or 1)
                     self.record["finalization_error"] = {"type": type(error).__name__, "message": str(error)}
+                    self.record_exception_origin(self.record["finalization_error"], error, "finalization")
                     self.record["exit_code"], self.record["status"] = code, "FAIL"
         finally:
             self.disarm()

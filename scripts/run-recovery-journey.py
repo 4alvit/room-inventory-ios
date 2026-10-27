@@ -11,6 +11,7 @@ import datetime as dt
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -62,6 +63,8 @@ ORIGIN_STAGES = frozenset((
     "command_receipt", "command_return", "cleanup", "device_initial_state",
     "device_shutdown", "device_final_state", "final_group_cleanup", "final_receipt"))
 ORIGIN_SITES = frozenset(("command", "command_cleanup", "operation", "device_cleanup", "cleanup", "finalization"))
+SCAN_CATEGORIES = frozenset(("output", "derived_data", "device", "original_xcresult",
+                             "verified_xcresult", "attachments", "logs"))
 
 
 def exception_origin(error, site, stage):
@@ -392,6 +395,79 @@ class RecoveryRun:
             target["exception_origin"] = exception_origin(error, site, self.diagnostic_stage)
         except BaseException:
             pass
+        if site in ("command", "operation"):
+            self.observe_runtime("scan_snapshot", target, preserve_primary=True)
+
+    def diagnostic_elapsed(self):
+        """Optional monotonic observation, not a deadline or actual child exit."""
+        try:
+            now = self.clock()
+            if type(now) not in (int, float) or type(self.start) not in (int, float):
+                return None
+            value = now - self.start
+            if 0 <= value <= 86400 and math.isfinite(value):
+                return round(value, 6)
+        except DeadlineFailure:
+            raise
+        except Exception:
+            pass
+        return None
+
+    def observe_runtime(self, event, target=None, value=None, *, failed=False, preserve_primary=False):
+        """Fixed-size optional state; pass through existing poll/selector values.
+
+        No filesystem/process query or write occurs here. On the ordinary path
+        control interruptions still reach the existing command/error handlers.
+        Once a primary error exists, optional diagnostics cannot replace it.
+        """
+        try:
+            if event == "scan_start":
+                category = value if type(value) is str and len(value) <= 32 and value in SCAN_CATEGORIES else "unknown"
+                previous = self.record.get("resource_scan", {}).get("last")
+                value = {"category": category, "state": "started", "start_elapsed": None,
+                         "end_elapsed": None, "duration_seconds": None}
+                self.record["resource_scan"] = {"current": value, "last": previous}
+                value["start_elapsed"] = self.diagnostic_elapsed()
+            elif event == "scan_end" and type(value) is dict:
+                # A known tree_size return/failure is distinct from a measured
+                # finish: the optional end clock can still be unavailable.
+                value["state"] = "failed" if failed else "returned"
+                value["end_elapsed"] = self.diagnostic_elapsed()
+                start, end = value["start_elapsed"], value["end_elapsed"]
+                if start is not None and end is not None and end >= start:
+                    value["duration_seconds"] = round(end - start, 6)
+                self.record["resource_scan"] = {"current": None, "last": value}
+            elif event == "scan_snapshot":
+                scans = self.record.get("resource_scan")
+                if scans is not None:
+                    snapshot = {key: None if scans[key] is None else dict(scans[key]) for key in ("current", "last")}
+                    if target is self.record:
+                        target["failure_resource_scan"] = snapshot
+                    else:
+                        target.setdefault("process_observation", {})["resource_scan_at_failure"] = snapshot
+            elif event == "selector":
+                target.setdefault("process_observation", {})["selector_state"] = "nonempty" if value else "empty"
+            elif event in ("stdout_eof", "stderr_eof"):
+                pipe = {"observed": True, "elapsed": None}
+                target.setdefault("process_observation", {})[event] = pipe
+                pipe["elapsed"] = self.diagnostic_elapsed()
+            elif event in ("poll", "wait", "cleanup_return", "final_cleanup_return") and type(value) is int and -255 <= value <= 255:
+                observation = target.setdefault("process_observation", {})
+                if "first_observed_exit" not in observation:
+                    first = {"source": event, "returncode": value, "elapsed": None}
+                    observation["first_observed_exit"] = first
+                    first["elapsed"] = self.diagnostic_elapsed()
+        except BaseException as error:
+            try:
+                if target is not None and event in ("selector", "stdout_eof", "stderr_eof", "poll", "wait", "cleanup_return", "final_cleanup_return"):
+                    target.setdefault("process_observation", {})["capture_incomplete"] = True
+            except BaseException as secondary:
+                if (not preserve_primary and not isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))
+                        and isinstance(secondary, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                    raise
+            if not preserve_primary and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                raise
+        return value
 
     def arm(self, deadline):
         if self.timer_enabled:
@@ -443,8 +519,15 @@ class RecoveryRun:
         self.record["resource_cap_crossing"] = observation
 
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
-        return tree_size(root, cap, self.tick, cap_metric=cap_metric, **kwargs,
-                         on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
+        span = self.observe_runtime("scan_start", value=category)
+        try:
+            result = tree_size(root, cap, self.tick, cap_metric=cap_metric, **kwargs,
+                               on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
+        except BaseException:
+            self.observe_runtime("scan_end", value=span, failed=True, preserve_primary=True)
+            raise
+        self.observe_runtime("scan_end", value=span)
+        return result
 
     def guard(self, force=False):
         self.tick()
@@ -536,7 +619,10 @@ class RecoveryRun:
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, index)
             self.diagnostic_stage = "command_loop"
-            while selector.get_map() or process.poll() is None:
+            # Preserve the original short circuit and consume map truth once.
+            # A nonempty selector must not introduce a new child poll.
+            while (self.observe_runtime("selector", record, bool(selector.get_map())) or
+                   self.observe_runtime("poll", record, process.poll()) is None):
                 self.guard()
                 self.tick()
                 if on_poll:
@@ -550,6 +636,7 @@ class RecoveryRun:
                         continue
                     if not data:
                         selector.unregister(key.fileobj)
+                        self.observe_runtime("stdout_eof" if key.data == 0 else "stderr_eof", record)
                         continue
                     index = key.data
                     require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
@@ -557,7 +644,7 @@ class RecoveryRun:
                     buffers[index].extend(data)
                 self.resource_size("logs", logs, LOG_CAP, max_entries=256)
             self.diagnostic_stage = "command_wait"
-            record["exit_code"] = process.wait(timeout=0)
+            record["exit_code"] = self.observe_runtime("wait", record, process.wait(timeout=0))
             require(record["exit_code"] in allowed_codes, "Command failed: " + name)
         except BaseException as error:
             primary = error
@@ -592,6 +679,8 @@ class RecoveryRun:
                     record["exit_code"] = entry["state"].get("returncode")
                     if not cleanup["success"]:
                         cleanup_error("owned_group", RunFailure(str(cleanup)))
+                    self.observe_runtime("cleanup_return", record, record["exit_code"],
+                                         preserve_primary=primary is not None or not cleanup["success"])
                 except BaseException as error:
                     cleanup_error("owned_group_exception", error)
             self.disarm()
@@ -795,6 +884,8 @@ class RecoveryRun:
                     self.diagnostic_stage = "final_group_cleanup"
                     report = kill_owned(entry["process"], self.outer_end, state=entry["state"], clock=self.clock)
                     self.record["cleanup_errors"].append({"command": entry["record"]["name"], "final_observation": report})
+                    self.observe_runtime("final_cleanup_return", entry["record"], report.get("returncode"),
+                                         preserve_primary=True)
                 except BaseException as error:
                     observation = {"command": entry["record"]["name"], "operation": "final_group_cleanup", "error": str(error)}
                     self.record["cleanup_errors"].append(observation)

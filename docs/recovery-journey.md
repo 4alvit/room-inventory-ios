@@ -257,6 +257,40 @@ writes may leave the observation only in memory. Retention preserves `run/result
 bytes and accepts additive fields without relaxing its existing gates. The hosted
 adapter's summary is not a substitute for that retained controller receipt.
 
+`resource_scan` adds one current and one last traversal observation, with a closed
+root category and optional start/end/duration in elapsed monotonic seconds.
+`started` means completion has not been observed; `returned` means `tree_size`
+returned; `failed` means it raised. A missing end or duration remains unknown,
+even when return/failure is known. These are wrapper spans, not per-entry timing
+or proof of what consumed the command budget. Error capture snapshots this pair
+in the command's `process_observation.resource_scan_at_failure` or the controller's
+`failure_resource_scan`, so later cleanup scans cannot rewrite the earlier state.
+
+Each existing command receipt may add `process_observation`: the last observed
+selector state, stdout/stderr EOF only after an existing empty read/unregister,
+and the first retained observation of an integer child return code (`first_observed_exit`). Exit source is `poll`, `wait`,
+`cleanup_return` or `final_cleanup_return`; the latter two timestamp receipt of the existing cleanup result,
+not its internal reap or actual process exit. Empty selector state does not imply
+pipe EOF. Missing fields/times mean unobserved or unavailable, never success.
+`capture_incomplete` marks an observer error: earlier observations may be missing,
+so the first retained exit is then not claimed to be the earliest observed exit.
+That flag is itself best effort; its absence does not prove a complete history.
+The original selector/poll short circuit, process calls and cleanup are unchanged.
+No extra polls, reads, scans, timers, sleeps or receipt writes are added.
+
+New clock reads occur only at each scan start/end, each observed pipe EOF and the
+first captured exit result. They use the injected monotonic clock, round to six
+decimal places and accept only finite elapsed values from 0 to 86,400 seconds;
+that metadata bound does not extend any execution deadline. Ordinary-path alarm
+and interruption exceptions still propagate to the existing failure handlers;
+an observer failure cannot replace an already active primary exception.
+Closed labels and fixed record shapes bound the current/last pair, one command's
+full process observation and the top failure snapshot together below 2 KiB in
+the existing indented JSON. There is no per-entry or scan history; one process
+record belongs to each already-existing command, with no added command/retry loop.
+This diagnostic preparation establishes neither the historical delay's cause
+nor native recovery acceptance.
+
 ### Owned cleanup
 
 After evidence collection, terminate only the app/test runner and groups launched

@@ -284,6 +284,12 @@ decimal places and accept only finite elapsed values from 0 to 86,400 seconds;
 that metadata bound does not extend any execution deadline. Ordinary-path alarm
 and interruption exceptions still propagate to the existing failure handlers;
 an observer failure cannot replace an already active primary exception.
+Post-failure origin/snapshot calls and failed-scan completion observations are
+protected at their call sites as well as inside the diagnostic helper. Cleanup
+return metadata is similarly optional once an operational or cleanup failure has
+been recorded. Ordinary-path control interruptions retain the existing failure
+handling. This contains faults in these guarded diagnostic calls; it is not a
+claim of immunity to asynchronous interruption at every surrounding instruction.
 Closed labels and fixed record shapes bound the current/last pair, one command's
 full process observation and the top failure snapshot together below 2 KiB in
 the existing indented JSON. There is no per-entry or scan history; one process

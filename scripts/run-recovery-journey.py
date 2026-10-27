@@ -393,10 +393,10 @@ class RecoveryRun:
         # diagnostic failure must not replace that error or skip owned cleanup.
         try:
             target["exception_origin"] = exception_origin(error, site, self.diagnostic_stage)
+            if site in ("command", "operation"):
+                self.observe_runtime("scan_snapshot", target, preserve_primary=True)
         except BaseException:
             pass
-        if site in ("command", "operation"):
-            self.observe_runtime("scan_snapshot", target, preserve_primary=True)
 
     def diagnostic_elapsed(self):
         """Optional monotonic observation, not a deadline or actual child exit."""
@@ -524,7 +524,10 @@ class RecoveryRun:
             result = tree_size(root, cap, self.tick, cap_metric=cap_metric, **kwargs,
                                on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
         except BaseException:
-            self.observe_runtime("scan_end", value=span, failed=True, preserve_primary=True)
+            try:
+                self.observe_runtime("scan_end", value=span, failed=True, preserve_primary=True)
+            except BaseException:
+                pass
             raise
         self.observe_runtime("scan_end", value=span)
         return result
@@ -594,7 +597,10 @@ class RecoveryRun:
             observation = {"command": name, "operation": operation,
                            "error": type(error).__name__ + ": " + str(error)}
             self.record["cleanup_errors"].append(observation)
-            self.record_exception_origin(observation, error, "command_cleanup")
+            try:
+                self.record_exception_origin(observation, error, "command_cleanup")
+            except BaseException:
+                pass
 
         try:
             self.arm(end - 4)
@@ -649,7 +655,10 @@ class RecoveryRun:
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
-            self.record_exception_origin(record, error, "command")
+            try:
+                self.record_exception_origin(record, error, "command")
+            except BaseException:
+                pass
         finally:
             self.diagnostic_stage = "command_cleanup"
             self.disarm()
@@ -679,8 +688,12 @@ class RecoveryRun:
                     record["exit_code"] = entry["state"].get("returncode")
                     if not cleanup["success"]:
                         cleanup_error("owned_group", RunFailure(str(cleanup)))
-                    self.observe_runtime("cleanup_return", record, record["exit_code"],
-                                         preserve_primary=primary is not None or not cleanup["success"])
+                    try:
+                        self.observe_runtime("cleanup_return", record, record["exit_code"],
+                                             preserve_primary=primary is not None or not cleanup["success"])
+                    except BaseException:
+                        if primary is None and cleanup["success"]:
+                            raise
                 except BaseException as error:
                     cleanup_error("owned_group_exception", error)
             self.disarm()
@@ -856,7 +869,10 @@ class RecoveryRun:
             except BaseException as error:
                 observation = {"device": self.device_id, "operation": "initial_state", "error": str(error)}
                 self.record["cleanup_errors"].append(observation)
-                self.record_exception_origin(observation, error, "device_cleanup")
+                try:
+                    self.record_exception_origin(observation, error, "device_cleanup")
+                except BaseException:
+                    pass
             # Failure to read state must not skip shutdown of our known UUID.
             if not already_shutdown:
                 try:
@@ -865,7 +881,10 @@ class RecoveryRun:
                 except BaseException as error:
                     observation = {"device": self.device_id, "operation": "shutdown", "error": str(error)}
                     self.record["cleanup_errors"].append(observation)
-                    self.record_exception_origin(observation, error, "device_cleanup")
+                    try:
+                        self.record_exception_origin(observation, error, "device_cleanup")
+                    except BaseException:
+                        pass
             try:
                 self.diagnostic_stage = "device_final_state"
                 listing = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-final-state", cap=15))
@@ -875,7 +894,10 @@ class RecoveryRun:
             except BaseException as error:
                 observation = {"device": self.device_id, "operation": "final_state", "error": str(error)}
                 self.record["cleanup_errors"].append(observation)
-                self.record_exception_origin(observation, error, "device_cleanup")
+                try:
+                    self.record_exception_origin(observation, error, "device_cleanup")
+                except BaseException:
+                    pass
         # Each group retains its first cleanup deadline and sticky EPERM state.
         # Never restart a timed-out group's cleanup allowance.
         for entry in self.groups:
@@ -884,12 +906,18 @@ class RecoveryRun:
                     self.diagnostic_stage = "final_group_cleanup"
                     report = kill_owned(entry["process"], self.outer_end, state=entry["state"], clock=self.clock)
                     self.record["cleanup_errors"].append({"command": entry["record"]["name"], "final_observation": report})
-                    self.observe_runtime("final_cleanup_return", entry["record"], report.get("returncode"),
-                                         preserve_primary=True)
+                    try:
+                        self.observe_runtime("final_cleanup_return", entry["record"], report.get("returncode"),
+                                             preserve_primary=True)
+                    except BaseException:
+                        pass
                 except BaseException as error:
                     observation = {"command": entry["record"]["name"], "operation": "final_group_cleanup", "error": str(error)}
                     self.record["cleanup_errors"].append(observation)
-                    self.record_exception_origin(observation, error, "cleanup")
+                    try:
+                        self.record_exception_origin(observation, error, "cleanup")
+                    except BaseException:
+                        pass
         self.record["finished_at"] = utc_now().isoformat()
         self.record["elapsed_seconds"] = self.clock() - self.start
 
@@ -920,7 +948,10 @@ class RecoveryRun:
             except BaseException as error:
                 code = error.exit_code if isinstance(error, RunFailure) else 1
                 self.record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
-                self.record_exception_origin(self.record, error, "operation")
+                try:
+                    self.record_exception_origin(self.record, error, "operation")
+                except BaseException:
+                    pass
             self.disarm()
             if self.owns_output:
                 try:
@@ -928,7 +959,10 @@ class RecoveryRun:
                 except BaseException as error:
                     observation = {"operation": "cleanup", "error": str(error)}
                     self.record["cleanup_errors"].append(observation)
-                    self.record_exception_origin(observation, error, "cleanup")
+                    try:
+                        self.record_exception_origin(observation, error, "cleanup")
+                    except BaseException:
+                        pass
                     code = code or (error.exit_code if isinstance(error, RunFailure) else 1)
                 code = code or (1 if self.record["cleanup_errors"] else 0)
                 if self.clock() >= self.outer_end:
@@ -946,7 +980,10 @@ class RecoveryRun:
                 except BaseException as error:
                     code = 124 if isinstance(error, DeadlineFailure) or self.clock() >= self.outer_end else (code or 1)
                     self.record["finalization_error"] = {"type": type(error).__name__, "message": str(error)}
-                    self.record_exception_origin(self.record["finalization_error"], error, "finalization")
+                    try:
+                        self.record_exception_origin(self.record["finalization_error"], error, "finalization")
+                    except BaseException:
+                        pass
                     self.record["exit_code"], self.record["status"] = code, "FAIL"
         finally:
             self.disarm()

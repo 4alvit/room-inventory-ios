@@ -206,6 +206,43 @@ probe or deletion of unrelated/historical data is part of source preparation.
 
 ### Deadline and exit contract
 
+Hosted discovery command receipts may include a fixed `discovery_observation`
+summary. It records the last entered/completed source operation, tick site and
+check substage, Popen-result assignment, returned select/poll counts, a separate
+`poll_seen` flag, and per-pipe returned reads/bytes, bytes appended to the in-memory
+buffer, EAGAIN count and observed EOF. Retained bytes mean buffer retention, not
+durable log publication. EOF is marked only after an empty read. `poll_seen=false`
+with a null result is unobserved; a returned null means running at that poll only.
+Counters saturate at 2^31−1 and then are lower bounds, with both `saturated` and
+`capture_incomplete` set. A primary error during the observed execution marks its
+observation incomplete. A cleanup-only failure does not change this pre-cleanup
+summary; the flag does not certify overall command or cleanup success.
+
+The summary uses no new clock calls. Its optional `clock_sample` is the last
+already-acquired alarm-check/arm, work-comparison or selector-timeout sample, with
+explicit provenance and elapsed time rounded to six decimals within 0–86,400
+seconds, or null. It is not the timestamp of the last stage, native exit or
+snapshot capture. No operation duration or synchronous-versus-alarm origin is
+inferred. Entry without completion means no completion was recorded: interruption
+can occur after a call returns but before its marker, including EOF, assignment
+and counter updates. Even `capture_incomplete` is best effort; its absence does
+not prove a complete observation history. No output and an open pipe establish
+neither native readiness nor the cause of a delay.
+
+The failure snapshot is captured only after saving the original primary error
+and before cleanup; cleanup/receipt checks cannot rewrite that boundary. Ordinary
+diagnostic control interruptions still fail the command and run owned cleanup.
+Capture after an established primary is best effort and cannot replace it.
+The fixed summary has no payload, environment, paths, exception text or history;
+its serialization, including the command nesting, is limited to 2 KiB only in
+the existing post-cleanup receipt path. A serialization failure follows existing
+receipt-failure handling and preserves the first primary and sticky cleanup
+errors. A snapshot may remain only in memory if receipt time is exhausted.
+Admission failures before the existing command record are still unobserved.
+External-call/clock trace parity in fakes does not imply zero scheduling cost.
+Discovery's one-pass list, short-circuit poll, 120-second envelope, inventory
+60/56/4-second limits, all caps, signal and cleanup ordering remain unchanged.
+
 One outer controller owns the complete attempt and every subprocess process group.
 Use monotonic absolute deadlines; no phase may renew the outer budget. The total
 ceiling is 1,800 seconds, reserving the last 60 seconds for cleanup. Phase caps are

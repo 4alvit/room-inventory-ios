@@ -216,12 +216,17 @@ class Alarm:
     """Non-renewing operation deadline; relinquished before the base controller."""
     def __init__(self, end, clock=time.monotonic):
         self.end, self.clock = end, clock
+        self.last_sample = None
 
     def check(self):
-        require(self.clock() < self.end, "Hosted absolute deadline reached", Deadline)
+        now = self.clock()
+        self.last_sample = ("alarm_check", now)
+        require(now < self.end, "Hosted absolute deadline reached", Deadline)
 
     def arm(self, end=None):
-        remaining = min(self.end, end if end is not None else self.end) - self.clock()
+        now = self.clock()
+        self.last_sample = ("alarm_arm", now)
+        remaining = min(self.end, end if end is not None else self.end) - now
         require(remaining > 0, "Hosted deadline exhausted", Deadline)
         signal.setitimer(signal.ITIMER_REAL, remaining)
 
@@ -250,10 +255,41 @@ class Discovery:
         self.root, self.output, self.env, self.alarm = root, output, dict(env), alarm
         self.disk_usage = disk_usage
         self.records, self.cleanup_errors = [], []
+        self._observation = None
+
+    def observe(self, stage, *, completed=False):
+        if self._observation is not None:
+            self._observation["last_completed" if completed else "last_entered"] = stage
+
+    def count(self, fields, key, amount=1):
+        limit = 2**31 - 1
+        if fields[key] + amount > limit:
+            fields[key] = limit
+            self._observation["saturated"] = self._observation["capture_incomplete"] = True
+        else:
+            fields[key] += amount
+
+    def capture_observation(self, observation, start):
+        # No clock read: this is the last sampled checkpoint, not a timestamp
+        # of capture, operation return, or actual native exit.
+        sample = self.alarm.last_sample
+        if sample is not None:
+            source, value = sample
+            elapsed = value - start if type(value) in (int, float) else None
+            observation["clock_sample"] = {"source": source, "elapsed":
+                round(elapsed, 6) if elapsed is not None and 0 <= elapsed <= 86400 else None}
+        return {**observation, "stdout": dict(observation["stdout"]),
+                "stderr": dict(observation["stderr"])}
 
     def check(self):
+        if self._observation is not None:
+            self._observation["check_substage"] = "pre_alarm"
         self.alarm.check()
+        if self._observation is not None:
+            self._observation["check_substage"] = "disk"
         require(self.disk_usage(self.output).free >= POLICY["abort_free_bytes"], "Hosted disk abort floor reached")
+        if self._observation is not None:
+            self._observation["check_substage"] = "post_alarm"
         self.alarm.check()
 
     def command(self, args, name, cap=20, *, retain_output=True):
@@ -267,42 +303,109 @@ class Discovery:
         self.records.append(record)
         buffers, process, selector, primary = [bytearray(), bytearray()], None, None, None
         state = {}
-        def tick():
+        observation = {"last_entered": "unstarted", "last_completed": "unstarted",
+                       "tick_site": None, "check_substage": None, "popen_assigned": False,
+                       "select_returns": 0, "poll_returns": 0, "poll_seen": False, "last_poll_result": None,
+                       "stdout": {"read_returns": 0, "returned_bytes": 0, "retained_bytes": 0, "eof": False, "would_block": 0},
+                       "stderr": {"read_returns": 0, "returned_bytes": 0, "retained_bytes": 0, "eof": False, "would_block": 0},
+                       "clock_sample": None, "capture_incomplete": False, "saturated": False}
+        snapshot = None
+        def tick(site):
+            observation["tick_site"] = site
+            self.observe("tick")
             self.check()
-            require(self.alarm.clock() < end - 4, "Discovery command deadline reached", Deadline)
+            observation["check_substage"] = "work_compare"
+            now = self.alarm.clock()
+            self.alarm.last_sample = ("work_compare", now)
+            require(now < end - 4, "Discovery command deadline reached", Deadline)
+            self.observe("tick", completed=True)
+        def poll():
+            self.observe("poll")
+            result = process.poll()
+            self.count(observation, "poll_returns")
+            observation["poll_seen"] = True
+            if result is None or type(result) is int and -255 <= result <= 255:
+                observation["last_poll_result"] = result
+            else:
+                observation["last_poll_result"] = None
+                observation["capture_incomplete"] = True
+            self.observe("poll", completed=True)
+            return result
+        def get_map():
+            self.observe("get_map")
+            result = selector.get_map()
+            self.observe("get_map", completed=True)
+            return result
         try:
+            self._observation = observation
+            self.observe("arm")
             self.alarm.arm(end - 4)
+            self.observe("arm", completed=True)
+            self.observe("selector")
             selector = selectors.DefaultSelector()
+            self.observe("selector", completed=True)
+            self.observe("mask")
             oldmask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
             try:
-                tick()
+                self.observe("mask", completed=True)
+                tick("pre_spawn")
+                self.observe("spawn")
                 process = subprocess.Popen(record["args"], cwd=self.root, env=self.env, start_new_session=True,
                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                observation["popen_assigned"] = True
+                self.observe("spawn", completed=True)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, oldmask)
+            self.observe("pipe_setup")
             for index, pipe in enumerate((process.stdout, process.stderr)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, index)
-            while selector.get_map() or process.poll() is None:
-                tick()
-                for key, _ in selector.select(min(.1, max(0, end - 4 - self.alarm.clock()))):
-                    tick()
+            self.observe("pipe_setup", completed=True)
+            while get_map() or poll() is None:
+                tick("loop_head")
+                self.observe("select")
+                now = self.alarm.clock()
+                self.alarm.last_sample = ("select_timeout", now)
+                ready = selector.select(min(.1, max(0, end - 4 - now)))
+                self.count(observation, "select_returns")
+                self.observe("select", completed=True)
+                for key, _ in ready:
+                    tick("read_ready")
+                    pipe_observation = observation[("stdout", "stderr")[key.data]]
+                    self.observe("read")
                     try:
                         data = os.read(key.fileobj.fileno(), 65536)
                     except BlockingIOError:
+                        self.count(pipe_observation, "would_block")
                         continue
+                    self.count(pipe_observation, "read_returns")
+                    self.count(pipe_observation, "returned_bytes", len(data))
+                    self.observe("read", completed=True)
                     if not data:
+                        pipe_observation["eof"] = True
                         selector.unregister(key.fileobj)
                     else:
                         require(len(buffers[key.data]) + len(data) <= 4 * controller.MIB, "Discovery stream cap reached")
                         buffers[key.data].extend(data)
-            tick()
+                        self.count(pipe_observation, "retained_bytes", len(data))
+            tick("final")
+            self.observe("wait")
             record["exit_code"] = process.wait(timeout=0)
+            self.observe("wait", completed=True)
             require(record["exit_code"] == 0, "Discovery command failed: " + name)
+            snapshot = self.capture_observation(observation, start)
+            record["discovery_observation"] = snapshot
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+            try:
+                observation["capture_incomplete"] = True
+                snapshot = self.capture_observation(observation, start)
+                record["discovery_observation"] = snapshot
+            except BaseException:
+                pass
         finally:
+            self._observation = None
             signal.setitimer(signal.ITIMER_REAL, 0)
             # Kill/reap before closing pipes, and never renew the absolute end.
             operations = []
@@ -338,12 +441,21 @@ class Discovery:
                         # Raw commit output includes names, email and message.
                         record[suffix + "_bytes"] = len(data)
                 record["output_retained"] = retain_output
+                if snapshot is not None:
+                    # Only the original post-cleanup receipt path serializes it.
+                    require(len(json.dumps({"commands": [{"discovery_observation": snapshot}]}, indent=2).encode()) <= 2048,
+                            "Discovery observation size bound exceeded")
                 controller.write_json(self.output / "commands.json", self.records)
                 controller.tree_size(self.output, 16 * controller.MIB, self.check, max_entries=128)
                 self.check()
             except BaseException as error:
                 self.cleanup_errors.append({"command": name, "operation": "receipt", "error": str(error)})
                 primary = primary or error
+                try:
+                    if snapshot is not None:
+                        snapshot["capture_incomplete"] = True
+                except BaseException:
+                    pass
         if primary:
             raise primary
         require(not any(e["command"] == name for e in self.cleanup_errors), "Discovery cleanup/receipt incomplete")

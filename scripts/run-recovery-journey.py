@@ -470,6 +470,85 @@ class RecoveryRun:
                 raise
         return value
 
+    def observe_derived_service(self, target, event, *, index=None, value=None, preserve_primary=False):
+        """Fixed aggregates of returned service work; no clock or I/O queries.
+
+        Missing/incomplete observations are not proof of no work. Only supplied
+        completion clock values are sampled; counters never drive supervision.
+        """
+        try:
+            observation = target.get("derived_service")
+            if observation is None:
+                observation = {
+                    "quanta_started": 0, "quanta_completed": 0, "polls_returned": 0,
+                    "stdout": {"read_returns": 0, "read_bytes": 0, "eof_returns": 0, "would_block": 0},
+                    "stderr": {"read_returns": 0, "read_bytes": 0, "eof_returns": 0, "would_block": 0},
+                    "first_completed_checkpoint_elapsed": None, "last_completed_checkpoint_elapsed": None,
+                    "terminal_barrier": {"reached": False, "completed": False},
+                    "capture_incomplete": False, "saturated": False,
+                }
+                target["derived_service"] = observation
+
+            def increment(fields, key, amount=1):
+                limit = 2**31 - 1
+                current = fields[key]
+                require(type(current) is int and 0 <= current <= limit
+                        and type(amount) is int and amount >= 0, "Invalid service counter")
+                if amount > limit - current:
+                    fields[key] = limit
+                    observation["saturated"] = observation["capture_incomplete"] = True
+                else:
+                    fields[key] = current + amount
+
+            if event == "quantum_started":
+                increment(observation, "quanta_started")
+            elif event == "quantum_completed":
+                elapsed = None
+                if type(value) in (int, float) and type(self.start) in (int, float):
+                    try:
+                        delta = value - self.start
+                        if math.isfinite(delta) and 0 <= delta <= 86400:
+                            elapsed = round(delta, 6)
+                    except (OverflowError, ValueError):
+                        pass
+                previous = observation["last_completed_checkpoint_elapsed"]
+                first = observation["first_completed_checkpoint_elapsed"]
+                if elapsed is not None and any(point is not None and elapsed < point for point in (first, previous)):
+                    elapsed = None
+                if elapsed is None:
+                    observation["capture_incomplete"] = True
+                if observation["quanta_completed"] == 0:
+                    observation["first_completed_checkpoint_elapsed"] = elapsed
+                observation["last_completed_checkpoint_elapsed"] = elapsed
+                increment(observation, "quanta_completed")
+            elif event in ("read_return", "would_block"):
+                require(type(index) is int and index in (0, 1), "Invalid service pipe")
+                pipe = observation["stdout" if index == 0 else "stderr"]
+                if event == "would_block":
+                    increment(pipe, "would_block")
+                else:
+                    increment(pipe, "read_returns")
+                    increment(pipe, "read_bytes", value)
+                    if value == 0:
+                        increment(pipe, "eof_returns")
+            elif event == "poll_return":
+                increment(observation, "polls_returned")
+            elif event in ("barrier_reached", "barrier_completed"):
+                observation["terminal_barrier"]["reached" if event == "barrier_reached" else "completed"] = True
+            elif event == "incomplete":
+                observation["capture_incomplete"] = True
+            else:
+                require(event == "init", "Invalid service observation")
+        except BaseException as error:
+            try:
+                target["derived_service"]["capture_incomplete"] = True
+            except BaseException as secondary:
+                if (not preserve_primary and not isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))
+                        and isinstance(secondary, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                    raise
+            if not preserve_primary and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                raise
+
     def arm(self, deadline):
         if self.timer_enabled:
             require(deadline > self.clock(), "Deadline expired before timer arm", DeadlineFailure)
@@ -614,6 +693,7 @@ class RecoveryRun:
                 return
             service_busy = True
             try:
+                self.observe_derived_service(record, "quantum_started")
                 # The outer loop checked this floor before each read batch.
                 # Repeat it here without recursively entering the resource guard.
                 free = self.disk_usage(self.output.parent).free
@@ -635,8 +715,10 @@ class RecoveryRun:
                     try:
                         data = os.read(key.fileobj.fileno(), 65536)
                     except BlockingIOError:
+                        self.observe_derived_service(record, "would_block", index=index)
                         self.tick()
                         continue
+                    self.observe_derived_service(record, "read_return", index=index, value=len(data))
                     self.tick()
                     if not data:
                         selector.unregister(key.fileobj)
@@ -649,7 +731,9 @@ class RecoveryRun:
                     buffers[index].extend(data)
                     drained = True
                 self.tick()
-                self.observe_runtime("poll", record, process.poll())
+                polled = process.poll()
+                self.observe_derived_service(record, "poll_return")
+                self.observe_runtime("poll", record, polled)
                 self.tick()
                 if drained:
                     # Validate newly persisted logs with the plain deadline tick.
@@ -659,6 +743,7 @@ class RecoveryRun:
                     self.tick()
                 service_checkpoints, service_last = 0, self.clock()
                 self.tick()
+                self.observe_derived_service(record, "quantum_completed", value=service_last)
             finally:
                 service_busy = False
 
@@ -672,6 +757,8 @@ class RecoveryRun:
                 pass
 
         try:
+            if not self.cleanup_mode:
+                self.observe_derived_service(record, "init")
             self.arm(end - 4)
             for suffix in ("stdout", "stderr"):
                 streams.append((logs / (name + "." + suffix)).open("xb", buffering=0))
@@ -727,11 +814,20 @@ class RecoveryRun:
             # Drained logs can grow after the output root's earlier snapshot.
             # Exit zero cannot skip a complete guard within the work deadline.
             self._derived_scan_service = None
+            if not self.cleanup_mode:
+                self.observe_derived_service(record, "barrier_reached")
             self.guard(force=True)
             self.tick()
+            if not self.cleanup_mode:
+                self.observe_derived_service(record, "barrier_completed")
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+            try:
+                if not self.cleanup_mode:
+                    self.observe_derived_service(record, "incomplete", preserve_primary=True)
+            except BaseException:
+                pass
             try:
                 self.record_exception_origin(record, error, "command")
             except BaseException:

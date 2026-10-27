@@ -350,6 +350,44 @@ is observed first. Fake before/after operation counts establish progress between
 returning checkpoints only, without demonstrating native speedup, historical
 causation or recovery acceptance.
 
+Operational command receipts may add `derived_service`, a fixed aggregate for
+active DerivedData service only. `quanta_started` counts entry into eligible
+service work, even if it fails before I/O; `quanta_completed` counts reaching
+the existing final checkpoint after service and its deadline tick. Each pipe's
+`read_returns` counts successful read returns, including empty EOF returns;
+`eof_returns` counts those empty results and `would_block` separately counts
+`BlockingIOError`. Other read exceptions are not successful returns.
+`read_bytes` counts bytes actually returned before the subsequent deadline or
+write check. It does not claim those bytes were persisted, accepted into the
+digest buffer, or retained. `polls_returned` counts service poll returns, including
+`None`; outer-loop and cleanup polls/reads are excluded.
+
+`first_completed_checkpoint_elapsed` and `last_completed_checkpoint_elapsed`
+sample the already obtained completion clock value relative to controller start.
+That clock is sampled before the existing final deadline tick; the completion
+event is recorded only after the tick returns. It is a sampled checkpoint time,
+not the later metadata capture time.
+They add no clock queries and are not start times, actual child-exit times or
+durations. An unfinished quantum has no completion timestamp. Values are finite,
+rounded to six decimals within 0–86,400 seconds; an invalid or backwards sample
+is null and marks capture incomplete. A null first sample is not replaced by a
+later completion. The incomplete flag stays set after a bad sample; a later valid
+last value does not prove a monotonic history. `terminal_barrier.reached` marks reaching the operational call
+boundary; `completed` marks return from its full guard and following deadline
+tick. Neither means command cleanup or the whole run succeeded. Cleanup-mode
+commands omit this aggregate: their time-only guard is not a full barrier.
+
+All integer counters saturate at 2,147,483,647. Saturation sets both `saturated`
+and `capture_incomplete`; saturated values are lower bounds. Capture is best
+effort: an interrupted command or observer error may leave partial fields, and
+even the incomplete marker can fail. Missing aggregates or zero counts with
+incomplete capture do not prove absence of work. Ordinary control interruptions
+still fail the command; the post-primary marker call is protected at its caller
+as well as inside the observer. The fixed shape contributes less than 2 KiB to
+the existing indented receipt and adds no history, scans, flushes, clock calls,
+threads or native work. Aggregates survive the existing terminal guard and cleanup
+without being reset, and are saved only by existing receipt writes.
+
 ### Owned cleanup
 
 After evidence collection, terminate only the app/test runner and groups launched

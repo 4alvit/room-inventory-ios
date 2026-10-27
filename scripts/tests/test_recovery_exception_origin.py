@@ -174,7 +174,8 @@ class ExceptionOriginIntegrationTests(fixtures.ControllerCase):
         run.cleanup.assert_called_once()
         self.assertEqual(self.signal_mask.call_args_list, [call(signal.SIG_BLOCK, {signal.SIGALRM}), call(signal.SIG_SETMASK, set())])
         timer_values = [call.args[1] for call in self.timers.call_args_list]
-        self.assertEqual(timer_values, [116, 86, 86, 0, 90, 90, 90, 90, 90, 90, 0, 120, 0, 1800, 0])
+        # Separate phase-bound accounting arm, then the existing receipt arm.
+        self.assertEqual(timer_values, [116, 86, 86, 0, 90, 90, 90, 90, 90, 90, 0, 120, 120, 0, 1800, 0])
         self.assertEqual(self.handlers.call_args_list[-1].args, (signal.SIGALRM, self.previous_handler))
 
     def test_loop_failure_keeps_original_exception_and_owned_cleanup(self):

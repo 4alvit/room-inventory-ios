@@ -122,9 +122,11 @@ class MonitorObservabilityTests(fixtures.ControllerCase):
         with self.world() as w:
             saved = []
             w.run.flush.side_effect = lambda: saved.append(deepcopy(w.run.record))
-            def expire():
-                self.clock.now = w.run.command_deadline
-            w.barrier_fault = expire
+            # Keep phase time for the existing receipt write. Actual absolute
+            # phase expiry is checked separately by accounting-boundary tests.
+            def fail_barrier():
+                raise C.DeadlineFailure("injected terminal barrier deadline")
+            w.barrier_fault = fail_barrier
             _, error = self.captured(w.invoke)
             self.assertIsInstance(error, C.DeadlineFailure)
             observation = self.observation(w)
@@ -134,7 +136,7 @@ class MonitorObservabilityTests(fixtures.ControllerCase):
             self.assertEqual(saved[-1]["commands"][0]["derived_service"], observation)
             self.assert_cleaned(w)
 
-    def test_failed_owned_cleanup_does_not_erase_completed_barrier_or_counters(self):
+    def test_failed_owned_cleanup_prevents_terminal_barrier_but_keeps_counters(self):
         with self.world() as w:
             saved = []
             w.run.flush.side_effect = lambda: saved.append(deepcopy(w.run.record))
@@ -144,7 +146,8 @@ class MonitorObservabilityTests(fixtures.ControllerCase):
             self.assertIsInstance(error, C.RunFailure)
             observation = self.observation(w)
             self.assertEqual(observation["quanta_completed"], 3)
-            self.assertEqual(observation["terminal_barrier"], {"reached": True, "completed": True})
+            self.assertEqual(observation["terminal_barrier"], {"reached": False, "completed": False})
+            self.assertFalse(any(event[0] == "barrier" for event in w.events))
             self.assertFalse(w.run.record["commands"][0]["cleanup"]["success"])
             self.assertEqual(saved[-1]["commands"][0]["derived_service"], observation)
             self.assert_cleaned(w)

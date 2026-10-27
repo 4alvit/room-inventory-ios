@@ -60,7 +60,7 @@ ORIGIN_STAGES = frozenset((
     "unstarted", "prepare", "build", "prepare_device", "test_collect", "phase",
     "precommand", "command_setup", "command_spawn", "command_loop", "command_wait",
     "command_cleanup", "selector_cleanup", "stream_cleanup", "group_cleanup",
-    "command_receipt", "command_return", "cleanup", "device_initial_state",
+    "command_receipt", "command_return", "command_accounting", "cleanup", "device_initial_state",
     "device_shutdown", "device_final_state", "final_group_cleanup", "final_receipt"))
 ORIGIN_SITES = frozenset(("command", "command_cleanup", "operation", "device_cleanup", "cleanup", "finalization"))
 SCAN_CATEGORIES = frozenset(("output", "derived_data", "device", "original_xcresult",
@@ -399,10 +399,10 @@ class RecoveryRun:
         except BaseException:
             pass
 
-    def diagnostic_elapsed(self):
+    def diagnostic_elapsed(self, *, sampled=None):
         """Optional monotonic observation, not a deadline or actual child exit."""
         try:
-            now = self.clock()
+            now = self.clock() if sampled is None else sampled
             if type(now) not in (int, float) or type(self.start) not in (int, float):
                 return None
             value = now - self.start
@@ -667,7 +667,9 @@ class RecoveryRun:
         logs = self.output / "logs"
         logs.mkdir(exist_ok=True)
         record = {"name": name, "args": [str(a) for a in args], "start_elapsed": self.clock() - self.start,
-                  "end_deadline_elapsed": end - self.start, "primary_error": None, "exit_code": None}
+                  "end_deadline_elapsed": end - self.start, "primary_error": None, "exit_code": None,
+                  "child_completed_elapsed": None, "cleanup_completed_elapsed": None,
+                  "post_command_accounting": None}
         self.record["commands"].append(record)
         self.flush()
         buffers, streams = [bytearray(), bytearray()], []
@@ -811,15 +813,15 @@ class RecoveryRun:
             self.diagnostic_stage = "command_wait"
             record["exit_code"] = self.observe_runtime("wait", record, process.wait(timeout=0))
             require(record["exit_code"] in allowed_codes, "Command failed: " + name)
-            # Drained logs can grow after the output root's earlier snapshot.
-            # Exit zero cannot skip a complete guard within the work deadline.
+            # Preserve the child-work deadline check before any cleanup or
+            # transition to phase-bounded post-command accounting.
             self._derived_scan_service = None
-            if not self.cleanup_mode:
-                self.observe_derived_service(record, "barrier_reached")
-            self.guard(force=True)
+            if self.cleanup_mode:
+                self.guard(force=True)  # Existing time-only cleanup-mode guard.
             self.tick()
             if not self.cleanup_mode:
-                self.observe_derived_service(record, "barrier_completed")
+                record["child_completed_elapsed"] = self.diagnostic_elapsed()
+                self.tick()
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
@@ -871,12 +873,65 @@ class RecoveryRun:
                 except BaseException as error:
                     cleanup_error("owned_group_exception", error)
             self.disarm()
-            record["elapsed_seconds"] = self.clock() - self.start - record["start_elapsed"]
+            cleanup_completed = self.clock()
+            record["elapsed_seconds"] = cleanup_completed - self.start - record["start_elapsed"]
             record["stdout_sha256"], record["stderr_sha256"] = [sha(bytes(value)) for value in buffers]
+            if (not self.cleanup_mode and primary is None and process is not None
+                    and record.get("cleanup", {}).get("success")
+                    and not any(e.get("command") == name for e in self.record["cleanup_errors"])):
+                try:
+                    # Even a successful report cannot authorize late cleanup,
+                    # unknown descendants or failed selector/stream closure.
+                    require(cleanup_completed < end, "Owned cleanup returned after command deadline", DeadlineFailure)
+                    require(record["cleanup"].get("group_state") == "absent"
+                            and record["cleanup"].get("leader_reaped") is True
+                            and not record["cleanup"].get("errors")
+                            and not record["cleanup"].get("budget_exhausted")
+                            and not entry["state"].get("observation_errors"), "Owned cleanup not confirmed")
+                    record["cleanup_completed_elapsed"] = self.diagnostic_elapsed(sampled=cleanup_completed)
+                    self.diagnostic_stage = "command_accounting"
+                    accounting_end = min(self.phase_end, self.work_end, self.outer_end)
+                    self.command_deadline = accounting_end
+                    self.arm(accounting_end)
+                    accounting_started = self.clock()
+                    record["post_command_accounting"] = {
+                        "start_elapsed": self.diagnostic_elapsed(sampled=accounting_started),
+                        "deadline_elapsed": self.diagnostic_elapsed(sampled=accounting_end),
+                        "end_elapsed": None, "status": "STARTED"}
+                    self.observe_derived_service(record, "barrier_reached")
+                    # Group absence does not make simulator/DerivedData roots
+                    # quiescent. Always complete a fresh, uncached full guard.
+                    self.guard(force=True)
+                    self.tick()
+                    self.observe_derived_service(record, "barrier_completed")
+                    record["post_command_accounting"]["end_elapsed"] = self.diagnostic_elapsed()
+                    self.tick()
+                    record["post_command_accounting"]["status"] = "COMPLETED"
+                except BaseException as error:
+                    primary = error
+                    record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+                    try:
+                        if record["post_command_accounting"] is not None:
+                            record["post_command_accounting"]["status"] = "FAILED"
+                            record["post_command_accounting"]["end_elapsed"] = self.diagnostic_elapsed()
+                    except BaseException:
+                        pass
+                    try:
+                        self.observe_derived_service(record, "incomplete", preserve_primary=True)
+                    except BaseException:
+                        pass
+                    try:
+                        self.record_exception_origin(record, error, "command")
+                    except BaseException:
+                        pass
+                finally:
+                    self.command_deadline = previous_deadline
             try:
                 self.diagnostic_stage = "command_receipt"
                 receipt_end = min(self.phase_end, self.outer_end)
-                require(self.clock() < receipt_end, "Command receipt deadline expired", DeadlineFailure)
+                receipt_started = self.clock()
+                record["elapsed_seconds"] = receipt_started - self.start - record["start_elapsed"]
+                require(receipt_started < receipt_end, "Command receipt deadline expired", DeadlineFailure)
                 self.arm(receipt_end)
                 self.flush()
                 self.tick()

@@ -307,7 +307,14 @@ class RuntimeObservationTests(fixtures.ControllerCase):
                 run.record["commands"][-1]["process_observation"] = DropEarlyExitMetadata()
                 return child.process
             child.start.side_effect = spawn
-            with patch.object(run, "diagnostic_elapsed", side_effect=C.DeadlineFailure("metadata deadline")):
+            elapsed = run.diagnostic_elapsed
+            def cleanup_elapsed(**kwargs):
+                if child.stop.called:
+                    raise C.DeadlineFailure("metadata deadline")
+                return elapsed(**kwargs)
+            # Fault only cleanup-return metadata, not the newly distinct
+            # ordinary child-completion checkpoint before cleanup.
+            with patch.object(run, "diagnostic_elapsed", side_effect=cleanup_elapsed):
                 with self.assertRaisesRegex(C.RunFailure, "Owned process cleanup uncertain"):
                     run.command(["injected-child"], "fake", cap=30)
             child.stop.assert_called_once()

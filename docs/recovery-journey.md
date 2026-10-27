@@ -279,8 +279,9 @@ The observation helpers themselves preserve the outer selector/poll short circui
 and add no process calls or receipt writes. The cooperative supervision prototype
 below separately adds bounded service and a terminal resource barrier.
 
-The observation helpers add clock reads only at each scan start/end, each observed
-pipe EOF and the first captured exit result. Their timestamps use the injected
+The runtime observation helper adds clock reads only at each scan start/end, each
+observed pipe EOF and the first captured exit result. Separate child/accounting
+boundary samples are described below. Their timestamps use the injected
 monotonic clock, round to six
 decimal places and accept only finite elapsed values from 0 to 86,400 seconds;
 that metadata bound does not extend any execution deadline. Ordinary-path alarm
@@ -328,17 +329,41 @@ An identity and reentry check protects the command-local hook; it is cleared
 before all cleanup and cannot carry into a later command.
 
 Child exit never skips or accepts an incomplete walk. For operational commands,
-after the terminal pipe condition, wait and allowed exit code, the hook is disabled
-and a complete `guard(force=True)` must finish, followed by a deadline tick. This
-unconditional resource barrier catches output/log growth after an earlier root
-snapshot. Its scans,
-disk queries and existing sample write consume the original command work budget;
-an early exit zero can therefore still fail at this barrier. No cap, admission
-floor, phase deadline, four-second reserve, alarm, launch or cleanup rule changes.
+the terminal pipe condition and allowed wait result must still pass a tick under
+the original command work deadline (`end - 4`). The hook is disabled before
+selector, stream and owned-group cleanup, which retain the original `end` and
+sticky cleanup deadline. Every close must return without errors; group absence,
+leader reap, an error-free successful report and a cleanup return strictly before
+`end` are required. A late success report does not authorize continuation.
+
+Only after that confirmed cleanup, a fresh complete `guard(force=True)` runs
+under the armed original `min(phase_end, work_end, outer_end)`, followed by a
+deadline tick, before command success or another command. The old command timer
+is disarmed after bounded cleanup and before the phase-bound arm; a pending old
+alarm still fails closed. No phase is reset and no cleanup reserve is borrowed.
+Preflight, pre-Popen and live guards are unchanged. This moves only terminal
+accounting out of the child-work allowance; all resource caps, allocation metrics,
+free-space floors, entry limits and the full barrier remain. Owned-group absence
+does not prove simulator or DerivedData quiescence, so no root is cached or skipped.
+Accounting and subsequent commands share the existing phase budget: the 180-second
+device phase can still be insufficient, and no hosted success is predicted.
 In `cleanup_mode`, the existing guard returns after its deadline tick and remains
 time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.
 The outer log drain also checks complete write counts.
+
+The command's `elapsed_seconds` remains total elapsed through accounting up to
+the existing receipt boundary, rather than child duration alone. Optional
+`child_completed_elapsed` samples the post-wait work check; it is not actual OS
+exit time. `cleanup_completed_elapsed` reuses the existing post-cleanup clock.
+`post_command_accounting` holds fixed `start_elapsed`, `deadline_elapsed`,
+`end_elapsed` and `status` fields (`STARTED`, `COMPLETED` or `FAILED`), with a fresh
+start sample at the accounting transition. Times are bounded to 0–86,400 seconds,
+rounded to six decimals or null; missing/faulted timing is not evidence of success.
+Accounting failure uses the closed `command_accounting` stage and preserves its
+primary error through best-effort timing/origin capture and later receipt failures.
+Barrier completion, receipt success, group cleanup and simulator shutdown remain
+separate facts. Failed cleanup skips accounting and leaves its barrier flags false.
 
 This is cooperative service, not a worker or a latency guarantee. A single blocked
 stat, select, read, write, disk query or log walk cannot be preempted by the hook;

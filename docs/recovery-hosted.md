@@ -150,7 +150,7 @@ and retained copy to coexist.
 
 When a controller traversal reaches a byte cap, it attempts to add one
 `resource_cap_crossing` observation to the existing `result.json` receipt. It
-records the category and cap, accumulated logical and allocated bytes, entry
+records the category, cap and `cap_metric`, accumulated logical and allocated bytes, entry
 count, and the current entry's relative path, type, size and 512-byte block
 count. These values come from the traversal and stat result already in memory;
 there is no additional walk, stat, disk query or command. The observation is
@@ -171,13 +171,26 @@ can still leave this observation unavailable; its existence in memory is not
 proof of durable evidence. Complete `resource-samples.json` entries retain their
 existing meaning; a failed traversal is not appended as a complete sample.
 
-Accounting and enforcement are unchanged: reaching a cap exactly fails, logical
-bytes sum non-directory entry sizes, and allocated bytes sum every visited
-entry's block count times 512, including directories. Symlinks contribute their
-own metadata without following their targets. Hardlinks are counted per entry,
-without inode deduplication; sparse files can reach the logical cap while using
-fewer allocated blocks. Exclusions, entry/time limits and all storage caps remain
-unchanged. A cap failure alone does not establish physical disk exhaustion. For
+DerivedData's 4 GiB budget now uses allocated bytes; its potentially large sparse
+logical length remains a separate observation. All device, output, xcresult,
+attachment and log caps retain `max(logical, allocated)` enforcement, including
+logical input/copy limits. Reaching a cap exactly fails. Logical bytes sum
+non-directory entry sizes; allocated bytes sum each visited entry's nonnegative
+integer `st_blocks` times 512, including directories. Allocated-only DerivedData
+accounting additionally validates and charges the root directory's own `lstat`
+allocation before scanning children, even when empty. A root-only cap crossing
+uses relative path `.` and `entries: 0`; logical bytes remain zero for directories.
+The content-policy modes retain their existing traversal accounting. Missing or invalid block
+counts fail closed with `ResourceAccountingFailure`, without substituting logical
+size or writing an incomplete sample. Valid zero-block sparse files remain zero
+allocated bytes. Symlinks contribute only their own metadata without following
+targets. Hardlinks are counted per entry without inode deduplication, a deliberate
+conservative overcount; a fresh stat at each entry and later sample observes
+growth without an inode-size cache. `cap_metric` distinguishes `allocated` from
+`max_logical_allocated` in complete samples and partial crossings. Exclusions,
+entry/time limits, free-space bounds and numeric caps are unchanged. These sampled
+observations can overshoot and are not an instantaneous quota or full-tree atomic
+snapshot. A cap failure alone does not establish physical disk exhaustion. For
 an earlier failure without a crossing observation, the last complete sample or
 last build-log line cannot identify the missing entry, exact size or cause.
 

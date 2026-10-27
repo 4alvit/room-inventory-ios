@@ -56,9 +56,10 @@ def resource_info(size=0, blocks=0, mode=stat.S_IFREG, inode=1):
 
 
 @contextmanager
-def injected_resource_tree(trees):
-    """DirEntry metadata only: no file allocation, traversal or stat calls."""
+def injected_resource_tree(trees, *, root_infos=None):
+    """Injected root/DirEntry metadata only: no real allocation, walk or stat."""
     entries = {}
+    root_infos = {} if root_infos is None else root_infos
     for root, children in trees.items():
         for name, info in children:
             entry = SimpleNamespace(path=str(root / name), stat=Mock(return_value=info))
@@ -72,7 +73,8 @@ def injected_resource_tree(trees):
           patch.object(Path, "is_dir", return_value=True),
           patch.object(Path, "is_symlink", return_value=False),
           patch.object(Path, "stat", side_effect=AssertionError("extra stat forbidden")) as extra_stat,
-          patch.object(Path, "lstat", side_effect=AssertionError("extra lstat forbidden")) as extra_lstat,
+          patch.object(Path, "lstat", autospec=True,
+                       side_effect=lambda path: root_infos.get(path, resource_info(mode=stat.S_IFDIR))) as extra_lstat,
           patch.object(controller.os, "scandir", side_effect=scan) as scans):
         yield SimpleNamespace(entries=entries, scans=scans, extra_stat=extra_stat, extra_lstat=extra_lstat)
 
@@ -608,7 +610,7 @@ class ResourceCapObservationTests(ControllerCase):
         run = self.run_fixture()
         run.disk_usage = Mock(return_value=SimpleNamespace(free=24 * controller.GIB))
         with injected_resource_tree({run.output: [("DerivedData", resource_info(0, 0, stat.S_IFDIR))],
-                                     run.derived: [("crossing", resource_info(controller.DERIVED_CAP))]}) as tree, \
+                                     run.derived: [("crossing", resource_info(1, controller.DERIVED_CAP // 512))]}) as tree, \
                 patch.object(controller, "write_json") as write:
             with self.assertRaises(controller.RunFailure):
                 run.guard(force=True)
@@ -617,8 +619,225 @@ class ResourceCapObservationTests(ControllerCase):
             write.assert_not_called()
         self.assertEqual(run.disk_usage.call_count, 2)
         self.assertEqual(run.record["resource_cap_crossing"]["category"], "derived_data")
+        self.assertEqual(run.record["resource_cap_crossing"]["cap_metric"], "allocated")
         self.assertEqual(run.last_samples, [])
         self.popen.assert_not_called()
+
+
+class DerivedDataAccountingTests(ControllerCase):
+    def test_empty_root_allocation_is_charged_without_inventing_logical_content(self):
+        run = self.run_fixture()
+        info = resource_info(99999, 2, stat.S_IFDIR)
+        with injected_resource_tree({run.derived: []}, root_infos={run.derived: info}) as tree:
+            total = run.resource_size("derived_data", run.derived, 4096, cap_metric="allocated")
+        self.assertEqual(total, {"logical_bytes": 0, "allocated_bytes": 1024,
+                                 "entries": 0, "cap_metric": "allocated"})
+        tree.extra_lstat.assert_called_once_with(run.derived)
+        tree.scans.assert_called_once_with(run.derived)
+
+    def test_root_only_equality_and_overage_cross_before_scandir_with_partial_receipt(self):
+        for blocks in (8, 9):
+            run = self.run_fixture(output=False)
+            info = resource_info(99999, blocks, stat.S_IFDIR)
+            with self.subTest(blocks=blocks), injected_resource_tree({run.derived: []}, root_infos={run.derived: info}) as tree, \
+                    patch.object(controller, "DERIVED_CAP", 4096), patch.object(controller, "write_json") as write:
+                with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                    run.guard(force=True)
+            observation = run.record["resource_cap_crossing"]
+            self.assertEqual(observation["cap_metric"], "allocated")
+            self.assertEqual((observation["logical_bytes"], observation["allocated_bytes"], observation["entries"]),
+                             (0, blocks * 512, 0))
+            self.assertEqual(observation["traversal"], "partial")
+            self.assertEqual(observation["current_entry"], {
+                "relative_path": ".", "path_encoding": "unicode_escape", "path_truncated": False,
+                "type": "directory", "size_bytes": 99999, "blocks_512": blocks})
+            tree.extra_lstat.assert_called_once_with(run.derived)
+            tree.scans.assert_called_once_with(run.output)
+            self.assertEqual(run.last_samples, [])
+            write.assert_not_called()
+
+    def test_unknown_empty_root_allocation_fails_before_traversal(self):
+        missing = resource_info(mode=stat.S_IFDIR)
+        del missing.st_blocks
+        infos = [missing] + [resource_info(0, value, stat.S_IFDIR)
+                             for value in (None, -1, True, False, 1.0, float("nan"), "8", object())]
+        run = self.run_fixture()
+        for info in infos:
+            with self.subTest(blocks=getattr(info, "st_blocks", "missing")), \
+                    injected_resource_tree({run.derived: []}, root_infos={run.derived: info}) as tree:
+                with self.assertRaisesRegex(controller.ResourceAccountingFailure, "accounting unavailable"):
+                    run.resource_size("derived_data", run.derived, controller.DERIVED_CAP, cap_metric="allocated")
+            tree.extra_lstat.assert_called_once_with(run.derived)
+            tree.scans.assert_not_called()
+            self.assertNotIn("resource_cap_crossing", run.record)
+
+    def test_root_allocation_is_added_to_children_and_remeasured_on_later_sample(self):
+        run = self.run_fixture()
+        info = resource_info(99999, 2, stat.S_IFDIR)
+        with injected_resource_tree({run.derived: [("child", resource_info(1, 2))]}, root_infos={run.derived: info}) as tree, \
+                patch.object(controller, "DERIVED_CAP", 4096), patch.object(controller, "write_json"):
+            run.guard(force=True)
+            self.assertEqual(run.last_samples[0]["derived_data"]["allocated_bytes"], 2048)
+            info.st_blocks = 8
+            self.clock.now += 2
+            with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                run.guard()
+        self.assertEqual(len(run.last_samples), 1)
+        self.assertEqual(run.record["resource_cap_crossing"]["allocated_bytes"], 4096)
+        self.assertEqual(run.record["resource_cap_crossing"]["entries"], 0)
+        self.assertEqual(tree.extra_lstat.call_count, 2)
+        tree.entries[run.derived / "child"].stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_root_lstat_rejects_symlink_and_content_mode_does_not_change_root_policy(self):
+        root = self.root / "virtual"
+        with injected_resource_tree({root: []}, root_infos={root: resource_info(0, 0, stat.S_IFLNK)}) as tree:
+            with self.assertRaisesRegex(controller.RunFailure, "ordinary directory"):
+                controller.tree_size(root, 4096, lambda: None, cap_metric="allocated")
+        tree.scans.assert_not_called()
+        missing = resource_info(mode=stat.S_IFDIR)
+        del missing.st_blocks
+        with injected_resource_tree({root: []}, root_infos={root: missing}) as tree:
+            total = controller.tree_size(root, 4096, lambda: None)
+        tree.extra_lstat.assert_not_called()
+        self.assertEqual(total, {"logical_bytes": 0, "allocated_bytes": 0,
+                                 "entries": 0, "cap_metric": "max_logical_allocated"})
+
+    def test_derived_guard_accepts_sparse_logical_reservation_within_allocated_cap(self):
+        """Regression: the old guard aborts this same 8 GiB/zero-block stat."""
+        run = self.run_fixture()
+        with injected_resource_tree({run.derived: [("sparse-cache", resource_info(8 * controller.GIB, 0))]}) as tree, \
+                patch.object(controller, "write_json") as write:
+            run.guard(force=True)
+            tree.entries[run.derived / "sparse-cache"].stat.assert_called_once_with(follow_symlinks=False)
+        sample = run.last_samples[0]["derived_data"]
+        self.assertEqual(sample["logical_bytes"], 8 * controller.GIB)
+        self.assertEqual(sample["allocated_bytes"], 0)
+        self.assertEqual(sample["cap_metric"], "allocated")
+        self.assertEqual(write.call_args.args[1][0]["derived_data"], sample)
+        self.assertNotIn("resource_cap_crossing", run.record)
+        self.assertEqual(controller.DERIVED_CAP, 4 * controller.GIB)
+
+    def test_allocated_equality_and_overage_abort_even_with_tiny_logical_content(self):
+        for blocks in (8, 9):
+            run = self.run_fixture(output=False)
+            with self.subTest(blocks=blocks), injected_resource_tree({run.derived: [("allocated", resource_info(1, blocks))]}), \
+                    patch.object(controller, "DERIVED_CAP", 4096), patch.object(controller, "write_json") as write:
+                with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                    run.guard(force=True)
+            observation = run.record["resource_cap_crossing"]
+            self.assertEqual(observation["cap_metric"], "allocated")
+            self.assertEqual(observation["logical_bytes"], 1)
+            self.assertEqual(observation["allocated_bytes"], blocks * 512)
+            self.assertEqual(run.last_samples, [])
+            write.assert_not_called()
+
+    def test_unknown_or_invalid_blocks_fail_closed_without_invented_allocation(self):
+        values = [None, -1, True, False, 1.0, float("nan"), "8", object()]
+        missing = resource_info(1)
+        del missing.st_blocks
+        for info in [missing] + [resource_info(1, value) for value in values]:
+            for mode in (stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK):
+                info.st_mode = mode
+                run = self.run_fixture(output=False)
+                with self.subTest(blocks=getattr(info, "st_blocks", "missing"), mode=mode), \
+                        injected_resource_tree({run.derived: [("unknown", info)]}) as tree, \
+                        patch.object(controller, "write_json") as write:
+                    with self.assertRaisesRegex(controller.ResourceAccountingFailure, "accounting unavailable"):
+                        run.guard(force=True)
+                self.assertEqual(run.last_samples, [])
+                self.assertNotIn("resource_cap_crossing", run.record)
+                tree.entries[run.derived / "unknown"].stat.assert_called_once_with(follow_symlinks=False)
+                write.assert_not_called()
+
+    def test_artifact_output_and_device_logical_caps_are_not_relaxed(self):
+        cases = [("output", "", "OUTPUT_CAP"), ("device", None, "DEVICE_CAP"),
+                 ("original_xcresult", "original.xcresult", "XCRESULT_CAP"),
+                 ("verified_xcresult", "evidence/collection/xcresult/verified.xcresult", "XCRESULT_CAP"),
+                 ("attachments", "evidence/collection/xcresult/attachments", "ATTACHMENT_CAP"),
+                 ("logs", "logs", "LOG_CAP")]
+        for category, relative, constant in cases:
+            run = self.run_fixture(output=False)
+            run.device_root = self.devices / "owned"
+            root = run.device_root if relative is None else run.output / relative
+            with self.subTest(category=category), injected_resource_tree({root: [("sparse-content", resource_info(getattr(controller, constant), 0))]}), \
+                    patch.object(controller, "write_json"):
+                with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                    run.guard(force=True)
+            crossing = run.record["resource_cap_crossing"]
+            self.assertEqual(crossing["category"], category)
+            self.assertEqual(crossing["cap_metric"], "max_logical_allocated")
+            self.assertEqual(crossing["allocated_bytes"], 0)
+
+    def test_hardlink_growth_is_charged_per_entry_without_stale_inode_cache(self):
+        run = self.run_fixture()
+        before, after = resource_info(1, 2, inode=101), resource_info(1, 6, inode=101)
+        with injected_resource_tree({run.derived: [("first-link", before), ("grown-link", after)]}) as tree:
+            with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                run.resource_size("derived_data", run.derived, 4096, cap_metric="allocated")
+        crossing = run.record["resource_cap_crossing"]
+        self.assertEqual((crossing["allocated_bytes"], crossing["logical_bytes"], crossing["entries"]), (4096, 2, 2))
+        for entry in tree.entries.values():
+            entry.stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_growth_is_remeasured_at_next_scheduled_guard_sample(self):
+        run = self.run_fixture()
+        path = run.derived / "growing"
+        with injected_resource_tree({run.derived: [("growing", resource_info(8 * controller.GIB, 1))]}) as tree, \
+                patch.object(controller, "DERIVED_CAP", 4096), patch.object(controller, "write_json"):
+            tree.entries[path].stat.side_effect = [resource_info(8 * controller.GIB, 1), resource_info(8 * controller.GIB, 8)]
+            run.guard(force=True)
+            self.clock.now += 2
+            with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                run.guard()
+        self.assertEqual(len(run.last_samples), 1)
+        self.assertEqual(run.last_samples[0]["derived_data"]["allocated_bytes"], 512)
+        self.assertEqual(run.record["resource_cap_crossing"]["allocated_bytes"], 4096)
+        self.assertEqual(tree.entries[path].stat.call_count, 2)
+
+    def test_allocated_mode_counts_directory_and_link_metadata_without_following_link(self):
+        run = self.run_fixture()
+        nested = run.derived / "nested"
+        with injected_resource_tree({run.derived: [("nested", resource_info(9000, 1, stat.S_IFDIR)),
+                                                  ("outside-link", resource_info(17, 1, stat.S_IFLNK))],
+                                     nested: [("sparse", resource_info(99999, 0))]}) as tree:
+            total = run.resource_size("derived_data", run.derived, 1025, cap_metric="allocated")
+        self.assertEqual((total["allocated_bytes"], total["logical_bytes"], total["entries"]), (1024, 100016, 3))
+        self.assertEqual(tree.scans.call_args_list, [((run.derived,),), ((nested,),)])
+        for entry in tree.entries.values():
+            entry.stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_zero_block_entries_do_not_bypass_entry_or_deadline_bounds(self):
+        root = self.root / "virtual"
+        trees = {root: [("one", resource_info(99999, 0)), ("two", resource_info(99999, 0))]}
+        with injected_resource_tree(trees):
+            with self.assertRaisesRegex(controller.RunFailure, "entry-count"):
+                controller.tree_size(root, 4096, lambda: None, max_entries=1, cap_metric="allocated")
+        tick = Mock(side_effect=[None, controller.DeadlineFailure("deadline during walk")])
+        with injected_resource_tree(trees) as tree:
+            with self.assertRaisesRegex(controller.DeadlineFailure, "deadline during walk"):
+                controller.tree_size(root, 4096, tick, cap_metric="allocated")
+        tree.entries[root / "one"].stat.assert_not_called()
+
+    def test_small_real_sparse_file_and_external_symlink_keep_distinct_budgets(self):
+        root = self.root / "small-real-tree"
+        root.mkdir()
+        sparse = root / "sparse"
+        with sparse.open("wb") as stream:
+            stream.truncate(128 * 1024)
+        external = self.root / "external"
+        external.mkdir()
+        (external / "not-owned").write_bytes(b"x" * 1024)
+        link = root / "link"
+        link.symlink_to(external, target_is_directory=True)
+        blocks = root.lstat().st_blocks + sparse.lstat().st_blocks + link.lstat().st_blocks
+        if blocks * 512 >= 64 * 1024:
+            self.skipTest("Fixture filesystem does not expose a sparse allocation below 64 KiB")
+        total = controller.tree_size(root, 64 * 1024, lambda: None, cap_metric="allocated")
+        self.assertEqual(total["entries"], 2)
+        self.assertEqual(total["allocated_bytes"], blocks * 512)
+        self.assertEqual(total["logical_bytes"], sparse.lstat().st_size + link.lstat().st_size)
+        with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+            controller.tree_size(root, 64 * 1024, lambda: None)
 
 
 class CommandFailureTests(ControllerCase):
@@ -650,6 +869,23 @@ class CommandFailureTests(ControllerCase):
               patch.object(controller, "kill_owned", return_value=cleanup) as stop):
             yield SimpleNamespace(process=process, selector=selector, start=start, stop=stop,
                                   log_streams=log_streams, cleanup=cleanup)
+
+    def test_unknown_allocation_after_acquisition_preserves_failure_and_cleans_owned_group(self):
+        run = self.run_fixture()
+        info = resource_info(1)
+        del info.st_blocks
+
+        def after_acquisition():
+            if run.groups:
+                run.resource_size("derived_data", run.derived, controller.DERIVED_CAP, cap_metric="allocated")
+
+        run.guard = Mock(side_effect=after_acquisition)
+        with self.fake_child(active=True) as child, injected_resource_tree({run.derived: [("unknown", info)]}):
+            with self.assertRaisesRegex(controller.ResourceAccountingFailure, "accounting unavailable"):
+                run.command(["never-executed"], "fake-build", cap=30)
+        child.stop.assert_called_once()
+        self.assertTrue(run.record["commands"][0]["cleanup"]["success"])
+        self.assertNotIn("resource_cap_crossing", run.record)
 
     def assert_cap_cleanup_precedes_receipt(self, receipt_error=None):
         run = self.run_fixture()

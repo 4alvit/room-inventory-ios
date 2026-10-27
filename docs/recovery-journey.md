@@ -176,12 +176,23 @@ files and never writes application data or supplies entitlements.
 Admission requires **at least 24 GiB free** on both the output and simulator-device
 filesystems before creating a device or building. During work, free space below
 8 GiB aborts. At most every two seconds the controller checks owned roots using
-bounded `lstat` walks, enforcing the larger of logical and allocated bytes without
-following symlinks. Reaching a sampled cap also aborts: new device 8 GiB,
-DerivedData 4 GiB, other attempt output 1 GiB, original xcresult 192 MiB, verified
+bounded `lstat` walks without following symlinks. DerivedData has a **4 GiB
+allocated disk budget** (`st_blocks * 512`); its logical length is recorded
+separately, so sparse cache reservations do not consume that disk budget. The
+DerivedData root directory's own allocation is charged before visiting children,
+including an empty root; root `lstat` and block validation are deadline checked.
+Missing, negative or non-integer block counts fail closed: logical length is not
+an upper bound on allocated storage. All other roots still enforce the larger
+of logical and allocated bytes. Reaching a sampled cap also aborts: new device 8 GiB,
+other attempt output 1 GiB, original xcresult 192 MiB, verified
 xcresult copy 192 MiB, exported attachments 128 MiB and logs 64 MiB. Each command
 stream is additionally limited to 16 MiB. The collector limits its own writes to
-512 MiB and rejects copies that cannot fit its remaining allowance.
+512 MiB and rejects copies that cannot fit its remaining allowance. Every complete
+sample and byte-cap crossing identifies its `cap_metric` as `allocated` or
+`max_logical_allocated`. No unknown allocation is reported as zero or estimated
+from logical size. Hardlinks remain conservatively charged per directory entry;
+each entry and every later walk obtain fresh metadata, including later growth.
+Entry-count, deadline, exclusions and cleanup bounds are unchanged.
 
 The 24 GiB policy budgets 13 GiB of retained owned output, 3 GiB of transient/shared
 growth and the 8 GiB free-space floor. It deliberately includes the new simulator

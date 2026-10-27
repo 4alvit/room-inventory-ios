@@ -47,6 +47,10 @@ class DeadlineFailure(RunFailure):
     exit_code = 124
 
 
+class ResourceAccountingFailure(RunFailure):
+    """An allocated disk budget cannot be established from this filesystem stat."""
+
+
 def require(condition, message, kind=RunFailure):
     if not condition:
         raise kind(message)
@@ -107,13 +111,45 @@ def validate_grant(grant, *, now, script_root):
     return grant
 
 
-def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None):
+def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
+              cap_metric="max_logical_allocated"):
     """Bounded lstat traversal. Do not follow symlinks or require native size probes."""
+    require(cap_metric in ("max_logical_allocated", "allocated"), "Unknown resource cap metric")
     if not root.exists() and not root.is_symlink():
-        return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0}
+        return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
     require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
     pending, logical, allocated, entries = [root], 0, 0, 0
     excluded = set(excluded)
+
+    def allocation_bytes(info):
+        blocks = getattr(info, "st_blocks", None)
+        require(type(blocks) is int and blocks >= 0,
+                "Allocated resource accounting unavailable: " + str(root), ResourceAccountingFailure)
+        # A valid zero is meaningful for sparse files. st_size is not
+        # an upper bound on allocation, so unknown blocks fail closed.
+        return blocks * 512
+
+    def check_cap(path, info):
+        budget_bytes = allocated if cap_metric == "allocated" else max(logical, allocated)
+        if budget_bytes >= cap:
+            primary = RunFailure("Owned resource byte cap reached: " + str(root))
+            try:
+                if on_cap is not None:
+                    on_cap(root, cap, logical, allocated, entries, path, info)
+            except BaseException:
+                # Diagnostics, including interruption while formatting,
+                # must not replace this failure or prevent group cleanup.
+                pass
+            raise primary
+
+    if cap_metric == "allocated":
+        tick()
+        root_info = root.lstat()
+        require(stat.S_ISDIR(root_info.st_mode), "Resource root is not an ordinary directory")
+        allocated = allocation_bytes(root_info)
+        # The root can consume blocks even with no children. Keep entries as
+        # the count of visited children; a root-only crossing has path '.'.
+        check_cap(root, root_info)
     while pending:
         tick()
         directory = pending.pop()
@@ -128,22 +164,16 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None):
                 require(entries <= max_entries, "Resource entry-count cap exceeded")
                 # Native products/device roots may contain links; account for the
                 # link itself, never traverse its target or any external tree.
-                allocated += info.st_blocks * 512
+                # Count each hardlink observation conservatively; do not cache
+                # inode sizes or discard growth at a later entry or sample.
+                allocated += allocation_bytes(info)
                 if stat.S_ISDIR(info.st_mode):
                     pending.append(path)
                 else:
                     logical += info.st_size
-                if max(logical, allocated) >= cap:
-                    primary = RunFailure("Owned resource byte cap reached: " + str(root))
-                    try:
-                        if on_cap is not None:
-                            on_cap(root, cap, logical, allocated, entries, path, info)
-                    except BaseException:
-                        # Diagnostics, including interruption while formatting,
-                        # must not replace this failure or prevent group cleanup.
-                        pass
-                    raise primary
-    return {"logical_bytes": logical, "allocated_bytes": allocated, "entries": entries}
+                check_cap(path, info)
+    return {"logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
+            "cap_metric": cap_metric}
 
 
 # This is the bounded owned-group cleanup used by the reviewed Room smoke runner.
@@ -317,7 +347,8 @@ class RecoveryRun:
     def tick(self):
         require(self.clock() < min(self.phase_end, self.outer_end, self.command_deadline or self.outer_end), "Absolute phase/outer deadline exceeded", DeadlineFailure)
 
-    def record_resource_cap(self, category, root, cap, logical, allocated, entries, path, info):
+    def record_resource_cap(self, category, root, cap, logical, allocated, entries, path, info,
+                            *, cap_metric="max_logical_allocated"):
         if self.resource_cap_observed:
             return
         # Claim the first crossing even if its optional formatting fails. Use
@@ -339,6 +370,7 @@ class RecoveryRun:
                           stat.S_IFMT(info.st_mode), "unknown")
         observation = {
             "traversal": "partial", "category": category, "cap_bytes": cap,
+            "cap_metric": cap_metric,
             "logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
             "current_entry": {"relative_path": escaped[:1024], "path_encoding": "unicode_escape",
                               "path_truncated": len(text) > 256 or len(escaped) > 1024,
@@ -352,9 +384,9 @@ class RecoveryRun:
         require(len(encoded) <= 4096, "Resource observation JSON out of bounds")
         self.record["resource_cap_crossing"] = observation
 
-    def resource_size(self, category, root, cap, **kwargs):
-        return tree_size(root, cap, self.tick, **kwargs,
-                         on_cap=lambda *data: self.record_resource_cap(category, *data))
+    def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
+        return tree_size(root, cap, self.tick, cap_metric=cap_metric, **kwargs,
+                         on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
 
     def guard(self, force=False):
         self.tick()
@@ -367,7 +399,10 @@ class RecoveryRun:
             self.last_resource_check = self.clock()
             sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
                       "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,)),
-                      "derived_data": self.resource_size("derived_data", self.derived, DERIVED_CAP)}
+                      # DerivedData is a live disk budget, not a logical copy/input bound.
+                      # Keep logical sizes visible without charging sparse reservations.
+                      "derived_data": self.resource_size("derived_data", self.derived, DERIVED_CAP,
+                                                         cap_metric="allocated")}
             if self.device_root:
                 sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
             for name, root, limit in [

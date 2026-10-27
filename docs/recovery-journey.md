@@ -275,11 +275,13 @@ pipe EOF. Missing fields/times mean unobserved or unavailable, never success.
 `capture_incomplete` marks an observer error: earlier observations may be missing,
 so the first retained exit is then not claimed to be the earliest observed exit.
 That flag is itself best effort; its absence does not prove a complete history.
-The original selector/poll short circuit, process calls and cleanup are unchanged.
-No extra polls, reads, scans, timers, sleeps or receipt writes are added.
+The observation helpers themselves preserve the outer selector/poll short circuit
+and add no process calls or receipt writes. The cooperative supervision prototype
+below separately adds bounded service and a terminal resource barrier.
 
-New clock reads occur only at each scan start/end, each observed pipe EOF and the
-first captured exit result. They use the injected monotonic clock, round to six
+The observation helpers add clock reads only at each scan start/end, each observed
+pipe EOF and the first captured exit result. Their timestamps use the injected
+monotonic clock, round to six
 decimal places and accept only finite elapsed values from 0 to 86,400 seconds;
 that metadata bound does not extend any execution deadline. Ordinary-path alarm
 and interruption exceptions still propagate to the existing failure handlers;
@@ -296,6 +298,57 @@ the existing indented JSON. There is no per-entry or scan history; one process
 record belongs to each already-existing command, with no added command/retry loop.
 This diagnostic preparation establishes neither the historical delay's cause
 nor native recovery acceptance.
+
+### Cooperative DerivedData supervision prototype
+
+While an owned command is active, only the DerivedData walk uses a cooperative
+service checkpoint. Output and log walks, pre-spawn work and cleanup use the plain
+deadline tick. At 64 returning checkpoints or 50 ms since the last service, the
+checkpoint performs at most one `select(0)`, one read of up to 65,536 bytes from
+each of the two known pipes, and one poll of that child. Ready order does not
+permit repeated stdout reads to starve stderr or traversal. EOF still requires
+an empty read; a zero leader exit does not establish EOF or absence of descendants.
+The earlier poll is an intentional ordering change and can reap the leader earlier.
+
+Each service first repeats the existing 8 GiB free-space floor check on the output
+parent and simulator device base, with a deadline check after each query. These
+are additional filesystem queries. Stream limits remain 16 MiB per pipe. Writes
+must report the complete byte count; short/error writes fail. In the cooperative
+service, a read or write returning after the deadline, or a partial write, fails
+before `buffers.extend`. Bytes already read may be absent from the raw log, and
+bytes already written may be absent from the buffer used for its stream digest.
+Such a failure leaves incomplete evidence: neither raw byte completeness nor
+agreement between the stream digest and its file is guaranteed. After successful
+persistence and buffer accounting, a direct log walk with the plain tick enforces
+the existing 64 MiB
+`max_logical_allocated` bound and 256-entry limit before another service. It keeps
+the active DerivedData span intact and attributes a byte crossing to `logs`.
+No service invokes guard, collection/bridge callbacks, nested commands or flush.
+An identity and reentry check protects the command-local hook; it is cleared
+before all cleanup and cannot carry into a later command.
+
+Child exit never skips or accepts an incomplete walk. For operational commands,
+after the terminal pipe condition, wait and allowed exit code, the hook is disabled
+and a complete `guard(force=True)` must finish, followed by a deadline tick. This
+unconditional resource barrier catches output/log growth after an earlier root
+snapshot. Its scans,
+disk queries and existing sample write consume the original command work budget;
+an early exit zero can therefore still fail at this barrier. No cap, admission
+floor, phase deadline, four-second reserve, alarm, launch or cleanup rule changes.
+In `cleanup_mode`, the existing guard returns after its deadline tick and remains
+time-only, so a resource failure cannot prevent required cleanup. The same call
+does not perform a full resource barrier for cleanup commands.
+The outer log drain also checks complete write counts.
+
+This is cooperative service, not a worker or a latency guarantee. A single blocked
+stat, select, read, write, disk query or log walk cannot be preempted by the hook;
+the original alarm and next returning deadline check remain the bounds. DerivedData
+span time now includes pipe service and nested log validation overhead, rather
+than measuring pure traversal. Accounting continues to sample a changing tree;
+it is not an instantaneous disk quota. Interleaving can change which real failure
+is observed first. Fake before/after operation counts establish progress between
+returning checkpoints only, without demonstrating native speedup, historical
+causation or recovery acceptance.
 
 ### Owned cleanup
 

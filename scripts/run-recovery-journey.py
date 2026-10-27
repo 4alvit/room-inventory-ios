@@ -379,6 +379,7 @@ class RecoveryRun:
         self.last_samples = []
         self.resource_cap_observed = False
         self.cleanup_mode = False
+        self._derived_scan_service = None
         self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -521,7 +522,9 @@ class RecoveryRun:
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
         span = self.observe_runtime("scan_start", value=category)
         try:
-            result = tree_size(root, cap, self.tick, cap_metric=cap_metric, **kwargs,
+            checkpoint = (self._derived_scan_service if category == "derived_data" and root == self.derived
+                          and not self.cleanup_mode and self._derived_scan_service is not None else self.tick)
+            result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
                                on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
         except BaseException:
             try:
@@ -575,6 +578,7 @@ class RecoveryRun:
         """One owned process group, bounded pipe draining, sticky cleanup result."""
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
+        require(self._derived_scan_service is None, "Stale scan service", ConfigurationFailure)
         self.guard()
         end = min(self.phase_end, self.clock() + cap)
         require(end - self.clock() >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
@@ -592,6 +596,71 @@ class RecoveryRun:
         selector = selectors.DefaultSelector()
         previous_deadline = self.command_deadline
         self.command_deadline = end - 4
+        service_checkpoints, service_last, service_busy = 0, None, False
+
+        def service_derived_scan():
+            """Cooperative work between returning walker checkpoints, never a worker.
+
+            No callback/guard/flush here. A single blocked syscall still blocks
+            supervision; every returning boundary checks the original deadline.
+            """
+            nonlocal service_checkpoints, service_last, service_busy
+            self.tick()
+            require(self._derived_scan_service is service_derived_scan and not service_busy,
+                    "Invalid or reentrant scan service", ConfigurationFailure)
+            service_checkpoints += 1
+            if service_checkpoints < 64 and self.clock() - service_last < .05:
+                self.tick()
+                return
+            service_busy = True
+            try:
+                # The outer loop checked this floor before each read batch.
+                # Repeat it here without recursively entering the resource guard.
+                free = self.disk_usage(self.output.parent).free
+                self.tick()
+                free = min(free, self.disk_usage(self.device_base).free)
+                self.tick()
+                require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
+                ready = selector.select(0)
+                self.tick()
+                require(len(ready) <= 2, "Unexpected scan service readiness count")
+                seen, drained = set(), False
+                for key, _ in ready:
+                    self.tick()
+                    index = key.data
+                    require(type(index) is int and index in (0, 1) and index not in seen
+                            and key.fileobj is (process.stdout, process.stderr)[index],
+                            "Unexpected scan service pipe identity", ConfigurationFailure)
+                    seen.add(index)
+                    try:
+                        data = os.read(key.fileobj.fileno(), 65536)
+                    except BlockingIOError:
+                        self.tick()
+                        continue
+                    self.tick()
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        self.observe_runtime("stdout_eof" if index == 0 else "stderr_eof", record)
+                        continue
+                    require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
+                    written = streams[index].write(data)
+                    self.tick()
+                    require(written == len(data), "Incomplete command log write: " + name)
+                    buffers[index].extend(data)
+                    drained = True
+                self.tick()
+                self.observe_runtime("poll", record, process.poll())
+                self.tick()
+                if drained:
+                    # Validate newly persisted logs with the plain deadline tick.
+                    # Preserve the active DerivedData span and cap accounting.
+                    tree_size(logs, LOG_CAP, self.tick, max_entries=256,
+                              on_cap=lambda *data: self.record_resource_cap("logs", *data))
+                    self.tick()
+                service_checkpoints, service_last = 0, self.clock()
+                self.tick()
+            finally:
+                service_busy = False
 
         def cleanup_error(operation, error):
             observation = {"command": name, "operation": operation,
@@ -624,9 +693,12 @@ class RecoveryRun:
             for index, pipe in enumerate((process.stdout, process.stderr)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, index)
+            service_last = self.clock()
+            if not self.cleanup_mode:
+                self._derived_scan_service = service_derived_scan
             self.diagnostic_stage = "command_loop"
             # Preserve the original short circuit and consume map truth once.
-            # A nonempty selector must not introduce a new child poll.
+            # This outer condition alone adds no poll for a nonempty selector.
             while (self.observe_runtime("selector", record, bool(selector.get_map())) or
                    self.observe_runtime("poll", record, process.poll()) is None):
                 self.guard()
@@ -646,12 +718,17 @@ class RecoveryRun:
                         continue
                     index = key.data
                     require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
-                    streams[index].write(data)
+                    require(streams[index].write(data) == len(data), "Incomplete command log write: " + name)
                     buffers[index].extend(data)
                 self.resource_size("logs", logs, LOG_CAP, max_entries=256)
             self.diagnostic_stage = "command_wait"
             record["exit_code"] = self.observe_runtime("wait", record, process.wait(timeout=0))
             require(record["exit_code"] in allowed_codes, "Command failed: " + name)
+            # Drained logs can grow after the output root's earlier snapshot.
+            # Exit zero cannot skip a complete guard within the work deadline.
+            self._derived_scan_service = None
+            self.guard(force=True)
+            self.tick()
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
@@ -660,6 +737,7 @@ class RecoveryRun:
             except BaseException:
                 pass
         finally:
+            self._derived_scan_service = None
             self.diagnostic_stage = "command_cleanup"
             self.disarm()
             self.command_deadline = previous_deadline

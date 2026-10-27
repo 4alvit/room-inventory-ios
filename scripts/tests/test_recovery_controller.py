@@ -858,6 +858,7 @@ class CommandFailureTests(ControllerCase):
         def open_stream(path, mode="r", *args, **kwargs):
             if mode == "xb":
                 stream = Mock(name="injected-command-log")
+                stream.write.side_effect = len
                 log_streams.append(stream)
                 return stream
             return real_open(path, mode, *args, **kwargs)

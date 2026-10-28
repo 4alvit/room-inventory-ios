@@ -167,14 +167,35 @@ def validate_grant(grant, *, now, script_root):
     return grant
 
 
+def device_directory_identity(root):
+    """Sample a required owned directory identity without following its final link.
+
+    Path ancestry and concurrent changes between checks are not made atomic.
+    This is a checkpoint identity guard, not a descriptor-anchored traversal.
+    """
+    info = root.lstat()
+    require(stat.S_ISDIR(info.st_mode), "Owned device root is not an ordinary directory",
+            ResourceAccountingFailure)
+    require(type(info.st_dev) is int and type(info.st_ino) is int
+            and info.st_dev >= 0 and info.st_ino >= 0,
+            "Owned device root identity unavailable", ResourceAccountingFailure)
+    return info.st_dev, info.st_ino
+
+
 def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
-              cap_metric="max_logical_allocated"):
+              cap_metric="max_logical_allocated", vanished_child_check=None):
     """Bounded lstat traversal. Do not follow symlinks or require native size probes."""
     require(cap_metric in ("max_logical_allocated", "allocated"), "Unknown resource cap metric")
+    if vanished_child_check is not None:
+        tick()
+        vanished_child_check()
+        tick()
     if not root.exists() and not root.is_symlink():
+        require(vanished_child_check is None, "Required device root disappeared", ResourceAccountingFailure)
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
     require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
     pending, logical, allocated, entries = [root], 0, 0, 0
+    attempted_entries, vanished_entries = 0, 0
     excluded = set(excluded)
 
     def allocation_bytes(info):
@@ -215,7 +236,22 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                 path = Path(entry.path)
                 if path in excluded:
                     continue
-                info = entry.stat(follow_symlinks=False)
+                if vanished_child_check is not None:
+                    # Bound encountered work even if every observed child vanishes.
+                    attempted_entries += 1
+                    require(attempted_entries <= max_entries, "Resource entry-count cap exceeded")
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError as error:
+                    if vanished_child_check is None or error.errno != errno.ENOENT:
+                        raise
+                    # Only this child-stat syscall is eligible. Root, callback,
+                    # iterator/open/close, metadata and cap failures stay strict.
+                    tick()  # A late stat return cannot start another filesystem query.
+                    vanished_child_check()
+                    tick()
+                    vanished_entries += 1
+                    continue
                 entries += 1
                 require(entries <= max_entries, "Resource entry-count cap exceeded")
                 # Native products/device roots may contain links; account for the
@@ -228,8 +264,14 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                 else:
                     logical += info.st_size
                 check_cap(path, info)
-    return {"logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
-            "cap_metric": cap_metric}
+    result = {"logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
+              "cap_metric": cap_metric}
+    if vanished_child_check is not None:
+        tick()  # Iterator closure is a returning boundary under the same deadline.
+        vanished_child_check()
+        tick()
+        result.update(attempted_entries=attempted_entries, vanished_entries=vanished_entries)
+    return result
 
 
 # This is the bounded owned-group cleanup used by the reviewed Room smoke runner.
@@ -374,6 +416,7 @@ class RecoveryRun:
         self.output = Path(grant["output_root"])
         self.derived = self.output / "DerivedData"
         self.device_root = None
+        self._owned_device_identity = None
         self.device_base = Path.home() / "Library/Developer/CoreSimulator/Devices"
         self.owns_output = False
         self.device_id = None
@@ -604,9 +647,30 @@ class RecoveryRun:
         require(len(encoded) <= 4096, "Resource observation JSON out of bounds")
         self.record["resource_cap_crossing"] = observation
 
+    def bind_device_resource_root(self):
+        # Bind once, immediately after create-device supplied the canonical UUID
+        # and the new root passed the existing ordinary-directory checks.
+        require(self._owned_device_identity is None, "Owned device identity already bound", ConfigurationFailure)
+        require(self.device_id is not None and self.device_root == self.device_base / self.device_id,
+                "Invalid owned device root binding", ConfigurationFailure)
+        identity = device_directory_identity(self.device_root)
+        self._owned_device_identity = (self.device_root, self.device_id, identity)
+
+    def validate_device_resource_root(self, root, binding):
+        require(binding is not None and self._owned_device_identity is binding
+                and root is binding[0] and root is self.device_root
+                and self.device_id == binding[1] and root == self.device_base / self.device_id,
+                "Stale owned device resource binding", ConfigurationFailure)
+        require(device_directory_identity(root) == binding[2], "Owned device root replaced",
+                ResourceAccountingFailure)
+
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
         span = self.observe_runtime("scan_start", value=category)
         try:
+            if category == "device":
+                require("vanished_child_check" not in kwargs, "Device validation cannot be overridden", ConfigurationFailure)
+                owned_binding = self._owned_device_identity
+                kwargs["vanished_child_check"] = lambda: self.validate_device_resource_root(root, owned_binding)
             checkpoint = (self._derived_scan_service if category == "derived_data" and root == self.derived
                           and not self.cleanup_mode and self._derived_scan_service is not None else self.tick)
             binding = self._device_scan_service if category == "device" and not self.cleanup_mode else None
@@ -1079,6 +1143,7 @@ class RecoveryRun:
         self.device_id = canonical_uuid(raw)
         self.device_root = self.device_base / self.device_id
         require(self.device_root.is_dir() and not self.device_root.is_symlink(), "New device root missing")
+        self.bind_device_resource_root()
         self.record["device_id"] = self.device_id
         self.record["device_path"] = str(self.device_root)
         self.flush()

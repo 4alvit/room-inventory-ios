@@ -193,8 +193,9 @@ class World:
             (self.c, 'write_json', Mock(side_effect=lambda p,v: self.samples.append((str(p), json.loads(json.dumps(v)))))),
             (Path, 'open', lambda path, *a, **k: self.log(path, *a, **k)), (Path, 'mkdir', Mock()), (Path, 'exists', Mock(return_value=True)),
             (Path, 'is_dir', Mock(return_value=True)), (Path, 'is_symlink', Mock(return_value=False)),
-            (Path, 'lstat', Mock(return_value=SimpleNamespace(st_size=0,st_blocks=0,st_mode=stat.S_IFDIR)))]:
+            (Path, 'lstat', Mock(return_value=SimpleNamespace(st_size=0,st_blocks=0,st_mode=stat.S_IFDIR,st_dev=1,st_ino=1)))]:
             self.stack.enter_context(patch.object(target, name, replacement))
+        self.run.bind_device_resource_root()  # Explicit mocked creation-time identity.
         return self
     def __exit__(self, *args):
         return self.stack.__exit__(*args)
@@ -253,7 +254,7 @@ class DeviceTests(unittest.TestCase):
             w.read_action=lambda fd: b'x' if w.walked < 180 else b''
             self.assertEqual(w.invoke(), b'xx')
             quanta=[e[1] for e in w.events if e[0]=='select' and e[2]==0]
-            self.assertEqual(quanta, [62,126,190])
+            self.assertEqual(quanta, [60,124,188])  # Two device-root admission checkpoints.
             self.assertTrue(all(e[3]==65536 for e in w.events if e[0]=='read'))
             for point in quanta:
                 self.assertEqual({e[2] for e in w.events if e[0]=='read' and e[1]==point}, {111,112})

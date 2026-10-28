@@ -321,7 +321,11 @@ class ResourceAndDeadlineTests(ControllerCase):
                 run.output = Path(temp) / "out"
                 run.output.mkdir()
                 run.derived = run.output / "DerivedData"
-                run.device_root = Path(temp) / "device"
+                run.device_base = Path(temp)
+                run.device_id = "44444444-4444-4444-8444-444444444444"
+                run.device_root = run.device_base / run.device_id
+                run.device_root.mkdir()
+                run.bind_device_resource_root()
                 target = {"output": run.output, "derived": run.derived, "device": run.device_root}[category]
                 target.mkdir(exist_ok=True)
                 (target / "oversized").write_bytes(b"x" * 8193)
@@ -757,10 +761,12 @@ class DerivedDataAccountingTests(ControllerCase):
                  ("logs", "logs", "LOG_CAP")]
         for category, relative, constant in cases:
             run = self.run_fixture(output=False)
-            run.device_root = self.devices / "owned"
+            run.device_id = "44444444-4444-4444-8444-444444444444"
+            run.device_root = self.devices / run.device_id
             root = run.device_root if relative is None else run.output / relative
             with self.subTest(category=category), injected_resource_tree({root: [("sparse-content", resource_info(getattr(controller, constant), 0))]}), \
                     patch.object(controller, "write_json"):
+                run.bind_device_resource_root()  # Uses the injected root metadata.
                 with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
                     run.guard(force=True)
             crossing = run.record["resource_cap_crossing"]
@@ -1483,6 +1489,7 @@ class FailurePreservationTests(ControllerCase):
         run.device_id = "44444444-4444-4444-8444-444444444444"
         run.device_root = self.devices / run.device_id
         run.device_root.mkdir()
+        run.bind_device_resource_root()
         names = []
 
         def command(_args, name, **_kwargs):

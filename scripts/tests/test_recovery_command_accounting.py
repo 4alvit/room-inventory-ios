@@ -235,7 +235,8 @@ class CommandAccountingTests(fixtures.ControllerCase):
         for category in ("derived", "device", "logs", "output", "free", "unknown"):
             with self.subTest(category=category), self.boundary(accounting_cost=0) as b:
                 run = b.run
-                run.device_root = self.devices / "owned"
+                run.device_id = "44444444-4444-4444-8444-444444444444"
+                run.device_root = self.devices / run.device_id
                 root, cap = {
                     "derived": (run.derived, C.DERIVED_CAP), "unknown": (run.derived, C.DERIVED_CAP),
                     "device": (run.device_root, C.DEVICE_CAP), "logs": (run.output / "logs", C.LOG_CAP),
@@ -253,6 +254,7 @@ class CommandAccountingTests(fixtures.ControllerCase):
                     return C.RecoveryRun.guard(run, force=True)
                 run.guard.side_effect = guard
                 with fixtures.injected_resource_tree({root: [("crossing", info)]}) as tree, patch.object(C, "write_json") as writes:
+                    run.bind_device_resource_root()  # Uses the injected root metadata.
                     # The log allocation grows only after owned cleanup; the
                     # unchanged live log scan must still pass beforehand.
                     if category == "logs":

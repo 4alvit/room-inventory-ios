@@ -35,7 +35,8 @@ require, Failure, Deadline = controller.require, controller.ConfigurationFailure
 PROFILE_PATH = "scripts/recovery-hosted-profile.json"
 POLICY = {
     "schema_version": 1, "repository": "4alvit/room-inventory-ios", "job_id": "recovery",
-    "runner_label": "macos-15", "image_os": "macos15", "workflow_path": ".github/workflows/ci.yml",
+    "runner_label": "macos-15-intel", "image_os": "macos15", "workflow_path": ".github/workflows/ci.yml",
+    "runner_arch": "X64", "process_arch": "x86_64", "xcode_version": "Xcode 16.4\nBuild version 16F6",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
     "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,
@@ -71,7 +72,7 @@ def validate_host(env, profile, root, *, machine=None, system=None):
         require(env.get(key) == value, "Unsupported hosted context: " + key, Failure)
     require((system or platform.system()) == "Darwin", "macOS process required", Failure)
     arch = machine or platform.machine()
-    require(arch in {"X64": ("x86_64",), "ARM64": ("arm64", "aarch64")}.get(env.get("RUNNER_ARCH"), ()),
+    require(env.get("RUNNER_ARCH") == profile["runner_arch"] and arch == profile["process_arch"],
             "Runner architecture differs", Failure)
     require(isinstance(env.get("ImageVersion"), str)
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", env["ImageVersion"]),
@@ -642,7 +643,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             developer = developer.resolve()
             discovery.env["DEVELOPER_DIR"] = str(developer)
             xcode_version = discovery.command(["xcodebuild", "-version"], "xcode-version", 10).decode().strip()
-            require(re.fullmatch(r"Xcode [0-9.]+\nBuild version [A-Za-z0-9]+", xcode_version), "Invalid Xcode version response", Failure)
+            require(xcode_version == profile["xcode_version"], "Installed Xcode version/build differs", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
             inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 90))
             selection = select_runtime(inventory, sdk)

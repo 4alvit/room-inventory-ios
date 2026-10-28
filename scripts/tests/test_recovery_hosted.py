@@ -55,7 +55,7 @@ class HostedCase(unittest.TestCase):
         self.env = {"GITHUB_ACTIONS": "true", "CI": "true", "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "macOS", "ImageOS": "macos15", "ImageVersion": "20261020.1",
                     "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "4alvit/room-inventory-ios",
-                    "GITHUB_JOB": "recovery", "RUNNER_ARCH": "ARM64", "GITHUB_SHA": "a" * 40,
+                    "GITHUB_JOB": "recovery", "RUNNER_ARCH": "X64", "GITHUB_SHA": "a" * 40,
                     "GITHUB_WORKFLOW_SHA": "c" * 40, "RECOVERY_TESTED_COMMIT": "a" * 40,
                     "RECOVERY_TESTED_TREE": "b" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
@@ -71,7 +71,7 @@ class HostedCase(unittest.TestCase):
         self.popen = self.mock(hosted.subprocess, "Popen", side_effect=AssertionError("real subprocess forbidden"))
         self.mock(hosted.os, "killpg", side_effect=AssertionError("real process signal forbidden"))
         self.mock(hosted.platform, "system", return_value="Darwin")
-        self.mock(hosted.platform, "machine", return_value="arm64")
+        self.mock(hosted.platform, "machine", return_value="x86_64")
         self.timer = self.mock(hosted.signal, "getitimer", return_value=(0.0, 0.0))
         self.previous_handler = object()
         self.mock(hosted.signal, "getsignal", return_value=self.previous_handler)
@@ -89,8 +89,8 @@ class HostedCase(unittest.TestCase):
         Path(self.env["GITHUB_EVENT_PATH"]).write_text(json.dumps(self.event))
 
     def inventory(self):
-        return {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-1", "version": "26.1", "isAvailable": True}],
-                "devicetypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17", "minRuntimeVersion": 26 << 16, "maxRuntimeVersion": 0xffffffff}],
+        return {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-18-5", "version": "18.5", "isAvailable": True}],
+                "devicetypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16e", "minRuntimeVersion": 18 << 16, "maxRuntimeVersion": 0xffffffff}],
                 "devices": {}}
 
     def run_adapter(self):
@@ -100,8 +100,8 @@ class HostedCase(unittest.TestCase):
     def fake_execution(self, *, code=0, primary=None, cleanup=None, complete=True):
         self.calls = []
         values = {"source-head": ("a" * 40 + "\n" + "b" * 40 + "\n").encode(), "source-status": b"",
-                  "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 26.1\nBuild version 17B55",
-                  "sdk-version": b"26.1\n", "simulator-inventory": json.dumps(self.inventory()).encode(),
+                  "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 16.4\nBuild version 16F6",
+                  "sdk-version": b"18.5\n", "simulator-inventory": json.dumps(self.inventory()).encode(),
                   "install-xcodegen": str(self.xcodegen).encode()}
         self.command_values = values
 
@@ -130,15 +130,21 @@ class ContextTests(HostedCase):
 
     def test_self_hosted_and_wrong_class_rejected(self):
         for key, value in (("RUNNER_ENVIRONMENT", "self-hosted"), ("ImageOS", "macos14"), ("GITHUB_JOB", "ios"),
-                           ("GITHUB_SERVER_URL", "https://enterprise.invalid"), ("RUNNER_ARCH", "X64")):
+                           ("GITHUB_SERVER_URL", "https://enterprise.invalid"), ("RUNNER_ARCH", "ARM64")):
             with self.subTest(key=key), self.assertRaises(hosted.Failure):
                 hosted.validate_host({**self.env, key: value}, hosted.POLICY, self.root)
 
-    def test_intel_and_arm_same_image_os_supported(self):
-        for arch, machine in (("ARM64", "arm64"), ("X64", "x86_64")):
-            value = hosted.validate_host({**self.env, "RUNNER_ARCH": arch}, hosted.POLICY, self.root, machine=machine)
-            self.assertEqual(value["runner_arch"], arch)
-            self.assertEqual(value["image_os"], "macos15")
+    def test_intel_host_records_actual_architecture(self):
+        value = hosted.validate_host(self.env, hosted.POLICY, self.root, machine="x86_64")
+        self.assertEqual(value["runner_arch"], "X64")
+        self.assertEqual(value["process_arch"], "x86_64")
+        self.assertEqual(value["image_os"], "macos15")
+
+    def test_other_or_inconsistent_architecture_rejected_before_commands(self):
+        for arch, machine in (("ARM64", "arm64"), ("X64", "arm64"), ("ARM64", "x86_64"), ("", "x86_64")):
+            with self.subTest(arch=arch, machine=machine), self.assertRaisesRegex(hosted.Failure, "architecture"):
+                hosted.validate_host({**self.env, "RUNNER_ARCH": arch}, hosted.POLICY, self.root, machine=machine)
+        self.popen.assert_not_called()
 
     def test_image_version_is_required_bounded_and_retained_exactly(self):
         for value in (None, "", " ", "a" * 129, "20261020.1\ninjected"):
@@ -203,10 +209,10 @@ class ContextTests(HostedCase):
 class SelectionTests(HostedCase):
     def test_same_major_minor_selects_highest_available_patch_only(self):
         inventory = self.inventory()
-        for ver, available in (("26.1.1", True), ("26.1.9", False), ("26.2", True)):
+        for ver, available in (("18.5.1", True), ("18.5.9", False), ("18.6", True)):
             inventory["runtimes"].append({"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-" + ver.replace(".", "-"),
                                           "version": ver, "isAvailable": available})
-        self.assertEqual(hosted.select_runtime(inventory, "26.1")["runtime_version"], "26.1.1")
+        self.assertEqual(hosted.select_runtime(inventory, "18.5")["runtime_version"], "18.5.1")
         with self.assertRaises(hosted.Failure):
             hosted.select_runtime(inventory, "27.0")
 
@@ -216,13 +222,13 @@ class SelectionTests(HostedCase):
         device.pop("minRuntimeVersion")
         device.pop("maxRuntimeVersion")
         with self.assertRaises(hosted.Failure):
-            hosted.select_runtime(inventory, "26.1")
+            hosted.select_runtime(inventory, "18.5")
         runtime = inventory["runtimes"][0]
         runtime["supportedDeviceTypes"] = [{"identifier": device["identifier"]}]
-        self.assertEqual(hosted.select_runtime(inventory, "26.1")["device_type"], device["identifier"])
+        self.assertEqual(hosted.select_runtime(inventory, "18.5")["device_type"], device["identifier"])
         device["identifier"] = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro"
         with self.assertRaises(hosted.Failure):
-            hosted.select_runtime(inventory, "26.1")
+            hosted.select_runtime(inventory, "18.5")
 
     def test_available_existing_device_is_compatibility_evidence(self):
         inventory = self.inventory()
@@ -230,10 +236,30 @@ class SelectionTests(HostedCase):
         device.pop("minRuntimeVersion")
         device.pop("maxRuntimeVersion")
         inventory["devices"][inventory["runtimes"][0]["identifier"]] = [{"deviceTypeIdentifier": device["identifier"], "isAvailable": True}]
-        self.assertEqual(hosted.select_runtime(inventory, "26.1")["device_type"], device["identifier"])
+        self.assertEqual(hosted.select_runtime(inventory, "18.5")["device_type"], device["identifier"])
 
 
 class IntegrationTests(HostedCase):
+    def assert_toolchain_rejected_before_inventory(self, response):
+        self.fake_execution()
+        self.command_values["xcode-version"] = response
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 2)
+        self.assertIn("Installed Xcode version/build differs", result["primary_error"]["message"])
+        self.assertEqual([name for name, _, _ in self.calls],
+                         ["source-head", "source-status", "xcode-select", "xcode-version"])
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
+
+    def test_different_xcode_version_never_starts_inventory_or_controller(self):
+        self.assert_toolchain_rejected_before_inventory(b"Xcode 26.1\nBuild version 17B55")
+
+    def test_different_xcode_build_never_starts_inventory_or_controller(self):
+        self.assert_toolchain_rejected_before_inventory(b"Xcode 16.4\nBuild version 16F7")
+
+    def test_malformed_xcode_output_never_starts_inventory_or_controller(self):
+        self.assert_toolchain_rejected_before_inventory(b"Xcode 16.4")
+
     def test_inventory_and_installer_request_fixed_caps_once(self):
         self.fake_execution()
         result = self.run_adapter()

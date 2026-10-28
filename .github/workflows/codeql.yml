@@ -6,8 +6,10 @@ permissions:
 jobs:
   swift:
     name: Swift security analysis
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     permissions:
       actions: read
       contents: read
@@ -16,6 +18,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify installed Intel toolchain
+        run: |
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$ImageOS" = macos15
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
+          test "$xcode_version" = $'Xcode 16.4\nBuild version 16F6'
       - name: Initialize Swift analysis
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:

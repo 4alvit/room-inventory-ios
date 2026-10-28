@@ -7,8 +7,10 @@ first execution needs a separately approved source commit and CI cohort.
 ## Where the job runs
 
 The existing callable `ci.yml` adds one `recovery` job after `ios`. The job uses
-the existing standard `macos-15` runner class, read-only repository permissions
-and the same pinned checkout, Python and artifact actions. The PR preview now
+the standard `macos-15-intel` runner class, read-only repository permissions
+and the same pinned checkout, Python and artifact actions. All four existing Mac
+jobs require an actual `x86_64` host and Xcode 16.4 build 16F6; they do not fall
+back to another runner or toolchain. Recovery retains its 24 GiB admission floor. The PR preview now
 needs both `ios` and `recovery`. A failed recovery job therefore fails the existing
 required reusable validation; the generated Quality gate is unchanged.
 

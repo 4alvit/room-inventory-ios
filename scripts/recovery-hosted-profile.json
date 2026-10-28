@@ -2,7 +2,7 @@
   "schema_version": 1,
   "repository": "4alvit/room-inventory-ios",
   "job_id": "recovery",
-  "runner_label": "macos-15",
+  "runner_label": "macos-15-intel",
   "image_os": "macos15",
   "workflow_path": ".github/workflows/ci.yml",
   "allowed_caller_workflows": [
@@ -24,5 +24,8 @@
   "abort_free_bytes": 8589934592,
   "device_cap_bytes": 8589934592,
   "derived_data_cap_bytes": 4294967296,
-  "output_cap_bytes": 1073741824
+  "output_cap_bytes": 1073741824,
+  "runner_arch": "X64",
+  "process_arch": "x86_64",
+  "xcode_version": "Xcode 16.4\nBuild version 16F6"
 }

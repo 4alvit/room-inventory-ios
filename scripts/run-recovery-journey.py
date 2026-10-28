@@ -52,6 +52,10 @@ class _DeviceScanDeferred(BaseException):
     """Private per-command handoff, never evidence of a completed resource scan."""
 
 
+class _DerivedScanDeferred(BaseException):
+    """Private per-command handoff, never evidence of a completed resource scan."""
+
+
 class ResourceAccountingFailure(RunFailure):
     """An allocated disk budget cannot be established from this filesystem stat."""
 
@@ -442,6 +446,7 @@ class RecoveryRun:
         self.resource_cap_observed = False
         self.cleanup_mode = False
         self._derived_scan_service = None
+        self._derived_scan_context = None
         self._device_scan_service = None
         self._device_scan_context = None
         self.diagnostic_stage = "unstarted"
@@ -724,6 +729,11 @@ class RecoveryRun:
                 kwargs["vanished_child_check"] = lambda: self.validate_derived_resource_root(root, owned_binding)
             checkpoint = (self._derived_scan_service if category == "derived_data" and root == self.derived
                           and not self.cleanup_mode and self._derived_scan_service is not None else self.tick)
+            derived_binding = self._derived_scan_service if checkpoint is self._derived_scan_service else None
+            if derived_binding is not None:
+                require(root is self.derived and self._derived_scan_context is None,
+                        "Invalid active DerivedData scan binding", ConfigurationFailure)
+                self._derived_scan_context = derived_binding
             binding = self._device_scan_service if category == "device" and not self.cleanup_mode else None
             if binding is not None:
                 require(root is binding[0] and root is self.device_root and self._device_scan_context is None,
@@ -734,9 +744,11 @@ class RecoveryRun:
                 result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
                                    on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
             finally:
+                if derived_binding is not None:
+                    self._derived_scan_context = None
                 if binding is not None:
                     self._device_scan_context = None
-        except _DeviceScanDeferred:
+        except (_DeviceScanDeferred, _DerivedScanDeferred):
             # This is not an error primary: a control interruption during optional
             # metadata must still fail the command rather than authorize handoff.
             self.observe_runtime("scan_end", value=span, failed=True)
@@ -794,7 +806,8 @@ class RecoveryRun:
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
         require(self._derived_scan_service is None and self._device_scan_service is None
-                and self._device_scan_context is None, "Stale scan service", ConfigurationFailure)
+                and self._device_scan_context is None and self._derived_scan_context is None,
+                "Stale scan service", ConfigurationFailure)
         self.guard()
         end = min(self.phase_end, self.clock() + cap)
         require(end - self.clock() >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
@@ -819,6 +832,8 @@ class RecoveryRun:
         device_root, device_id = self.device_root, self.device_id
         device_binding = (device_root, lambda: service_scan(device_scan=True))
         device_deferred = _DeviceScanDeferred()
+        derived_deferred = _DerivedScanDeferred()
+        derived_root, derived_identity = self.derived, self._owned_derived_identity
         pipe_eof = [False, False]
 
         def require_device_owner(*, active_scan=True):
@@ -834,6 +849,19 @@ class RecoveryRun:
                     and not entry["state"].get("observation_errors")
                     and entry["state"].get("group_state") != "absent",
                     "Stale device scan owner", ConfigurationFailure)
+
+        def require_derived_owner(*, active_scan=True):
+            require(self._derived_scan_service is service_derived_scan
+                    and self._derived_scan_context is (service_derived_scan if active_scan else None)
+                    and derived_identity is not None and self.derived is derived_root
+                    and bool(self.groups) and self.groups[-1] is entry
+                    and entry["process"] is process and entry["record"] is record
+                    and record["pid"] == record["pgid"] == process.pid
+                    and not entry["state"].get("leader_reaped")
+                    and not entry["state"].get("observation_errors")
+                    and entry["state"].get("group_state") != "absent",
+                    "Stale DerivedData scan owner", ConfigurationFailure)
+            self.validate_derived_resource_root(derived_root, derived_identity)
 
         def service_derived_scan():
             service_scan()
@@ -920,11 +948,16 @@ class RecoveryRun:
                 self.tick()
                 if not device_scan:
                     self.observe_derived_service(record, "quantum_completed", value=service_last)
-                elif all(pipe_eof) and polled is not None:
+                if (device_scan or derived_identity is not None) and all(pipe_eof) and polled is not None:
                     require(type(polled) is int and polled in allowed_codes, "Command failed: " + name)
-                    require_device_owner()
-                    self.tick()  # The allowed exit AND EOF must be observed in time.
-                    raise device_deferred
+                    if device_scan:
+                        require_device_owner()
+                        self.tick()  # The allowed exit AND EOF must be observed in time.
+                        raise device_deferred
+                    if derived_identity is not None:
+                        require_derived_owner()
+                        self.tick()
+                        raise derived_deferred
             finally:
                 service_busy = False
 
@@ -972,7 +1005,7 @@ class RecoveryRun:
             # This outer condition alone adds no poll for a nonempty selector.
             while (self.observe_runtime("selector", record, bool(selector.get_map())) or
                    self.observe_runtime("poll", record, process.poll()) is None):
-                device_handoff = False
+                scan_handoff = None
                 try:
                     self.guard()
                 except _DeviceScanDeferred as deferred:
@@ -984,14 +1017,22 @@ class RecoveryRun:
                     self.tick()  # Context-manager unwinding consumed the same budget.
                     record["device_scan_handoff"] = {
                         "state": "incomplete", "reason": "allowed_exit_and_both_pipe_eof"}
-                    device_handoff = True
+                    scan_handoff = require_device_owner
+                except _DerivedScanDeferred as deferred:
+                    require(deferred is derived_deferred and self._derived_scan_service is service_derived_scan
+                            and self._derived_scan_context is None,
+                            "Invalid DerivedData scan handoff", ConfigurationFailure)
+                    self.tick()  # Unwinding remains within the original child-work budget.
+                    record["derived_scan_handoff"] = {
+                        "state": "incomplete", "reason": "allowed_exit_and_both_pipe_eof"}
+                    scan_handoff = require_derived_owner
                 self.tick()
                 if on_poll:
                     on_poll()
                 self.tick()
-                if device_handoff:
+                if scan_handoff is not None:
                     # Preserve the normal callback boundary outside the walker.
-                    require_device_owner(active_scan=False)
+                    scan_handoff(active_scan=False)
                     self.tick()
                     break
                 for key, _ in selector.select(timeout=min(.1, max(0, end - 4 - self.clock()))):
@@ -1019,6 +1060,7 @@ class RecoveryRun:
             # Preserve the child-work deadline check before any cleanup or
             # transition to phase-bounded post-command accounting.
             self._derived_scan_service = None
+            self._derived_scan_context = None
             self._device_scan_service = None
             self._device_scan_context = None
             if self.cleanup_mode:
@@ -1041,6 +1083,7 @@ class RecoveryRun:
                 pass
         finally:
             self._derived_scan_service = None
+            self._derived_scan_context = None
             self._device_scan_service = None
             self._device_scan_context = None
             self.diagnostic_stage = "command_cleanup"

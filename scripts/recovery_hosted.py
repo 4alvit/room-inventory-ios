@@ -644,7 +644,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             xcode_version = discovery.command(["xcodebuild", "-version"], "xcode-version", 10).decode().strip()
             require(re.fullmatch(r"Xcode [0-9.]+\nBuild version [A-Za-z0-9]+", xcode_version), "Invalid Xcode version response", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
-            inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 60))
+            inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 90))
             selection = select_runtime(inventory, sdk)
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)

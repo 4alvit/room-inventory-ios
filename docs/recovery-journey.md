@@ -251,8 +251,9 @@ receipt-failure handling and preserves the first primary and sticky cleanup
 errors. A snapshot may remain only in memory if receipt time is exhausted.
 Admission failures before the existing command record are still unobserved.
 External-call/clock trace parity in fakes does not imply zero scheduling cost.
-Discovery's one-pass list, short-circuit poll, 120-second envelope, inventory
-60/56/4-second limits, all caps, signal and cleanup ordering remain unchanged.
+Discovery's one-pass list, short-circuit poll, 120-second envelope,
+90/86/4-second inventory allowance, other caps, signal and cleanup ordering
+remain bounded as described below.
 
 One outer controller owns the complete attempt and every subprocess process group.
 Use monotonic absolute deadlines; no phase may renew the outer budget. The total
@@ -554,3 +555,30 @@ tests and any future runtime acceptance remain separate records.
 A clear single-image, single-item English journey does not cover camera capture,
 Files image import, batches, locale matrices, low-storage/interruption recovery,
 physical devices or App Store purchases. Those scopes retain their own evidence.
+
+### Hosted inventory cold-start allowance
+
+The single `xcrun simctl list --json` discovery request has a 90-second maximum:
+86 seconds for work and the existing four seconds for owned-group cleanup. This
+reallocates up to 30 seconds within the same absolute 120-second discovery window.
+It does not establish an OS or product repair and does not retry the command.
+The 1,800-second controller, 180-second retention reservation, 2,100-second adapter
+envelope, 45-minute job timeout, ownership checks and all resource limits stay fixed.
+
+The installer still requests 70 seconds, clipped to the original discovery end.
+If R seconds remain at inventory entry, its total command deadline is at most
+`min(90, R)` seconds away. If that whole allowance is consumed, at most
+`max(0, R - 90)` seconds remain for the installer; its work deadline is four
+seconds earlier. Every command still needs at least eight seconds remaining to
+start. An exhausted discovery window cannot borrow from the full controller plus
+retention reservation of 1,980 seconds.
+
+The retained run 40660819848 reached inventory at monotonic 85.627825208,
+2.386114708 seconds after the first recorded source command. The adapter's
+absolute start is not in that command receipt, so the remaining discovery time
+is bounded, not known exactly: `60 <= R <= 117.613885292`. The old full 60-second
+request proves the lower bound; host validation before the first command can
+reduce the upper bound. Under maximum new inventory consumption, remaining
+installer time is therefore at most 27.613885292 seconds, and may be insufficient.
+Earlier native deadline and EPERM cleanup failures remain failures even when
+final group absence and leader reaping are subsequently observed.

@@ -243,7 +243,7 @@ class IntegrationTests(HostedCase):
         installer = [call for call in calls if call.args[2] == "install-xcodegen"]
         self.assertEqual(len(inventory), 1)
         self.assertEqual(inventory[0].args[1], ["xcrun", "simctl", "list", "--json"])
-        self.assertEqual(inventory[0].args[3], 60)
+        self.assertEqual(inventory[0].args[3], 90)
         self.assertEqual(len(installer), 1)
         self.assertEqual(installer[0].args[3], 70)
 
@@ -253,7 +253,7 @@ class IntegrationTests(HostedCase):
         def timeout(instance, args, name, cap=20):
             if name == "simulator-inventory":
                 self.calls.append((name, args, dict(instance.env)))
-                self.assertEqual(cap, 60)
+                self.assertEqual(cap, 90)
                 raise hosted.Deadline("injected inventory work deadline")
             return ordinary(instance, args, name, cap)
         hosted.Discovery.command.side_effect = timeout
@@ -528,6 +528,111 @@ class CommandTests(HostedCase):
         self.assertEqual(persisted[0]["timing"], timing)
         self.cleanup.assert_called_once()
         self.assertEqual(self.cleanup.call_args.args[1], 160.0)
+        self.popen.assert_called_once()
+
+    def test_inventory_90_allows_85_seconds_with_same_cleanup_and_absolute_window(self):
+        discovery = self.discovery()
+        self.process_finishes_after(85)
+        def cleanup(*args, **kwargs):
+            self.assertEqual(args[1], 190.0)
+            self.clock.advance(.25)
+            return {"success": True}
+        self.cleanup.side_effect = cleanup
+        self.assertEqual(discovery.command(
+            ["xcrun", "simctl", "list", "--json"], "simulator-inventory", cap=90), b"")
+        self.assertEqual(discovery.records[0]["timing"], {
+            "start": 100.0, "work_deadline": 186.0, "command_deadline": 190.0,
+            "requested_cap": 90, "finish": 185.25})
+        self.assertEqual(discovery.alarm.end, 220.0)
+        self.popen.assert_called_once()
+        self.cleanup.assert_called_once()
+        self.process.stdout.close.assert_called_once()
+        self.process.stderr.close.assert_called_once()
+
+    def test_inventory_90_stops_at_86_and_keeps_four_second_cleanup(self):
+        discovery = self.discovery()
+        self.process_finishes_after(86)
+        def cleanup(*args, **kwargs):
+            self.assertEqual(self.clock(), 186.0)
+            self.assertEqual(args[1] - self.clock(), 4.0)
+            self.clock.advance(.25)
+            return {"success": True}
+        self.cleanup.side_effect = cleanup
+        with self.assertRaisesRegex(hosted.Deadline, "Discovery command deadline"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=90)
+        self.assertEqual(discovery.records[0]["primary_error"]["type"], "DeadlineFailure")
+        self.assertEqual(discovery.records[0]["timing"]["finish"], 186.25)
+        self.cleanup.assert_called_once()
+        self.popen.assert_called_once()
+
+    def test_inventory_90_is_clipped_to_original_discovery_deadline(self):
+        discovery = self.discovery()
+        self.clock.advance(70)
+        self.process_finishes_after(46)
+        with self.assertRaises(hosted.Deadline):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=90)
+        self.assertEqual(discovery.records[0]["timing"], {
+            "start": 170.0, "work_deadline": 216.0, "command_deadline": 220.0,
+            "requested_cap": 90, "finish": 216.0})
+        self.assertEqual(self.cleanup.call_args.args[1], 220.0)
+        self.assertEqual(discovery.alarm.end, 220.0)
+        self.popen.assert_called_once()
+
+    def test_inventory_90_cannot_spawn_without_eight_seconds_for_work_and_cleanup(self):
+        discovery = self.discovery()
+        self.fake_process()
+        for remaining in (7.999, 3.999):
+            with self.subTest(remaining=remaining):
+                self.clock.now = discovery.alarm.end - remaining
+                with self.assertRaisesRegex(hosted.Deadline, "Insufficient discovery/cleanup budget"):
+                    discovery.command(["fake-inventory"], "simulator-inventory", cap=90)
+                self.popen.assert_not_called()
+                self.cleanup.assert_not_called()
+                self.assertEqual(discovery.records, [])
+                self.assertEqual(discovery.alarm.end, 220.0)
+
+    def test_inventory_90_does_not_renew_installer_or_downstream_budget(self):
+        discovery = self.discovery()
+        # Inject two seconds of preceding discovery, then a slow successful list.
+        self.clock.advance(2)
+        self.process_finishes_after(85)
+        self.cleanup.side_effect = lambda *args, **kwargs: (self.clock.advance(.25) or {"success": True})
+        discovery.command(["fake-inventory"], "simulator-inventory", cap=90)
+        self.assertEqual(self.clock(), 187.25)
+        self.process_finishes_after(28)
+        discovery.command(["fake-installer"], "install-xcodegen", cap=70)
+        self.assertEqual(discovery.records[1]["timing"], {
+            "start": 187.25, "work_deadline": 216.0, "command_deadline": 220.0,
+            "requested_cap": 70, "finish": 215.25})
+        self.assertEqual(discovery.alarm.end, 220.0)
+        self.assertEqual(2200.0 - discovery.alarm.end, 1980.0)
+        self.cleanup.assert_called_once()
+        self.assertEqual(self.popen.call_count, 2)
+
+    def test_inventory_90_deadline_preserves_sticky_eperm_after_final_absence(self):
+        discovery = self.discovery()
+        actual_cleanup = hosted.controller.kill_owned
+        self.process_finishes_after(86)
+        probes = []
+        def killpg(pgid, sig):
+            probes.append((pgid, sig))
+            if sig == 0:
+                if len(probes) == 1:
+                    raise PermissionError(errno.EPERM, "injected probe denied")
+                raise ProcessLookupError(errno.ESRCH, "injected final absence")
+        self.cleanup.side_effect = lambda process, end, **kwargs: actual_cleanup(
+            process, end, state=kwargs["state"], clock=kwargs["clock"],
+            sleep=self.clock.advance, killpg=killpg)
+        with self.assertRaisesRegex(hosted.Deadline, "Discovery command deadline"):
+            discovery.command(["fake-inventory"], "simulator-inventory", cap=90)
+        cleanup = discovery.records[0]["cleanup"]
+        self.assertFalse(cleanup["success"])
+        self.assertEqual(cleanup["group_state"], "absent")
+        self.assertTrue(cleanup["leader_reaped"])
+        self.assertEqual(cleanup["errors"][0]["errno"], errno.EPERM)
+        self.assertEqual(discovery.records[0]["primary_error"]["type"], "DeadlineFailure")
+        self.assertEqual(discovery.cleanup_errors[0]["operation"], "owned_group")
+        self.cleanup.assert_called_once()
         self.popen.assert_called_once()
 
     def test_inventory_success_after_26_seconds(self):

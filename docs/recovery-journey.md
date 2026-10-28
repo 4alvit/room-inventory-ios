@@ -401,8 +401,13 @@ accounting. This is redistribution within the existing 1,740-second work budget,
 not an extension: device completion is also clipped before the full 480-second
 test and 240-second collection allowances. The 1,800-second outer deadline and
 60-second cleanup reserve remain unchanged. Reentering the device phase cannot
-renew its absolute startup deadline. Individual command caps, all resource walks,
-identity checks and cleanup requirements are unchanged.
+renew its absolute startup deadline. Every command remains clipped to this phase
+and its own finite cap; all resource walks, identity checks and cleanup requirements
+remain mandatory. App and runner installation each allow 90 seconds, including the
+existing four-second process-cleanup allowance (86 seconds for child work and live
+accounting). Both remain single attempts inside the same 1,020-second startup pool.
+This finite hosted cold-start allowance does not predict installation latency or
+turn prior timed-out runs into accepted evidence.
 
 This finite allowance addresses the observed failure before app installation,
 where successful boot/bootstatus and full resource accounting consumed nearly all
@@ -486,8 +491,16 @@ No changes to existing QA devices, accepted source/candidate/evidence, global
 Photos/Files data, signing accounts, remote CI or repositories belong in cleanup.
 Record free-space samples as discrete observations, not a claimed global
 minimum. A failed initial device-state query must still allow shutdown of the known
-owned UUID and a separate final-state query. If cleanup cannot complete inside the reserve, retain evidence, report the
-remaining exact owned resources and return nonzero without an automatic retry.
+owned UUID and a separate final-state query. The initial query allows up to 20
+seconds of child work plus four seconds for owned-process cleanup (24 total).
+Shutdown and final inventory retain their 25- and 15-second caps. These requested
+caps sum to 64 seconds; they are not a new cleanup reservation. Every command is
+clipped to the original absolute outer deadline. If cleanup begins with only the
+60-second reserve and earlier commands consume their full caps, the final query
+has at most 11 seconds total (seven for child work), and may fail. Insufficient
+admission time prevents a new child; prior failures remain sticky. If cleanup
+cannot complete inside the remaining time, retain evidence, report the remaining
+exact owned resources and return nonzero without an automatic retry.
 
 ## Offline evidence contract
 

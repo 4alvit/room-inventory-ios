@@ -193,7 +193,7 @@ class ObservationBoundaryTests(fixtures.ControllerCase):
                 self.assertEqual(capture.call_count, 3)
             self.assertEqual([c.args[1] for c in run.command.call_args_list],
                              ["device-cleanup-before", "shutdown-owned-device", "device-final-state"])
-            self.assertEqual([c.kwargs["cap"] for c in run.command.call_args_list], [10, 25, 15])
+            self.assertEqual([c.kwargs["cap"] for c in run.command.call_args_list], [24, 25, 15])
             self.assertEqual([e["operation"] for e in run.record["cleanup_errors"]], ["initial_state", "shutdown", "final_state"])
             self.assertTrue(all(e["error"] == "original device cleanup deadline" for e in run.record["cleanup_errors"]))
             self.assertNotIn("device_final_state", run.record)

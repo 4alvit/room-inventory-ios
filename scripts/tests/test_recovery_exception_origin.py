@@ -261,7 +261,7 @@ class ExceptionOriginIntegrationTests(fixtures.ControllerCase):
             run.cleanup()
         self.assertEqual([call.args[1] for call in run.command.call_args_list],
                          ["device-cleanup-before", "shutdown-owned-device", "device-final-state"])
-        self.assertEqual([call.kwargs["cap"] for call in run.command.call_args_list], [10, 25, 15])
+        self.assertEqual([call.kwargs["cap"] for call in run.command.call_args_list], [24, 25, 15])
         self.assertNotIn("device_final_state", run.record)
         self.assertEqual([item["operation"] for item in run.record["cleanup_errors"]], ["initial_state", "shutdown", "final_state"])
         self.assertEqual([item["exception_origin"]["last_stage"] for item in run.record["cleanup_errors"]],

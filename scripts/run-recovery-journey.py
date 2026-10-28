@@ -1288,7 +1288,7 @@ class RecoveryRun:
         self.command(["xcrun", "simctl", "boot", self.device_id], "boot-device", cap=30)
         self.command(["xcrun", "simctl", "bootstatus", self.device_id, "-b"], "boot-status", cap=90)
         for app, label in [(self.app, "app"), (self.runner, "runner")]:
-            self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=30)
+            self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=90)
         self.command(["xcrun", "simctl", "addmedia", self.device_id, self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png"], "seed-sole-photo", cap=30)
         app_container = self.app_container(BUNDLE, "app-container")
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")
@@ -1353,7 +1353,7 @@ class RecoveryRun:
             already_shutdown = False
             try:
                 self.diagnostic_stage = "device_initial_state"
-                before = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-cleanup-before", cap=10))
+                before = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-cleanup-before", cap=24))
                 states = [d for values in before["devices"].values() for d in values if d.get("udid") == self.device_id]
                 require(len(states) == 1, "Owned device missing or ambiguous during cleanup")
                 already_shutdown = states[0].get("state") == "Shutdown"

@@ -1287,7 +1287,7 @@ class XctestrunTests(ControllerCase):
                 "target_run_id": "33333333-3333-4333-8333-333333333333"}
 
     def test_one_case_no_parallel_and_simulator_paths_preserve_generated_products(self):
-        result = controller.configure_xctestrun(self.generated(), self.ids())
+        result = controller.configure_xctestrun(self.generated(), self.ids(), device_id="44444444-4444-4444-8444-444444444444")
         targets = result["TestConfigurations"][0]["TestTargets"]
         self.assertEqual(len(targets), 1)
         target = targets[0]
@@ -1304,6 +1304,7 @@ class XctestrunTests(ControllerCase):
         self.assertEqual(target["SystemAttachmentLifetime"], "keepAlways")
         self.assertEqual(target["UserAttachmentLifetime"], "keepAlways")
         self.assertEqual(target["EnvironmentVariables"]["GENERATED_VALUE"], "keep")
+        self.assertEqual(target["EnvironmentVariables"]["RECOVERY_SIMULATOR_UDID"], "44444444-4444-4444-8444-444444444444")
         self.assertEqual(target["EnvironmentVariables"]["RECOVERY_SOURCE_RUN_ID"], self.ids()["source_run_id"])
         self.assertEqual(target["EnvironmentVariables"]["RUN_INVENTORY_RECOVERY_JOURNEY"], "1")
         self.assertEqual(target["UITargetAppEnvironmentVariables"], {"APP_GENERATED": "keep"})
@@ -1420,7 +1421,7 @@ class XctestrunTests(ControllerCase):
             generated = self.generated()
             generated["TestConfigurations"][0]["TestTargets"][0][key] = value
             with self.subTest(key=key), self.assertRaisesRegex(controller.ConfigurationFailure, "StoreKit"):
-                controller.configure_xctestrun(generated, self.ids())
+                controller.configure_xctestrun(generated, self.ids(), device_id="44444444-4444-4444-8444-444444444444")
 
     def test_ambiguous_targets_or_preexisting_opt_in_cannot_widen_test_scope(self):
         for mutation in ("duplicate", "configurations", "test-env", "app-env", "wrong-app"):
@@ -1438,7 +1439,7 @@ class XctestrunTests(ControllerCase):
             else:
                 target["TestHostBundleIdentifier"] = "foreign.runner"
             with self.subTest(mutation=mutation), self.assertRaises(controller.ConfigurationFailure):
-                controller.configure_xctestrun(value, self.ids())
+                controller.configure_xctestrun(value, self.ids(), device_id="44444444-4444-4444-8444-444444444444")
 
 
 class ActiveTimerTests(ControllerCase):

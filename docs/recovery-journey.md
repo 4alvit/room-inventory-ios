@@ -54,17 +54,20 @@ evidence; repair and review the cause before separately authorizing another run.
    Perform one `build-for-testing` with an attempt-owned DerivedData path, unsigned
    Debug simulator settings and only the UI test target selected. Preserve the
    build log, exact command/exit, explicit build options and produced `.xctestrun`.
-4. Boot that UDID and import **only** the exact fixture using `simctl addmedia`.
-   Record the input hash and command result. Install the freshly built app on this
-   dedicated device together with its UI test runner without launching them, then
-   pin both data-container identities and record the actual empty export inventory.
+4. Boot that UDID and install the freshly built app and UI test runner without
+   launching them. Import **only** the exact fixture once using `simctl addmedia`;
+   retain its source hash and command result. Record the preinstallation container
+   identities, empty scenario namespaces/exports, and fixture binding. These are
+   installation observations, not the final scenario pins.
    The selected `.xctestrun` keeps the validated generated Simulator host,
    target-app and test-bundle paths beside the original file, with
    `UseDestinationArtifacts` disabled and no destination-relative test-bundle path.
    Xcode rejects that destination-artifacts mode on Simulator because it requires
-   a physical iOS device. Exact app/runner bundle IDs and the original container
-   pins remain mandatory. Xcode may install the same built products again; any
-   container identity or metadata change fails collection rather than repinning.
+   a physical iOS device. Xcode may install the same selected products again.
+   After that installation, the explicit startup handshake below establishes
+   final scenario pins once, before any AUT launch or data-bearing test action.
+   Later container identity or metadata changes fail collection; they never
+   trigger rediscovery or repinning.
    Do not seed any app inventory or asset folder. If Photos or app export storage
    contains prior data, stop the run.
 5. Prepare an attempt-local copy of the generated `.xctestrun` beside its original
@@ -73,6 +76,7 @@ evidence; repair and review the cause before separately authorizing another run.
    `EnvironmentVariables.RECOVERY_JOURNEY_RUN_ID`,
    `EnvironmentVariables.RECOVERY_SOURCE_RUN_ID` and
    `EnvironmentVariables.RECOVERY_TARGET_RUN_ID` to three new, distinct UUIDs.
+   Bind `EnvironmentVariables.RECOVERY_SIMULATOR_UDID` to the owned destination.
    Retain mandatory generated test environment entries. Record before/after hashes
    and exact edits. The UI test validates and records these namespace identifiers.
    Do not set `UITargetAppEnvironmentVariables` for entitlement or storage overrides.
@@ -155,6 +159,31 @@ resource samples, retained `DerivedData/`, raw `original.xcresult`, and
 `evidence/collection/`. The latter contains bridge snapshots, two final namespace
 copies, six separately captured generated/saved export files, original/copy result
 manifests, exported attachments, and the verifier's `collection.json` input.
+
+### Installation-to-scenario handshake
+
+At test entry, before constructing or launching `XCUIApplication`, the runner
+atomically publishes one `installation-request.json` in its own fresh journey
+bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
+and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK uses the
+existing 20-second wait inside the unchanged XCTest allowance and controller test
+phase; no deadline is renewed.
+
+The host's existing guarded callback searches only the owned Simulator's
+`data/Containers/Data/Application` directory, with at most 2,000 entries and
+no-follow metadata reads. Missing old installation metadata is not a scenario
+failure before the request. A duplicate, foreign, malformed or ambiguous request
+or bundle match fails. A valid request can establish final containers only once:
+empty source/target namespaces, empty exports/Files inventory, unchanged fixture
+hash and owned-device identity must hold before durable receipts and ACK. Existing
+selected build paths, source and `.xctestrun` hashes bind the installed products;
+this does not add an independent installed-binary attestation.
+
+The single Photos seed is not repeated or replaced. The existing UI check for one
+photo and final original/fixture verification still reject a missing or wrong
+seed. After ACK, request/ACK bytes, both final container identities and metadata
+remain pinned for every live export check. Installation failure never permits a
+second handshake or opportunistic midjourney repin.
 
 ### Live export origin barriers
 

@@ -24,7 +24,8 @@ class OperationAllowanceTests(base.ControllerCase):
         collector = Mock()
         with patch.dict(sys.modules, {"recovery_collector": SimpleNamespace(Collector=Mock(return_value=collector))}):
             run.prepare_device()
-        collector.capture_initial_exports.assert_called_once_with()
+        collector.begin_installation.assert_called_once_with()
+        collector.capture_initial_exports.assert_not_called()
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
                          ["boot-device", "boot-status", "install-app", "install-runner", "seed-sole-photo"])

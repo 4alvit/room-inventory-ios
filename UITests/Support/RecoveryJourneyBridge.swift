@@ -13,10 +13,12 @@ final class RecoveryJourneyBridge {
     private let journeyID: String
     private let sourceID: String
     private let targetID: String
+    private let deviceID: String
     private let directory: URL
     private var completedBarriers = 0
+    private var installationAcknowledged = false
 
-    init(journeyID: String, sourceID: String, targetID: String) throws {
+    init(journeyID: String, sourceID: String, targetID: String, deviceID: String) throws {
         guard Bundle.main.bundleIdentifier == "com.alvit.roominventory.uitests.xctrunner" else {
             throw BridgeError.invalid("not the UI-test runner")
         }
@@ -25,6 +27,10 @@ final class RecoveryJourneyBridge {
               Set(identifiers).count == 3 else {
             throw BridgeError.invalid("noncanonical or repeated run identifier")
         }
+        guard UUID(uuidString: deviceID)?.uuidString == deviceID else {
+            throw BridgeError.invalid("noncanonical owned device identifier")
+        }
+        self.deviceID = deviceID
         self.journeyID = journeyID
         self.sourceID = sourceID
         self.targetID = targetID
@@ -47,7 +53,39 @@ final class RecoveryJourneyBridge {
         try files.createDirectory(at: directory, withIntermediateDirectories: false)
     }
 
+    func synchronizeInstallation(test: XCTestCase) throws {
+        guard !installationAcknowledged, completedBarriers == 0 else {
+            throw BridgeError.invalid("installation handshake already consumed")
+        }
+        let requestURL = directory.appendingPathComponent("installation-request.json")
+        let acknowledgementURL = directory.appendingPathComponent("installation-ack.json")
+        guard try Self.entryType(requestURL) == nil,
+              try Self.entryType(acknowledgementURL) == nil else {
+            throw BridgeError.invalid("installation handshake file already exists")
+        }
+        let nonce = UUID().uuidString
+        let request: [String: Any] = [
+            "schema_version": 1, "journey_run_id": journeyID,
+            "source_run_id": sourceID, "target_run_id": targetID,
+            "simulator_udid": deviceID, "phase": "installation", "nonce": nonce,
+            "app_bundle_id": "com.alvit.roominventory",
+            "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner"
+        ]
+        let requestData = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        try Self.publish(requestData, at: requestURL, nonce: nonce)
+        Self.attach(requestData, name: "recovery-installation-request.json", test: test)
+        // This uses the existing finite ACK wait inside the unchanged XCTest
+        // execution allowance; no controller phase deadline is extended.
+        try waitForAcknowledgement(request: request, requestData: requestData,
+                                   requestURL: requestURL, acknowledgementURL: acknowledgementURL,
+                                   attachmentName: "recovery-installation-ack.json", test: test)
+        installationAcknowledged = true
+    }
+
     func synchronize(role: Role, phase: Phase, test: XCTestCase) throws {
+        guard installationAcknowledged else {
+            throw BridgeError.invalid("installation handshake missing")
+        }
         let sequence = completedBarriers + 1
         let roles: [Role] = [.sourceZIP, .sourceZIP, .backup, .backup, .targetZIP, .targetZIP]
         guard sequence <= roles.count, roles[sequence - 1] == role,
@@ -75,6 +113,22 @@ final class RecoveryJourneyBridge {
         try Self.publish(requestData, at: requestURL, nonce: nonce)
         Self.attach(requestData, name: "recovery-bridge-request-" + suffix, test: test)
 
+        try waitForAcknowledgement(request: request, requestData: requestData,
+                                   requestURL: requestURL, acknowledgementURL: acknowledgementURL,
+                                   attachmentName: "recovery-bridge-ack-" + suffix, test: test)
+        completedBarriers = sequence
+    }
+
+    func requireComplete() throws {
+        guard installationAcknowledged, completedBarriers == 6 else {
+            throw BridgeError.invalid("incomplete host capture")
+        }
+    }
+
+    private func waitForAcknowledgement(
+        request: [String: Any], requestData: Data, requestURL: URL,
+        acknowledgementURL: URL, attachmentName: String, test: XCTestCase
+    ) throws {
         // A condition wait, not an arbitrary sleep. The host publishes ACKs
         // atomically only after durable capture; malformed ACKs fail immediately.
         let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -87,7 +141,7 @@ final class RecoveryJourneyBridge {
             throw BridgeError.invalid("host acknowledgement timed out")
         }
         let acknowledgementData = try Self.readRegularFile(acknowledgementURL)
-        Self.attach(acknowledgementData, name: "recovery-bridge-ack-" + suffix, test: test)
+        Self.attach(acknowledgementData, name: attachmentName, test: test)
         var expected = request
         expected["request_sha256"] = SHA256.hash(data: requestData).map { String(format: "%02x", $0) }.joined()
         expected["success"] = true
@@ -103,11 +157,6 @@ final class RecoveryJourneyBridge {
         guard try Self.readRegularFile(requestURL) == requestData else {
             throw BridgeError.invalid("request changed during host capture")
         }
-        completedBarriers = sequence
-    }
-
-    func requireComplete() throws {
-        guard completedBarriers == 6 else { throw BridgeError.invalid("incomplete host capture") }
     }
 
     private nonisolated static func entryType(_ url: URL) throws -> FileAttributeType? {

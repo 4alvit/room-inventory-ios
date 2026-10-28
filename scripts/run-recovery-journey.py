@@ -367,7 +367,7 @@ def kill_owned(process, deadline, *, state=None, clock=time.monotonic, sleep=tim
     return report
 
 
-def configure_xctestrun(value, ids):
+def configure_xctestrun(value, ids, *, device_id):
     """Retain generated paths/environment, select one UI target and one case."""
     def reject_storekit(node):
         if isinstance(node, dict):
@@ -406,7 +406,8 @@ def configure_xctestrun(value, ids):
         require(not key.startswith(("RECOVERY_", "UITEST_", "RUN_INVENTORY_")), "Unexpected preexisting test override", ConfigurationFailure)
     app_env = target.get("UITargetAppEnvironmentVariables", {})
     require(isinstance(app_env, dict) and not any(key.startswith(("RECOVERY_", "UITEST_", "RUN_INVENTORY_")) for key in app_env), "Unexpected app test override", ConfigurationFailure)
-    env.update({"RUN_INVENTORY_RECOVERY_JOURNEY": "1", "RECOVERY_JOURNEY_RUN_ID": ids["journey_run_id"],
+    env.update({"RECOVERY_SIMULATOR_UDID": canonical_uuid(device_id),
+                "RUN_INVENTORY_RECOVERY_JOURNEY": "1", "RECOVERY_JOURNEY_RUN_ID": ids["journey_run_id"],
                 "RECOVERY_SOURCE_RUN_ID": ids["source_run_id"], "RECOVERY_TARGET_RUN_ID": ids["target_run_id"]})
     target["OnlyTestIdentifiers"] = [CASE.split("/", 1)[1]]
     target["SkipTestIdentifiers"] = []
@@ -1265,7 +1266,7 @@ class RecoveryRun:
         original = candidates[0]
         raw = original.read_bytes()
         require(len(raw) <= MIB, "xctestrun too large")
-        value = configure_xctestrun(plistlib.loads(raw), self.ids)
+        value = configure_xctestrun(plistlib.loads(raw), self.ids, device_id=self.device_id)
         self.xctestrun = original.with_name("Recovery-" + self.ids["journey_run_id"] + ".xctestrun")
         require(not self.xctestrun.exists(), "Owned test configuration already exists")
         self.xctestrun.write_bytes(plistlib.dumps(value))
@@ -1293,14 +1294,14 @@ class RecoveryRun:
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")
         config = {**self.ids, "app_container": app_container, "runner_container": runner_container,
                   "simulator_root": self.device_root, "evidence_root": self.output / "evidence",
-                  "fixture_path": self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png",
+                  "fixture_path": self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png", "fixture_sha256": FIXTURE_SHA,
                   "source_commit": self.grant["source_commit"], "source_tree_sha256": self.tree_sha,
                   "config_sha256": sha(json.dumps(self.grant, sort_keys=True).encode()), "xctestrun_sha256": self.xctestrun_sha,
                   "simulator_udid": self.device_id, "app_bundle_id": BUNDLE, "runner_bundle_id": RUNNER_BUNDLE}
         (self.output / "evidence").mkdir()
         self.collector = Collector(config, guard=self.guard,
                                    run=lambda args: self.command(["xcrun", "xcresulttool", *args], "xcresult-" + str(len(self.record["commands"])), cap=40))
-        self.collector.capture_initial_exports()
+        self.collector.begin_installation()
 
     def test_and_collect(self):
         self.phase("test")

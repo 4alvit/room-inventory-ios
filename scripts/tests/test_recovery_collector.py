@@ -8,6 +8,8 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
 
 # Reuse the independent artifact fixture, not the verifier's implementation.
 import test_recovery_journey as fixtures
@@ -343,3 +345,201 @@ class RecoveryCollectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallationHandshakeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="room-installation-control-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.number = 0
+
+    def fixture(self):
+        self.number += 1
+        root = self.root / str(self.number)
+        sim = root / "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+        app = sim / "data/Containers/Data/Application/PREAPP"
+        runner = app.parent / "PRERUNNER"
+        evidence = root / "evidence"
+        fixture = root / "fixture.png"
+        for path in (app, runner, evidence): path.mkdir(parents=True)
+        fixture.write_bytes(b"inert exact synthetic fixture control")
+        config = {"app_container": app, "runner_container": runner, "simulator_root": sim,
+                  "evidence_root": evidence, "fixture_path": fixture, "fixture_sha256": C.sha(fixture.read_bytes()),
+                  "journey_run_id": "11111111-1111-4111-8111-111111111111",
+                  "source_run_id": "22222222-2222-4222-8222-222222222222",
+                  "target_run_id": "33333333-3333-4333-8333-333333333333",
+                  "source_commit": "a" * 40, "source_tree_sha256": "b" * 64,
+                  "config_sha256": "c" * 64, "xctestrun_sha256": "d" * 64,
+                  "simulator_udid": sim.name, "app_bundle_id": "com.alvit.roominventory",
+                  "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner"}
+        for path, key in ((app, "app_bundle_id"), (runner, "runner_bundle_id")):
+            (path / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": config[key]}))
+        state = SimpleNamespace(root=root, sim=sim, app=app, runner=runner, fixture=fixture,
+                                guard_hook=lambda: None, config=config)
+        def forbidden(args): raise AssertionError("native reader is forbidden")
+        state.collector = C.Collector(config, guard=lambda: state.guard_hook(), run=forbidden)
+        state.collector.begin_installation()
+        app.rename(root / "preinstalled-app")
+        runner.rename(root / "preinstalled-runner")
+        return state
+
+    def install(self, state):
+        state.app = state.app.parent / "INSTALLEDAPP"
+        state.runner = state.app.parent / "INSTALLEDRUNNER"
+        for path, key in ((state.app, "app_bundle_id"), (state.runner, "runner_bundle_id")):
+            path.mkdir()
+            (path / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": state.config[key]}))
+        state.bridge = state.runner / "Documents/RecoveryJourneyBridge" / state.config["journey_run_id"]
+        state.bridge.mkdir(parents=True)
+        return state
+
+    def request(self, state, **changes):
+        request = {"schema_version": 1, **state.collector.ids, "phase": "installation",
+                   **{k: state.config[k] for k in ("simulator_udid", "app_bundle_id", "runner_bundle_id")},
+                   "nonce": "44444444-4444-4444-8444-444444444444"}
+        request.update(changes)
+        raw = C.canonical(request)
+        (state.bridge / "installation-request.json").write_bytes(raw)
+        return raw
+
+    def test_explicit_installation_transition_pins_once_before_ack_with_durable_evidence(self):
+        state = self.fixture(); collector = state.collector
+        self.assertEqual(collector.poll_bridge(), 0)  # Old data roots are already gone.
+        self.assertEqual(collector.pins, {})
+        self.assertIsNone(collector.baseline)
+        self.install(state); raw = self.request(state)
+        original_link = C.os.link
+        def durable(source, destination, **options):
+            for name in ("preinstallation.json", "initial.json", "installation-request.json",
+                         "installation-receipt.json", "installation-ack.json"):
+                self.assertTrue((collector.root / "bridge" / name).is_file())
+            self.assertEqual(collector.app, state.app)
+            self.assertEqual(collector.runner, state.runner)
+            self.assertTrue(collector.pins)
+            return original_link(source, destination, **options)
+        with patch.object(C.os, "link", side_effect=durable):
+            self.assertEqual(collector.poll_bridge(), 0)
+        self.assertEqual(collector.installation_state, "accepted")
+        ack = C.parse((state.bridge / "installation-ack.json").read_bytes())
+        self.assertEqual(ack, {**C.parse(raw), "request_sha256": C.sha(raw), "success": True})
+        self.assertEqual(collector.baseline, {"exports": {}, "saved": {"folder": None, "identity": None, "entries": {}}})
+        for action in (collector.begin_installation, collector.capture_initial_exports):
+            with self.assertRaises(C.CollectorError): action()
+        # The normal six-barrier path is still used after the startup gate.
+        request = {"schema_version": 1, **collector.ids, "sequence": 1,
+                   "role": "source_zip", "phase": "before", "nonce": "55555555-5555-4555-8555-555555555555"}
+        (state.bridge / "request-01.json").write_bytes(C.canonical(request))
+        self.assertEqual(collector.poll_bridge(), 1)
+        self.assertTrue((state.bridge / "ack-01.json").exists())
+
+    def test_foreign_malformed_or_duplicate_requests_never_ack_or_restart_discovery(self):
+        variants = [{"journey_run_id": "foreign"}, {"simulator_udid": "foreign"},
+                    {"app_bundle_id": "other.app"}, {"runner_bundle_id": "other.runner"},
+                    {"schema_version": True}, {"phase": "before"}, {"nonce": "invalid"}, {"unknown": 1}]
+        for changes in variants:
+            with self.subTest(changes=changes):
+                state = self.install(self.fixture()); self.request(state, **changes)
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse((state.bridge / "installation-ack.json").exists())
+                self.assertEqual(state.collector.installation_state, "binding")
+                with self.assertRaisesRegex(C.CollectorError, "consumed or failed"):
+                    state.collector.poll_bridge()
+        state = self.install(self.fixture()); self.request(state)
+        (state.bridge / "installation-request.json").write_bytes(b'{"schema_version":1,"schema_version":1}')
+        with self.assertRaisesRegex(C.CollectorError, "duplicate JSON"):
+            state.collector.poll_bridge()
+        self.assertEqual(state.collector.installation_state, "binding")
+        state = self.install(self.fixture()); raw = self.request(state)
+        second = state.app / "Documents/RecoveryJourneyBridge" / state.config["journey_run_id"]
+        second.mkdir(parents=True); (second / "installation-request.json").write_bytes(raw)
+        with self.assertRaisesRegex(C.CollectorError, "duplicate installation"):
+            state.collector.poll_bridge()
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_missing_or_duplicate_bundle_identity_cannot_select_an_aut(self):
+        for mode in ("missing", "duplicate", "wrong-runner"):
+            with self.subTest(mode=mode):
+                state = self.install(self.fixture()); self.request(state)
+                if mode == "missing": (state.app / C.MCM).unlink()
+                elif mode == "wrong-runner":
+                    (state.runner / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": "foreign.runner"}))
+                else:
+                    duplicate = state.app.parent / "DUPLICATE"; duplicate.mkdir()
+                    (duplicate / C.MCM).write_bytes((state.app / C.MCM).read_bytes())
+                with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous"):
+                    state.collector.poll_bridge()
+                self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_prior_data_and_changed_fixture_are_not_blessed_as_installation(self):
+        for mode in ("namespace", "exports", "fixture", "scenario-request"):
+            with self.subTest(mode=mode):
+                state = self.install(self.fixture()); self.request(state)
+                if mode == "namespace":
+                    path = state.app / "tmp/RoomInventoryUITests" / state.config["source_run_id"]
+                    path.mkdir(parents=True)
+                elif mode == "exports":
+                    path = state.app / "tmp/InventoryExports" / state.config["source_run_id"]
+                    path.mkdir(parents=True)
+                elif mode == "fixture": state.fixture.write_bytes(b"changed synthetic seed source")
+                else: (state.bridge / "request-01.json").write_bytes(b"{}")
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_no_follow_and_original_guard_deadline_prevent_startup_ack(self):
+        state = self.install(self.fixture()); raw = self.request(state)
+        request = state.bridge / "installation-request.json"
+        request.rename(state.root / "outside-request.json")
+        request.symlink_to(state.root / "outside-request.json")
+        with patch.object(C.os, "open", side_effect=AssertionError("must reject before open")):
+            with self.assertRaisesRegex(C.CollectorError, "symlink"):
+                state.collector.poll_bridge()
+        state = self.install(self.fixture()); self.request(state)
+        def expired():
+            if (state.collector.root / "bridge/installation-receipt.json").exists():
+                raise TimeoutError("original controller deadline")
+        state.guard_hook = expired
+        with self.assertRaisesRegex(TimeoutError, "original controller deadline"):
+            state.collector.poll_bridge()
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        self.assertEqual(state.collector.installation_state, "binding")
+
+    def test_deadline_after_temporary_ack_write_does_not_publish_success(self):
+        state = self.install(self.fixture()); self.request(state)
+        def expired_after_write():
+            if any(path.name.startswith(".ack-") for path in state.bridge.iterdir()):
+                raise TimeoutError("original deadline after ACK fsync")
+        state.guard_hook = expired_after_write
+        with self.assertRaisesRegex(TimeoutError, "original deadline after ACK fsync"):
+            state.collector.poll_bridge()
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        self.assertEqual(state.collector.installation_state, "binding")
+
+    def test_post_ack_metadata_loss_or_handshake_mutation_never_rediscovers_or_repins(self):
+        for mode in ("metadata", "request", "ack", "device"):
+            with self.subTest(mode=mode):
+                state = self.install(self.fixture()); self.request(state); state.collector.poll_bridge()
+                pins = copy.deepcopy(state.collector.pins)
+                if mode == "metadata": (state.app / C.MCM).unlink()
+                elif mode in ("request", "ack"):
+                    (state.bridge / ("installation-" + mode + ".json")).write_bytes(b"{}")
+                else: state.collector.installation_device = {"device_id": -1, "inode": -1}
+                with patch.object(state.collector, "_poll_installation", side_effect=AssertionError("rediscovery forbidden")):
+                    with self.assertRaises((C.CollectorError, FileNotFoundError)):
+                        state.collector.poll_bridge()
+                self.assertEqual(state.collector.pins, pins)
+                self.assertEqual(state.collector.installation_state, "accepted")
+
+    def test_installation_search_keeps_the_actual_directory_entry_bound(self):
+        from contextlib import contextmanager
+        from itertools import repeat
+        state = self.fixture()
+        entry = SimpleNamespace(path=str(state.app.parent / "entry"), is_symlink=lambda: False)
+        @contextmanager
+        def entries(_):
+            yield repeat(entry, 2001)
+        with patch.object(C.os, "scandir", side_effect=entries):
+            with self.assertRaisesRegex(C.CollectorError, "entry count limit"):
+                state.collector.poll_bridge()
+        self.assertEqual(state.collector.pins, {})
+        self.assertIsNone(state.collector.baseline)

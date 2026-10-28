@@ -99,6 +99,9 @@ class Collector:
         self.written = 0
         self.pins = {}
         self.baseline = None
+        self.installation_state = "unstarted"
+        self.installation_files = {}
+        self.installation_device = None
         self.barriers, self.origins, self.nonces = [], [], set()
         self.xc_original = self.xc_copy = self.xc_before = None
         self.readers_started = False
@@ -289,7 +292,115 @@ class Collector:
         check(all("/" not in name and info["kind"] == "file" for name, info in tree.items()), "unexpected saved Files nesting")
         return {"folder": folder.relative_to(self.simulator).as_posix(), "identity": identity(folder.stat()), "entries": tree}
 
+    def _empty_installation_baseline(self):
+        exports, saved = self._exports(), self._files()
+        check(exports == {} and saved["folder"] is None, "installation exports or saved folder are not empty")
+        for key in ("source_run_id", "target_run_id"):
+            path = self._plain(self.app / "tmp/RoomInventoryUITests" / self.ids[key])
+            check(not path.exists(), "scenario namespace exists before installation acknowledgement")
+        fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
+        check(sha(fixture) == self.config["fixture_sha256"], "installation fixture binding changed")
+        return {"exports": exports, "saved": saved, "fixture_sha256": sha(fixture)}
+
+    def begin_installation(self):
+        check(self.installation_state == "unstarted" and self.baseline is None and not self.pins,
+              "installation already started")
+        self.guard()
+        self.installation_state = "preparing"
+        self.installation_device = identity(self.simulator.stat())
+        initial = self._empty_installation_baseline()
+        check(not self.bridge.exists(), "bridge directory already exists before installation")
+        self._write("bridge/preinstallation.json", canonical({
+            "containers": self._containers(), "baseline": initial,
+            "app": self.app.relative_to(self.simulator).as_posix(),
+            "runner": self.runner.relative_to(self.simulator).as_posix(),
+            "simulator_udid": self.config["simulator_udid"], "simulator_identity": self.installation_device,
+        }))
+        # These are installation observations, not scenario pins. The only
+        # transition to scenario pins requires a fresh runner request before
+        # the test is allowed to construct/launch the AUT or manipulate data.
+        self.installation_state = "waiting"
+
+    def _poll_installation(self):
+        check(self.installation_state == "waiting", "installation handshake already consumed or failed")
+        self.guard()
+        check(identity(self.simulator.stat()) == self.installation_device, "owned device changed during installation")
+        roots = self._entries(self.simulator / "data/Containers/Data/Application", [2000])
+        requests = []
+        for root in roots:
+            request = self._plain(root / "Documents/RecoveryJourneyBridge" /
+                                  self.ids["journey_run_id"] / "installation-request.json")
+            if request.exists():
+                raw, _ = self._read(request, 16384)
+                requests.append((root, request.parent, raw))
+        if not requests:
+            return 0
+        # A consumed or malformed request can never trigger a new discovery.
+        self.installation_state = "binding"
+        check(len(requests) == 1, "duplicate installation requests")
+        runner, bridge, raw = requests[0]
+        request = parse(raw)
+        expected = {"schema_version": 1, **self.ids, "phase": "installation",
+                    **{k: self.config[k] for k in ("simulator_udid", "app_bundle_id", "runner_bundle_id")}}
+        check(isinstance(request, dict) and set(request) == {*expected, "nonce"}
+              and type(request["schema_version"]) is int
+              and all(request[k] == v for k, v in expected.items()), "foreign or malformed installation request")
+        nonce = uuid_string(request["nonce"])
+        check(nonce not in self.nonces, "reused installation nonce")
+        entries = self._entries(bridge, [24])
+        check(all(path.name.startswith(".") or path.name == "installation-request.json" for path in entries),
+              "scenario or acknowledgement file exists before installation handshake")
+        matches = {self.config["app_bundle_id"]: [], self.config["runner_bundle_id"]: []}
+        for root in roots:
+            metadata = self._plain(root / MCM)
+            if not metadata.exists():
+                continue  # Installation has not established this unrelated container.
+            data, _ = self._read(metadata, MIB)
+            try:
+                value = plistlib.loads(data)
+            except Exception as error:
+                raise CollectorError("invalid installation container metadata") from error
+            check(isinstance(value, dict), "invalid installation container metadata")
+            bundle = value.get("MCMMetadataIdentifier")
+            if bundle in matches:
+                matches[bundle].append(root)
+        check(all(len(paths) == 1 for paths in matches.values()), "missing or ambiguous installed AUT or runner")
+        check(matches[self.config["runner_bundle_id"]][0] == runner, "installation request is outside expected runner")
+        check(not self.pins and self.baseline is None, "scenario pins already established")
+        self.app = self._root(matches[self.config["app_bundle_id"]][0])
+        self.runner = self._root(runner)
+        check(self.app != self.runner, "installed AUT and runner containers must differ")
+        self.bridge = bridge
+        baseline = self._empty_installation_baseline()
+        self.pins = self._containers()
+        self.baseline = {k: baseline[k] for k in ("exports", "saved")}
+        current, _ = self._read(self.bridge / "installation-request.json", 16384)
+        check(current == raw, "installation request changed during capture")
+        ack_raw = canonical({**request, "request_sha256": sha(raw), "success": True})
+        self.installation_files = {"installation-request.json": sha(raw), "installation-ack.json": sha(ack_raw)}
+        self._write("bridge/initial.json", canonical({"containers": self.pins, **self.baseline}))
+        self._write("bridge/installation-request.json", raw)
+        self._write("bridge/installation-receipt.json", canonical({
+            "request": request, "request_sha256": sha(raw), "ack_sha256": sha(ack_raw),
+            "app": self.app.relative_to(self.simulator).as_posix(),
+            "runner": self.runner.relative_to(self.simulator).as_posix(),
+            "containers": self.pins, "baseline": baseline,
+            "simulator_identity": self.installation_device,
+        }))
+        self._write("bridge/installation-ack.json", ack_raw)
+        # Revalidate after all evidence writes, before allowing data-bearing UI.
+        self._containers()
+        check(self._empty_installation_baseline() == baseline, "installation baseline changed before acknowledgement")
+        current, _ = self._read(self.bridge / "installation-request.json", 16384)
+        check(current == raw, "installation request changed before acknowledgement")
+        check(identity(self.simulator.stat()) == self.installation_device, "owned device changed before installation acknowledgement")
+        self.nonces.add(nonce)
+        self._publish_ack("installation-ack.json", ack_raw)
+        self.installation_state = "accepted"
+        return 0
+
     def capture_initial_exports(self):
+        check(self.installation_state == "unstarted", "installation requires its explicit startup handshake")
         check(self.baseline is None, "baseline already captured")
         self.pins = self._containers()
         exports, saved = self._exports(), self._files()
@@ -309,8 +420,15 @@ class Collector:
         check(nonce not in self.nonces, "reused bridge nonce")
 
     def poll_bridge(self):
+        if self.installation_state in ("waiting", "binding"):
+            return self._poll_installation()
         check(self.baseline is not None, "capture baseline first")
         self._containers()
+        if self.installation_state == "accepted":
+            check(identity(self.simulator.stat()) == self.installation_device, "owned device changed after installation")
+            for name, digest in self.installation_files.items():
+                raw, _ = self._read(self.bridge / name, 16384)
+                check(sha(raw) == digest, "installation handshake changed after acknowledgement")
         if not self.bridge.exists():
             return len(self.barriers)
         entries = self._entries(self.bridge, [24])
@@ -323,6 +441,8 @@ class Collector:
         for entry in entries:
             if entry.name.startswith("."):
                 continue  # In-progress atomic publication, never consumed.
+            if self.installation_state == "accepted" and entry.name in self.installation_files:
+                continue  # Exact immutable bytes were checked above.
             match = re.fullmatch(r"(request|ack)-(0[1-6])\.json", entry.name)
             check(match is not None, "unexpected bridge file")
             seen = int(match[2])
@@ -349,6 +469,11 @@ class Collector:
         self._write(f"bridge/receipt-{number:02d}.json", canonical(receipt))
         self._write(f"bridge/ack-{number:02d}.json", ack_raw)
         # All host evidence above is durable before allowing the UI to proceed.
+        self._publish_ack(f"ack-{number:02d}.json", ack_raw)
+        self.barriers.append(receipt)
+        return number
+
+    def _publish_ack(self, name, ack_raw):
         temporary = self.bridge / (".ack-" + str(uuid.uuid4()) + ".tmp")
         self._plain(temporary)
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -356,11 +481,10 @@ class Collector:
             stream.write(ack_raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.link(temporary, self.bridge / f"ack-{number:02d}.json", follow_symlinks=False)
+        self.guard()  # A completed write/fsync cannot renew the original deadline.
+        os.link(temporary, self.bridge / name, follow_symlinks=False)
         temporary.unlink()
         self._sync(self.bridge)
-        self.barriers.append(receipt)
-        return number
 
     def _record_origin(self, request, prior, current):
         before, after = prior["exports"], current["exports"]

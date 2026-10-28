@@ -32,6 +32,13 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         guard Set([journeyID, sourceID, targetID]).count == 3 else {
             throw RecoveryJourneyFailure.assertion("distinct configured UUIDs", "duplicate", "three distinct UUIDs")
         }
+        let deviceID = try requiredUUID("RECOVERY_SIMULATOR_UDID", environment)
+        let startupBridge = try RecoveryJourneyBridge(journeyID: journeyID, sourceID: sourceID,
+                                                       targetID: targetID, deviceID: deviceID)
+        // XCTest installs Simulator products before entering this test. Pause
+        // before constructing/launching the AUT or performing any data action.
+        try startupBridge.synchronizeInstallation(test: self)
+        bridge = startupBridge
         let suffix = String(journeyID.prefix(8))
         let names = ["home_name": "Recovery Home \(suffix)", "room_name": "Recovery Room \(suffix)",
                      "item_name": "Recovery Item \(suffix)", "notes": "Recovery receipt QA"]
@@ -42,7 +49,6 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // Async teardown crosses to this class's MainActor explicitly and also
         // runs after XCTest failures that can bypass a Swift defer statement.
         addTeardownBlock { @MainActor [self] () async throws in try finishEvidence() }
-        bridge = try RecoveryJourneyBridge(journeyID: journeyID, sourceID: sourceID, targetID: targetID)
         app.launchArguments = ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         activeRunID = sourceID
         app.launchEnvironment["UITEST_RUN_ID"] = sourceID

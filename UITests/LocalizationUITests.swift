@@ -48,19 +48,56 @@ final class LocalizationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Таблица предметов · CSV"].waitForExistence(timeout: 5))
         keepEvidence("ru-export-menu", app: app)
         let shareControllers = app.descendants(matching: .any).matching(identifier: "inventory.exportShare")
+        let headers = app.navigationBars.matching(identifier: "UIActivityContentView")
+        let closeButtons = app.buttons.matching(identifier: "header.closeButton")
         let beforeShareCount = shareControllers.count
-        if beforeShareCount != 0 { keepShareFailureEvidence(app: app) }
+        if beforeShareCount != 0 || headers.count != 0 || closeButtons.count != 0 {
+            keepShareFailureEvidence(app: app)
+        }
         XCTAssertEqual(beforeShareCount, 0, "A share controller must not preexist the CSV action")
+        XCTAssertEqual(headers.count, 0, "A system share header must not preexist the CSV action")
+        XCTAssertEqual(closeButtons.count, 0, "A system share Close must not preexist the CSV action")
         tap(app.buttons["Таблица предметов · CSV"])
+        // A container is not itself an action. Prove the exact CSV's real system
+        // surface with its interactive Close, then exercise dismissal within
+        // the same finite 15-second share phase.
+        let shareDeadline = ProcessInfo.processInfo.systemUptime + 15
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            guard shareControllers.count == 1 else { return false }
-            let controller = shareControllers.element(boundBy: 0)
-            return controller.exists && controller.isHittable
+            guard headers.count == 1, closeButtons.count == 1 else { return false }
+            let header = headers.element(boundBy: 0)
+            let close = closeButtons.element(boundBy: 0)
+            let captions = header.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "Inventory-localized.csv"))
+            let caption = captions.firstMatch
+            guard caption.exists else { return false }
+            return header.exists && close.exists && close.isEnabled && close.isHittable
+                && !header.frame.isEmpty && app.frame.contains(header.frame)
+                && header.frame.contains(close.frame) && !caption.frame.isEmpty
+                && header.frame.contains(caption.frame)
         }, object: nil)
-        let sharePresented = XCTWaiter.wait(for: [ready], timeout: 15) == .completed
+        let sharePresented = XCTWaiter.wait(for: [ready], timeout: max(0, shareDeadline - ProcessInfo.processInfo.systemUptime)) == .completed
         if !sharePresented { keepShareFailureEvidence(app: app) }
-        XCTAssertTrue(sharePresented, "Expected exactly one visible, hittable real CSV share controller")
+        XCTAssertTrue(sharePresented, "Expected the exact CSV in one visible system share header with one interactive Close")
+        guard sharePresented else { return }
         keepEvidence("ru-csv-share", app: app)
+        let beforeCloseRemaining = shareDeadline - ProcessInfo.processInfo.systemUptime
+        if beforeCloseRemaining <= 0 { keepShareFailureEvidence(app: app) }
+        XCTAssertGreaterThan(beforeCloseRemaining, 0, "CSV share phase expired before Close")
+        guard beforeCloseRemaining > 0 else { return }
+        closeButtons.element(boundBy: 0).tap()
+        let returned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard headers.count == 0, closeButtons.count == 0 else { return false }
+            let export = app.buttons["inventory.exportMenu"]
+            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "RU Test Home"))
+            return export.exists && export.isEnabled && export.isHittable
+                && home.count == 1 && home.element(boundBy: 0).isHittable
+        }, object: nil)
+        let remaining = shareDeadline - ProcessInfo.processInfo.systemUptime
+        let dismissed = remaining > 0
+            && XCTWaiter.wait(for: [returned], timeout: remaining) == .completed
+            && ProcessInfo.processInfo.systemUptime <= shareDeadline
+        if !dismissed { keepShareFailureEvidence(app: app) }
+        XCTAssertTrue(dismissed, "Real CSV Close must dismiss the sheet and return to the saved inventory within the same share phase")
         app.terminate()
     }
 
@@ -146,6 +183,30 @@ final class LocalizationUITests: XCTestCase {
         let alerts = app.alerts.debugDescription
         let prefix = "ROOM_LOCALIZATION_DIAGNOSTIC "
         var printedBytes = 0
+        // Fixed-shape actual query state makes missing/duplicate/noninteractive
+        // surfaces distinguishable without parsing debugDescription as a test.
+        let headers = app.navigationBars.matching(identifier: "UIActivityContentView")
+        let closes = app.buttons.matching(identifier: "header.closeButton")
+        var state: [String: Any] = ["phase": "csv-share-assertion-failed", "category": "share-surface-state",
+            "app_owned_container_count": app.descendants(matching: .any).matching(identifier: "inventory.exportShare").count,
+            "system_header_count": headers.count, "system_close_count": closes.count]
+        if headers.count == 1 {
+            let header = headers.element(boundBy: 0)
+            state["header_frame"] = String(describing: header.frame)
+            state["exact_csv_caption_count"] = header.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "Inventory-localized.csv")).count
+        }
+        if closes.count == 1 {
+            let close = closes.element(boundBy: 0)
+            state["close_enabled"] = close.isEnabled
+            state["close_hittable"] = close.isHittable
+            state["close_frame"] = String(describing: close.frame)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]),
+           data.count <= 4 * 1_024, let json = String(data: data, encoding: .utf8) {
+            print(prefix + json)
+            printedBytes += prefix.utf8.count + data.count + 1
+        }
         func emit(_ category: String, _ scalars: [Unicode.Scalar], originalCount: Int, offset: Int) {
             for start in stride(from: 0, to: scalars.count, by: 128) {
                 let end = min(start + 128, scalars.count)

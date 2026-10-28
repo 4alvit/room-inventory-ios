@@ -2,6 +2,16 @@ import Foundation
 import Observation
 import StoreKit
 
+// Read-only projection for deterministic verification/state-ordering controls.
+// Production feeds this receiver Apple's VerificationResult<Transaction> only.
+protocol ProEntitlementTransaction {
+    var productID: String { get }
+    var productType: Product.ProductType { get }
+    var revocationDate: Date? { get }
+    var isUpgraded: Bool { get }
+}
+extension StoreKit.Transaction: ProEntitlementTransaction {}
+
 /// Entitlements come exclusively from verified StoreKit transactions.
 @MainActor @Observable
 final class ProStore {
@@ -26,9 +36,8 @@ final class ProStore {
         updates = Task { [weak self] in
             for await result in Transaction.updates {
                 guard let self else { return }
-                guard case .verified(let transaction) = result,
-                      transaction.productID == self.productID else { continue }
-                await self.refreshEntitlements()
+                guard await self.applyTransactionUpdate(result),
+                      case .verified(let transaction) = result else { continue }
                 await transaction.finish()
             }
         }
@@ -112,13 +121,40 @@ final class ProStore {
         isPro = found
     }
 
+    @discardableResult
+    func applyTransactionUpdate<T: ProEntitlementTransaction>(_ result: VerificationResult<T>) async -> Bool {
+        guard case .verified(let transaction) = result,
+              transaction.productID == productID,
+              transaction.productType == .nonConsumable else { return false }
+        entitlementRevision &+= 1
+        let revision = entitlementRevision
+        let found: Bool
+        if transaction.revocationDate != nil || transaction.isUpgraded {
+            // A revoked older transaction must not remove a newer repurchase.
+            // Preserve aggregate verified-receipt reconciliation for removals.
+            found = await entitlementSnapshot(productID)
+        } else {
+            // A verified approval already grants this nonconsumable entitlement;
+            // the separate currentEntitlements index may not reflect it yet.
+            found = true
+        }
+        guard revision == entitlementRevision else { return true }
+        if isPro != found {
+            message = found
+                ? ServiceL10n.text("pro.ready")
+                : ServiceL10n.text("pro.inactive")
+        }
+        isPro = found
+        return true
+    }
+
     private static func verifiedEntitlementSnapshot(productID: String) async -> Bool {
         var found = false
         for await result in Transaction.currentEntitlements {
             guard case .verified(let transaction) = result,
                   transaction.productID == productID,
                   transaction.productType == .nonConsumable,
-                  transaction.revocationDate == nil else { continue }
+                  transaction.revocationDate == nil, !transaction.isUpgraded else { continue }
             found = true
         }
         return found

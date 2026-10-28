@@ -167,18 +167,18 @@ def validate_grant(grant, *, now, script_root):
     return grant
 
 
-def device_directory_identity(root):
+def owned_directory_identity(root):
     """Sample a required owned directory identity without following its final link.
 
     Path ancestry and concurrent changes between checks are not made atomic.
     This is a checkpoint identity guard, not a descriptor-anchored traversal.
     """
     info = root.lstat()
-    require(stat.S_ISDIR(info.st_mode), "Owned device root is not an ordinary directory",
+    require(stat.S_ISDIR(info.st_mode), "Owned resource root is not an ordinary directory",
             ResourceAccountingFailure)
     require(type(info.st_dev) is int and type(info.st_ino) is int
             and info.st_dev >= 0 and info.st_ino >= 0,
-            "Owned device root identity unavailable", ResourceAccountingFailure)
+            "Owned resource root identity unavailable", ResourceAccountingFailure)
     return info.st_dev, info.st_ino
 
 
@@ -191,7 +191,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         vanished_child_check()
         tick()
     if not root.exists() and not root.is_symlink():
-        require(vanished_child_check is None, "Required device root disappeared", ResourceAccountingFailure)
+        require(vanished_child_check is None, "Required resource root disappeared", ResourceAccountingFailure)
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
     require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
     pending, logical, allocated, entries = [root], 0, 0, 0
@@ -236,7 +236,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
             if (vanished_child_check is None or error.errno != errno.ENOENT
                     or directory == root or not directory.is_relative_to(root)):
                 raise
-            # A previously charged device directory can disappear while queued.
+            # A previously charged owned directory can disappear while queued.
             # Only the scandir open is eligible; iteration/context errors stay strict.
             tick()  # Do not query identity after a late open return.
             vanished_child_check()
@@ -431,6 +431,7 @@ class RecoveryRun:
         self.derived = self.output / "DerivedData"
         self.device_root = None
         self._owned_device_identity = None
+        self._owned_derived_identity = None
         self.device_base = Path.home() / "Library/Developer/CoreSimulator/Devices"
         self.owns_output = False
         self.device_id = None
@@ -667,7 +668,7 @@ class RecoveryRun:
         require(self._owned_device_identity is None, "Owned device identity already bound", ConfigurationFailure)
         require(self.device_id is not None and self.device_root == self.device_base / self.device_id,
                 "Invalid owned device root binding", ConfigurationFailure)
-        identity = device_directory_identity(self.device_root)
+        identity = owned_directory_identity(self.device_root)
         self._owned_device_identity = (self.device_root, self.device_id, identity)
 
     def validate_device_resource_root(self, root, binding):
@@ -675,8 +676,40 @@ class RecoveryRun:
                 and root is binding[0] and root is self.device_root
                 and self.device_id == binding[1] and root == self.device_base / self.device_id,
                 "Stale owned device resource binding", ConfigurationFailure)
-        require(device_directory_identity(root) == binding[2], "Owned device root replaced",
+        require(owned_directory_identity(root) == binding[2], "Owned device root replaced",
                 ResourceAccountingFailure)
+
+    def prepare_derived_resource_root(self):
+        # Create and bind this attempt's DerivedData before its only build. Never
+        # adopt an existing root or rebind after an observed identity change.
+        require(self._owned_derived_identity is None and self.owns_output
+                and self.output == Path(self.grant["output_root"])
+                and self.derived == self.output / "DerivedData",
+                "Invalid owned DerivedData binding", ConfigurationFailure)
+        self.tick()
+        output_identity = owned_directory_identity(self.output)
+        self.tick()
+        self.derived.mkdir(mode=0o700)
+        self.tick()
+        derived_identity = owned_directory_identity(self.derived)
+        self.tick()
+        require(owned_directory_identity(self.output) == output_identity,
+                "Owned output root replaced", ResourceAccountingFailure)
+        self.tick()
+        self._owned_derived_identity = (self.output, self.derived, output_identity, derived_identity)
+
+    def validate_derived_resource_root(self, root, binding):
+        require(binding is not None and self._owned_derived_identity is binding
+                and self.owns_output and self.output is binding[0]
+                and root is binding[1] and root is self.derived
+                and self.output == Path(self.grant["output_root"])
+                and root == self.output / "DerivedData",
+                "Stale owned DerivedData binding", ConfigurationFailure)
+        require(owned_directory_identity(self.output) == binding[2],
+                "Owned output root replaced", ResourceAccountingFailure)
+        self.tick()
+        require(owned_directory_identity(root) == binding[3],
+                "Owned DerivedData root replaced", ResourceAccountingFailure)
 
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
         span = self.observe_runtime("scan_start", value=category)
@@ -685,6 +718,10 @@ class RecoveryRun:
                 require("vanished_child_check" not in kwargs, "Device validation cannot be overridden", ConfigurationFailure)
                 owned_binding = self._owned_device_identity
                 kwargs["vanished_child_check"] = lambda: self.validate_device_resource_root(root, owned_binding)
+            elif category == "derived_data" and self._owned_derived_identity is not None:
+                require("vanished_child_check" not in kwargs, "DerivedData validation cannot be overridden", ConfigurationFailure)
+                owned_binding = self._owned_derived_identity
+                kwargs["vanished_child_check"] = lambda: self.validate_derived_resource_root(root, owned_binding)
             checkpoint = (self._derived_scan_service if category == "derived_data" and root == self.derived
                           and not self.cleanup_mode and self._derived_scan_service is not None else self.tick)
             binding = self._device_scan_service if category == "device" and not self.cleanup_mode else None
@@ -1164,6 +1201,7 @@ class RecoveryRun:
 
     def build(self):
         self.phase("build")
+        self.prepare_derived_resource_root()
         self.record["build_count"] += 1
         self.command(["xcodebuild", "build-for-testing", "-project", "RoomInventory.xcodeproj", "-scheme", "RoomInventory",
                       "-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + self.device_id,

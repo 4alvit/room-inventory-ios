@@ -212,7 +212,15 @@ final class ProStoreTests: XCTestCase {
         XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.", observation)
     }
 
-    func testNativePurchaseCancellationPreservesEntitlementAndSavedOriginal() async throws {
+    func testNativeCancellationPreservesUnpaidInventoryAndOriginal() async throws {
+        try await checkNativeCancellationPreservation(previouslyPurchased: false)
+    }
+
+    func testNativeCancellationPreservesVerifiedPurchaseAndOriginal() async throws {
+        try await checkNativeCancellationPreservation(previouslyPurchased: true)
+    }
+
+    private func checkNativeCancellationPreservation(previouslyPurchased: Bool) async throws {
         let session = try await makeSession()
         defer { session.resetToDefaultState(); session.clearTransactions() }
         let directory = FileManager.default.temporaryDirectory
@@ -236,83 +244,94 @@ final class ProStoreTests: XCTestCase {
         XCTAssertFalse(store.isPro)
         XCTAssertNotNil(store.displayPrice)
 
+        let initialFailure = await session.simulatedError(forAPI: .purchase)
+        let setup = diagnostic("cancellation-setup", ["previously_purchased": previouslyPurchased,
+            "setting": String(String(describing: initialFailure).prefix(192)),
+            "store_isPro": store.isPro, "session_transactions": session.allTransactions().count])
+        XCTAssertNil(initialFailure, setup)
+        // Each producer owns a clean session. Establish the paid precondition
+        // before this case injects any cancellation or other purchase error.
+        if previouslyPurchased {
+            diagnostic("cancellation-setup-purchase-before", ["previously_purchased": true])
+            await store.purchase()
+            diagnostic("cancellation-setup-purchase-after", ["store_isPro": store.isPro,
+                "store_isBusy": store.isBusy, "message": store.message ?? "<nil>",
+                "session_transactions": session.allTransactions().count])
+            await waitForObservedEntitlement(true, store: store)
+            try await requireCurrentLocalPurchase(session, store: store)
+        }
+
         let products = try await Product.products(for: [store.productID])
         let product = try XCTUnwrap(products.first)
         // Record the actual cancellation route returned by this StoreKit runtime.
         // This injected native outcome does not prove tapping the system Cancel UI.
-        for previouslyPurchased in [false, true] {
-            if previouslyPurchased {
-                try await session.setSimulatedError(nil, forAPI: .purchase)
-                await store.purchase()
-                await waitForObservedEntitlement(true, store: store)
-                try await requireCurrentLocalPurchase(session, store: store)
+        let before = await verifiedEntitlements()
+        let beforeIDs = Set(before.map(\.id))
+        try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
+        let configured = await session.simulatedError(forAPI: .purchase)
+        XCTAssertEqual(configured, .generic(.userCancelled))
+        diagnostic("cancellation-calibration-before", ["previously_purchased": previouslyPurchased,
+            "setting": String(String(describing: configured).prefix(192))])
+        let route: String
+        do {
+            switch try await product.purchase() {
+            case .userCancelled:
+                route = "returned_userCancelled"
+            case .pending:
+                let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_pending"])
+                XCTFail("Configured cancellation produced a pending purchase: \(details)")
+                return
+            case .success(let verification):
+                let verified: Bool
+                if case .verified = verification { verified = true } else { verified = false }
+                let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_success", "verified": verified])
+                XCTFail("Configured cancellation produced a successful purchase: \(details)")
+                return
+            @unknown default:
+                XCTFail("Configured cancellation produced an unknown purchase result")
+                return
             }
-            let before = await verifiedEntitlements()
-            let beforeIDs = Set(before.map(\.id))
-            try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
-            let configured = await session.simulatedError(forAPI: .purchase)
-            XCTAssertEqual(configured, .generic(.userCancelled))
-            diagnostic("cancellation-calibration-before", ["previously_purchased": previouslyPurchased,
-                "setting": String(String(describing: configured).prefix(192))])
-            let route: String
-            do {
-                switch try await product.purchase() {
-                case .userCancelled:
-                    route = "returned_userCancelled"
-                case .pending:
-                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_pending"])
-                    XCTFail("Configured cancellation produced a pending purchase: \(details)")
-                    return
-                case .success(let verification):
-                    let verified: Bool
-                    if case .verified = verification { verified = true } else { verified = false }
-                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_success", "verified": verified])
-                    XCTFail("Configured cancellation produced a successful purchase: \(details)")
-                    return
-                @unknown default:
-                    XCTFail("Configured cancellation produced an unknown purchase result")
-                    return
-                }
-            } catch StoreKitError.userCancelled {
-                route = "thrown_userCancelled"
-            } catch {
-                let value = error as NSError
-                diagnostic("cancellation-calibration-after", ["outcome": "thrown_other",
-                    "error_type": String(String(reflecting: type(of: error)).prefix(96)),
-                    "error_domain": String(value.domain.prefix(96)), "error_code": value.code])
-                throw error
-            }
-            let details = diagnostic("cancellation-calibration-after", ["outcome": route,
-                "previously_purchased": previouslyPurchased])
+        } catch StoreKitError.userCancelled {
+            route = "thrown_userCancelled"
+        } catch {
+            let value = error as NSError
+            diagnostic("cancellation-calibration-after", ["outcome": "thrown_other",
+                "error_type": String(String(reflecting: type(of: error)).prefix(96)),
+                "error_domain": String(value.domain.prefix(96)), "error_code": value.code])
+            throw error
+        }
+        let details = diagnostic("cancellation-calibration-after", ["outcome": route,
+            "previously_purchased": previouslyPurchased])
+        await store.purchase()
+        XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"), details)
+        XCTAssertFalse(store.isBusy)
+        XCTAssertEqual(store.isPro, previouslyPurchased)
+        let after = await verifiedEntitlements()
+        XCTAssertEqual(Set(after.map(\.id)), beforeIDs)
+        let reopened = ProStore()
+        await reopened.load()
+        XCTAssertEqual(reopened.isPro, previouslyPurchased)
+        if previouslyPurchased {
+            try await requireCurrentLocalPurchase(session, store: reopened)
+        }
+        let reopenedInventory = InventoryStore(rootURL: directory)
+        await reopenedInventory.load()
+        XCTAssertTrue(reopenedInventory.hasLoaded)
+        XCTAssertEqual(reopenedInventory.inventory, inventory)
+        XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
+        XCTAssertEqual(try repository.data(for: attachment), original)
+        if previouslyPurchased {
+            // Only the cancellation error gets the cancellation status.
+            try await session.setSimulatedError(
+                .generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
             await store.purchase()
-            XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"), details)
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.failed"))
             XCTAssertFalse(store.isBusy)
-            XCTAssertEqual(store.isPro, previouslyPurchased)
-            let after = await verifiedEntitlements()
-            XCTAssertEqual(Set(after.map(\.id)), beforeIDs)
-            let reopened = ProStore()
-            await reopened.load()
-            XCTAssertEqual(reopened.isPro, previouslyPurchased)
-            if previouslyPurchased {
-                try await requireCurrentLocalPurchase(session, store: reopened)
-            }
-            let reopenedInventory = InventoryStore(rootURL: directory)
-            await reopenedInventory.load()
-            XCTAssertTrue(reopenedInventory.hasLoaded)
-            XCTAssertEqual(reopenedInventory.inventory, inventory)
+            XCTAssertTrue(store.isPro)
+            try await requireCurrentLocalPurchase(session, store: store)
             XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
             XCTAssertEqual(try repository.data(for: attachment), original)
         }
-        // Only the cancellation error gets the cancellation status.
-        try await session.setSimulatedError(
-            .generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
-        await store.purchase()
-        XCTAssertEqual(store.message, ServiceL10n.text("pro.failed"))
-        XCTAssertFalse(store.isBusy)
-        XCTAssertTrue(store.isPro)
-        try await requireCurrentLocalPurchase(session, store: store)
-        XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
-        XCTAssertEqual(try repository.data(for: attachment), original)
     }
 
     func testCatalogFailureOnNewStoresUsesVerifiedReceiptAndRespectsRefund() async throws {

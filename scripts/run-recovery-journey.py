@@ -792,7 +792,14 @@ class RecoveryRun:
 
     def phase(self, name):
         self.diagnostic_stage = "phase"
-        self.phase_end = min(self.clock() + PHASE_SECONDS[name], self.work_end)
+        if name == "device":
+            # Share only the original startup allocation; fast preflight/build
+            # leave time for device work and its mandatory full accounting.
+            startup_end = self.start + sum(PHASE_SECONDS[p] for p in ("preflight", "build", "device"))
+            later_work = PHASE_SECONDS["test"] + PHASE_SECONDS["collect"]
+            self.phase_end = min(startup_end, self.work_end - later_work)
+        else:
+            self.phase_end = min(self.clock() + PHASE_SECONDS[name], self.work_end)
         self.arm(self.phase_end - 4)
         self.tick()
         self.record["phase"] = name

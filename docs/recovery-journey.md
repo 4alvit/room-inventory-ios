@@ -382,8 +382,23 @@ Preflight, pre-Popen and live guards are unchanged. This moves only terminal
 accounting out of the child-work allowance; all resource caps, allocation metrics,
 free-space floors, entry limits and the full barrier remain. Owned-group absence
 does not prove simulator or DerivedData quiescence, so no root is cached or skipped.
-Accounting and subsequent commands share the existing phase budget: the 180-second
-device phase can still be insufficient, and no hosted success is predicted.
+Accounting and subsequent device commands share the original startup allocation:
+120 seconds for preflight + 720 for build + 180 for device, ending at 1,020 seconds
+from controller start. Preflight and build retain their own phase caps; unused
+time from those phases remains available for device preparation and its full
+accounting. This is redistribution within the existing 1,740-second work budget,
+not an extension: device completion is also clipped before the full 480-second
+test and 240-second collection allowances. The 1,800-second outer deadline and
+60-second cleanup reserve remain unchanged. Reentering the device phase cannot
+renew its absolute startup deadline. Individual command caps, all resource walks,
+identity checks and cleanup requirements are unchanged.
+
+This finite allowance addresses the observed failure before app installation,
+where successful boot/bootstatus and full resource accounting consumed nearly all
+of the earlier 180-second device phase. It does not guarantee filesystem or
+simulator latency, collector completion, XCTest success or simulator shutdown;
+any exhausted command, phase or outer deadline still fails the attempt. No
+historical failed run becomes accepted.
 In `cleanup_mode`, the existing guard returns after its deadline tick and remains
 time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.

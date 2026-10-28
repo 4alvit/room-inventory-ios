@@ -420,6 +420,12 @@ def configure_xctestrun(value, ids, *, device_id):
     return value
 
 
+def validate_runner_photos_metadata(info):
+    description = info.get("NSPhotoLibraryUsageDescription") if isinstance(info, dict) else None
+    require(isinstance(description, str) and bool(description.strip()) and len(description.encode()) <= 4096,
+            "Built UI-test runner lacks bounded Photos usage metadata", ConfigurationFailure)
+
+
 class RecoveryRun:
     def __init__(self, grant, *, clock=time.monotonic, disk_usage=shutil.disk_usage):
         self.grant = grant
@@ -1279,8 +1285,11 @@ class RecoveryRun:
         for product, bundle in [(self.app, BUNDLE), (self.runner, RUNNER_BUNDLE)]:
             info_path = product / "Info.plist"
             require(info_path.stat().st_size < MIB, "Unexpected product plist size")
-            require(plistlib.loads(info_path.read_bytes()).get("CFBundleIdentifier") == bundle,
+            info = plistlib.loads(info_path.read_bytes())
+            require(info.get("CFBundleIdentifier") == bundle,
                     "Built product bundle identifier differs", ConfigurationFailure)
+            if bundle == RUNNER_BUNDLE:
+                validate_runner_photos_metadata(info)
 
     def prepare_device(self):
         from recovery_collector import Collector
@@ -1289,6 +1298,7 @@ class RecoveryRun:
         self.command(["xcrun", "simctl", "bootstatus", self.device_id, "-b"], "boot-status", cap=90)
         for app, label in [(self.app, "app"), (self.runner, "runner")]:
             self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=90)
+        self.command(["xcrun", "simctl", "privacy", self.device_id, "grant", "photos", RUNNER_BUNDLE], "authorize-runner-photos", cap=30)
         self.command(["xcrun", "simctl", "addmedia", self.device_id, self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png"], "seed-sole-photo", cap=30)
         app_container = self.app_container(BUNDLE, "app-container")
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")

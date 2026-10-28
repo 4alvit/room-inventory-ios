@@ -74,6 +74,8 @@ final class ProStore {
             @unknown default:
                 message = ServiceL10n.text("pro.incomplete")
             }
+        } catch StoreKitError.userCancelled {
+            message = ServiceL10n.text("pro.cancelled")
         } catch {
             message = ServiceL10n.text("pro.failed")
         }

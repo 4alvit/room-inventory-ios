@@ -1330,7 +1330,10 @@ class XctestrunTests(ControllerCase):
                              ("RoomInventoryUITests-Runner.app", controller.RUNNER_BUNDLE)):
             app = products / "Debug-iphonesimulator" / name
             app.mkdir(parents=True)
-            (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle}))
+            info = {"CFBundleIdentifier": bundle}
+            if bundle == controller.RUNNER_BUNDLE:
+                info["NSPhotoLibraryUsageDescription"] = "Automated test runner control"
+            (app / "Info.plist").write_bytes(plistlib.dumps(info))
         run.command = Mock(return_value=b"")
 
         run.build()

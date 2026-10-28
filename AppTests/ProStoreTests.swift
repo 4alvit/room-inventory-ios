@@ -1,6 +1,7 @@
 import XCTest
 import StoreKit
 import StoreKitTest
+import InventoryCore
 @testable import RoomInventory
 
 @MainActor
@@ -156,5 +157,134 @@ final class ProStoreTests: XCTestCase {
         try session.approveAskToBuyTransaction(identifier: transaction.identifier)
         await waitForObservedEntitlement(true, store: store)
         XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.")
+    }
+
+    func testThrownPurchaseCancellationPreservesEntitlementAndSavedOriginal() async throws {
+        let session = try await makeSession()
+        defer { session.resetToDefaultState(); session.clearTransactions() }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StoreKitCancellation-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try InventoryRepository(rootURL: directory)
+        let original = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6tX8AAAAASUVORK5CYII="))
+        let attachment = try repository.importAttachment(data: original,
+            originalName: "synthetic.png", mediaType: "image/png", kind: .receipt)
+        let inventory = Inventory(homes: [InventoryHome(name: "Saved home", rooms: [
+            InventoryRoom(name: "Saved room", items: [
+                InventoryItem(name: "Saved item", attachments: [attachment])
+            ])
+        ])])
+        try repository.save(inventory)
+        let manifestURL = directory.appendingPathComponent("inventory.json")
+        let manifest = try Data(contentsOf: manifestURL)
+        let store = ProStore()
+        await store.load()
+        XCTAssertFalse(store.isPro)
+        XCTAssertNotNil(store.displayPrice)
+
+        let products = try await Product.products(for: [store.productID])
+        let product = try XCTUnwrap(products.first)
+        // The error override throws StoreKitError.userCancelled; it does not test
+        // tapping Cancel in the system payment sheet or PurchaseResult.userCancelled.
+        for previouslyPurchased in [false, true] {
+            if previouslyPurchased {
+                try await session.setSimulatedError(nil, forAPI: .purchase)
+                await store.purchase()
+                await waitForObservedEntitlement(true, store: store)
+                try await requireCurrentLocalPurchase(session, store: store)
+            }
+            let before = await verifiedEntitlements()
+            let beforeIDs = Set(before.map(\.id))
+            try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
+            let configured = await session.simulatedError(forAPI: .purchase)
+            XCTAssertEqual(configured, .generic(.userCancelled))
+            // Calibrate the actual API outcome before testing the app's handler.
+            do {
+                _ = try await product.purchase()
+                XCTFail("The configured cancellation error must be thrown by Product.purchase")
+                return
+            } catch StoreKitError.userCancelled {
+                // Expected typed error, not a generic failure or returned cancellation.
+            }
+            await store.purchase()
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"))
+            XCTAssertFalse(store.isBusy)
+            XCTAssertEqual(store.isPro, previouslyPurchased)
+            let after = await verifiedEntitlements()
+            XCTAssertEqual(Set(after.map(\.id)), beforeIDs)
+            let reopened = ProStore()
+            await reopened.load()
+            XCTAssertEqual(reopened.isPro, previouslyPurchased)
+            if previouslyPurchased {
+                try await requireCurrentLocalPurchase(session, store: reopened)
+            }
+            let reopenedInventory = InventoryStore(rootURL: directory)
+            await reopenedInventory.load()
+            XCTAssertTrue(reopenedInventory.hasLoaded)
+            XCTAssertEqual(reopenedInventory.inventory, inventory)
+            XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
+            XCTAssertEqual(try repository.data(for: attachment), original)
+        }
+        // Only the cancellation error gets the cancellation status.
+        try await session.setSimulatedError(
+            .generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
+        await store.purchase()
+        XCTAssertEqual(store.message, ServiceL10n.text("pro.failed"))
+        XCTAssertFalse(store.isBusy)
+        XCTAssertTrue(store.isPro)
+        try await requireCurrentLocalPurchase(session, store: store)
+        XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
+        XCTAssertEqual(try repository.data(for: attachment), original)
+    }
+
+    func testCatalogFailureOnNewStoresUsesVerifiedReceiptAndRespectsRefund() async throws {
+        let session = try await makeSession()
+        defer { session.resetToDefaultState(); session.clearTransactions() }
+        // This simulates only the product API error; it does not disconnect networking.
+        let failure: SKTestFailures.LoadProducts = .generic(
+            .networkError(URLError(.notConnectedToInternet)))
+        try await session.setSimulatedError(failure, forAPI: .loadProducts)
+        let configured = await session.simulatedError(forAPI: .loadProducts)
+        XCTAssertEqual(configured, failure)
+        let fresh = ProStore()
+        await fresh.load()
+        XCTAssertFalse(fresh.isPro, "Catalog failure cannot create purchase rights")
+        XCTAssertNil(fresh.displayPrice)
+        XCTAssertEqual(fresh.message, ServiceL10n.text("pro.storeUnavailable"))
+        let emptyEntitlements = await verifiedEntitlements()
+        XCTAssertTrue(emptyEntitlements.isEmpty)
+
+        try await session.setSimulatedError(nil, forAPI: .loadProducts)
+        let purchaser = ProStore()
+        await purchaser.load()
+        XCTAssertNotNil(purchaser.displayPrice)
+        await purchaser.purchase()
+        await waitForObservedEntitlement(true, store: purchaser)
+        try await requireCurrentLocalPurchase(session, store: purchaser)
+        let transaction = try XCTUnwrap(session.allTransactions().first {
+            $0.productIdentifier == purchaser.productID
+        })
+
+        try await session.setSimulatedError(failure, forAPI: .loadProducts)
+        let reopened = ProStore()
+        await reopened.load()
+        XCTAssertTrue(reopened.isPro, "A verified receipt survives catalog failure on a new store")
+        XCTAssertNil(reopened.displayPrice)
+        XCTAssertEqual(reopened.message, ServiceL10n.text("pro.storeUnavailable"))
+        try await requireCurrentLocalPurchase(session, store: reopened)
+
+        try session.refundTransaction(identifier: transaction.identifier)
+        await waitForObservedEntitlement(false, store: purchaser)
+        await waitForObservedEntitlement(false, store: reopened)
+        let afterRefund = ProStore()
+        await afterRefund.load()
+        XCTAssertFalse(afterRefund.isPro, "Catalog failure must not preserve revoked purchase rights")
+        XCTAssertNil(afterRefund.displayPrice)
+        XCTAssertEqual(afterRefund.message, ServiceL10n.text("pro.storeUnavailable"))
+        let finalEntitlements = await verifiedEntitlements()
+        XCTAssertFalse(finalEntitlements.contains {
+            $0.productID == purchaser.productID && $0.revocationDate == nil
+        })
     }
 }

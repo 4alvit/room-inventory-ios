@@ -411,6 +411,32 @@ class InstallationHandshakeTests(unittest.TestCase):
         (state.bridge / "installation-request.json").write_bytes(raw)
         return raw
 
+    def photos_receipt(self, state, **changes):
+        collector = state.collector
+        fixture = state.fixture.read_bytes()
+        value = {"schema_version": 1, "phase": "photos_isolation", "status": "passed", **collector.ids,
+                 "simulator_udid": state.config["simulator_udid"], "runner_bundle_id": state.config["runner_bundle_id"],
+                 "installation_request_sha256": collector.installation_files["installation-request.json"],
+                 "fixture_filename": "SyntheticRecoveryReceipt.png", "fixture_bytes": len(fixture),
+                 "fixture_sha256": C.sha(fixture), "deadline_seconds": 20,
+                 "read_write_authorized": True, "initial_asset_count": 7, "initial_asset_ids_sha256": "a" * 64,
+                 "fixture_asset_id": "synthetic-owned-asset/L0/001", "before_bytes": len(fixture),
+                 "before_sha256": C.sha(fixture), "removed_asset_count": 6, "removed_asset_ids_sha256": "b" * 64,
+                 "change_requested": True, "change_completed": True, "confirmation_seen": True,
+                 "confirmation_accepted": True, "confirmation_text": "Runner would like to delete 6 photos",
+                 "final_asset_count": 1,
+                 "after_bytes": len(fixture), "after_sha256": C.sha(fixture),
+                 "finished_within_deadline": True, "elapsed_seconds": 1.5}
+        value.update(changes)
+        raw = C.canonical(value)
+        (state.bridge / "photos-isolation.json").write_bytes(raw)
+        return raw
+
+    def photos_state(self):
+        state = self.fixture(); self.install(state); self.request(state)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        return state
+
     def test_explicit_installation_transition_pins_once_before_ack_with_durable_evidence(self):
         state = self.fixture(); collector = state.collector
         self.assertEqual(collector.poll_bridge(), 0)  # Old data roots are already gone.
@@ -439,7 +465,8 @@ class InstallationHandshakeTests(unittest.TestCase):
         self.assertEqual(warmup["entries"][".repository.lock"]["bytes"], 0)
         for action in (collector.begin_installation, collector.capture_initial_exports):
             with self.assertRaises(C.CollectorError): action()
-        # The normal six-barrier path is still used after the startup gate.
+        # The normal six-barrier path is still used after both startup gates.
+        self.photos_receipt(state)
         request = {"schema_version": 1, **collector.ids, "sequence": 1,
                    "role": "source_zip", "phase": "before", "nonce": "55555555-5555-4555-8555-555555555555"}
         (state.bridge / "request-01.json").write_bytes(C.canonical(request))
@@ -630,3 +657,66 @@ class InstallationHandshakeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertFalse((state.bridge / "installation-ack.json").exists())
         self.assertEqual(state.collector.installation_state, "binding")
+
+    def test_photos_receipt_is_retained_before_export_and_immutable(self):
+        state = self.photos_state()
+        raw = self.photos_receipt(state)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertTrue(state.collector.photos_isolated)
+        self.assertEqual((state.collector.root / "bridge/photos-isolation.json").read_bytes(), raw)
+        (state.bridge / "photos-isolation.json").write_bytes(raw + b" ")
+        with self.assertRaisesRegex(C.CollectorError, "receipt changed"):
+            state.collector.poll_bridge()
+
+    def test_photos_missing_receipt_never_acknowledges_an_export(self):
+        state = self.photos_state()
+        request = {"schema_version": 1, **state.collector.ids, "sequence": 1,
+                   "role": "source_zip", "phase": "before", "nonce": "55555555-5555-4555-8555-555555555555"}
+        (state.bridge / "request-01.json").write_bytes(C.canonical(request))
+        with self.assertRaisesRegex(C.CollectorError, "Photos isolation missing"):
+            state.collector.poll_bridge()
+        self.assertFalse((state.bridge / "ack-01.json").exists())
+
+    def test_photos_foreign_incomplete_overdue_and_changed_original_receipts_fail(self):
+        variants = [{"simulator_udid": "foreign"}, {"installation_request_sha256": "0" * 64},
+                    {"runner_bundle_id": "com.alvit.roominventory"}, {"schema_version": True},
+                    {"final_asset_count": 7}, {"initial_asset_count": 65, "removed_asset_count": 64},
+                    {"initial_asset_count": True}, {"removed_asset_count": 5}, {"after_bytes": 0},
+                    {"before_sha256": "0" * 64}, {"after_sha256": "0" * 64},
+                    {"read_write_authorized": False}, {"change_completed": False}, {"confirmation_accepted": False},
+                    {"change_requested": False}, {"finished_within_deadline": False},
+                    {"elapsed_seconds": 20}, {"elapsed_seconds": True}, {"unknown": "field"}]
+        for changes in variants:
+            with self.subTest(changes=changes):
+                state = self.photos_state(); self.photos_receipt(state, **changes)
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse(state.collector.photos_isolated)
+                self.assertFalse((state.bridge / "ack-01.json").exists())
+
+    def test_photos_failed_callback_receipt_is_saved_but_never_accepted(self):
+        state = self.photos_state()
+        raw = self.photos_receipt(state, status="failed", error="change callback deadline", change_completed=False)
+        with self.assertRaisesRegex(C.CollectorError, "change callback deadline"):
+            state.collector.poll_bridge()
+        self.assertEqual((state.collector.root / "bridge/photos-isolation.json").read_bytes(), raw)
+        self.assertFalse(state.collector.photos_isolated)
+        with self.assertRaisesRegex(C.CollectorError, "previously failed"):
+            state.collector.poll_bridge()
+
+    def test_photos_receipt_symlink_and_source_fixture_change_are_rejected(self):
+        state = self.photos_state(); raw = self.photos_receipt(state)
+        path = state.bridge / "photos-isolation.json"; path.unlink()
+        target = state.root / "foreign.json"; target.write_bytes(raw); path.symlink_to(target)
+        with self.assertRaisesRegex(C.CollectorError, "symlink"):
+            state.collector.poll_bridge()
+        state = self.photos_state(); self.photos_receipt(state)
+        state.fixture.write_bytes(b"changed fixture")
+        with self.assertRaisesRegex(C.CollectorError, "fixture source changed"):
+            state.collector.poll_bridge()
+
+    def test_photos_already_isolated_single_fixture_does_not_require_a_change(self):
+        state = self.photos_state()
+        self.photos_receipt(state, initial_asset_count=1, removed_asset_count=0, change_requested=False,
+                            confirmation_seen=False, confirmation_accepted=False, confirmation_text="")
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertTrue(state.collector.photos_isolated)

@@ -1,8 +1,8 @@
 import XCTest
 import UIKit
 
-/// Dedicated clean-Simulator test. Seed only SyntheticRecoveryReceipt.png into
-/// Photos before opting in; all inventory creation and file operations use UI.
+/// Dedicated controller-owned Simulator test. Seed SyntheticRecoveryReceipt.png;
+/// the runner verifies/isolates it before all inventory and file operations use UI.
 @MainActor
 final class InventoryRecoveryJourneyTests: XCTestCase {
     private var evidence: RecoveryJourneyEvidence?
@@ -23,7 +23,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     func testPhotosOCRExportRestoreIntoFreshNamespace() throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
-                          "Requires an explicitly allocated clean Simulator containing only the synthetic receipt in Photos.")
+                          "Requires a fresh controller-owned Simulator seeded with the synthetic receipt in Photos.")
         executionTimeAllowance = 360
         continueAfterFailure = false
         let journeyID = try requiredUUID("RECOVERY_JOURNEY_RUN_ID", environment)
@@ -55,6 +55,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // The host now verifies the empty installation namespace and pins the
         // final containers once, before either scenario namespace is launched.
         try startupBridge.synchronizeInstallation(test: self)
+        try startupBridge.isolatePhotosFixture(test: self)
         bridge = startupBridge
         let suffix = String(journeyID.prefix(8))
         let names = ["home_name": "Recovery Home \(suffix)", "room_name": "Recovery Room \(suffix)",
@@ -102,14 +103,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         try ledger.require("Receipt purpose selected", actual: observedPurpose, expected: "Receipt")
         try tap(element("import.photos", app), app: app)
-        // The runner must provide a dedicated library with this one fixture.
-        // Reject an unexpected visible asset inventory instead of guessing.
+        // PhotoKit verified the original and isolated this owned library before
+        // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
         let photos = app.images.matching(photoPredicate)
         try ledger.require("seeded photo appears", photos.firstMatch.waitForExistence(timeout: 10))
+        ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
         try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
         let photoLabel = photos.firstMatch.label
-        ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
         try tap(photos.firstMatch, app: app)
         // Some supported picker versions expose Add for single selection;
         // others immediately deliver the sole selected image.

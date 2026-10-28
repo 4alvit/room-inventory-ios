@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
@@ -102,6 +103,8 @@ class Collector:
         self.installation_state = "unstarted"
         self.installation_files = {}
         self.installation_device = None
+        self.photos_isolation_sha = None
+        self.photos_isolated = False
         self.barriers, self.origins, self.nonces = [], [], set()
         self.xc_original = self.xc_copy = self.xc_before = None
         self.readers_started = False
@@ -434,6 +437,60 @@ class Collector:
         nonce = uuid_string(request["nonce"])
         check(nonce not in self.nonces, "reused bridge nonce")
 
+    def _poll_photos_isolation(self):
+        path = self._plain(self.bridge / "photos-isolation.json")
+        if not path.exists():
+            check(self.photos_isolation_sha is None, "Photos isolation receipt disappeared")
+            return
+        raw, _ = self._read(path, 16384)
+        if self.photos_isolation_sha is not None:
+            check(sha(raw) == self.photos_isolation_sha, "Photos isolation receipt changed")
+            check(self.photos_isolated, "Photos isolation previously failed")
+            return
+        value = parse(raw)
+        expected = {"schema_version": 1, "phase": "photos_isolation", **self.ids,
+                    "simulator_udid": self.config["simulator_udid"],
+                    "runner_bundle_id": self.config["runner_bundle_id"],
+                    "installation_request_sha256": self.installation_files["installation-request.json"],
+                    "fixture_filename": "SyntheticRecoveryReceipt.png",
+                    "fixture_sha256": self.config["fixture_sha256"], "deadline_seconds": 20}
+        check(isinstance(value, dict) and type(value.get("schema_version")) is int
+              and all(value.get(k) == v for k, v in expected.items()), "foreign Photos isolation receipt")
+        # Preserve a bound failure receipt before propagating its error.
+        self._write("bridge/photos-isolation.json", raw)
+        self.photos_isolation_sha = sha(raw)
+        check(value.get("status") == "passed", "Photos isolation failed: " + str(value.get("error", "missing status"))[:512])
+        fields = {*expected, "status", "fixture_bytes", "read_write_authorized", "initial_asset_count",
+                  "initial_asset_ids_sha256", "fixture_asset_id", "before_bytes", "before_sha256",
+                  "removed_asset_count", "removed_asset_ids_sha256", "change_requested", "change_completed",
+                  "confirmation_seen", "confirmation_accepted", "confirmation_text",
+                  "final_asset_count", "after_bytes", "after_sha256", "finished_within_deadline", "elapsed_seconds"}
+        check(set(value) == fields, "invalid Photos isolation fields")
+        fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
+        check(sha(fixture) == self.config["fixture_sha256"], "Photos fixture source changed")
+        for key in ("fixture_bytes", "before_bytes", "after_bytes"):
+            check(type(value[key]) is int and value[key] == len(fixture), "Photos original byte count differs")
+        check(value["before_sha256"] == value["after_sha256"] == self.config["fixture_sha256"], "Photos original hash differs")
+        counts = [value[k] for k in ("initial_asset_count", "removed_asset_count", "final_asset_count")]
+        check(all(type(n) is int for n in counts) and 1 <= counts[0] <= 64
+              and counts[1] == counts[0] - 1 and counts[2] == 1, "Photos inventory counts differ")
+        check(value["change_requested"] is (counts[1] > 0)
+              and all(value[k] is True for k in ("read_write_authorized", "change_completed", "finished_within_deadline")),
+              "Photos isolation callback or authorization unconfirmed")
+        check(type(value["confirmation_seen"]) is bool and type(value["confirmation_accepted"]) is bool
+              and value["confirmation_seen"] == value["confirmation_accepted"], "Photos confirmation incomplete")
+        check(isinstance(value["confirmation_text"], str) and len(value["confirmation_text"].encode()) <= 2048
+              and (bool(value["confirmation_text"]) == value["confirmation_seen"])
+              and (counts[1] > 0 or not value["confirmation_seen"]), "Photos confirmation receipt differs")
+        elapsed = value["elapsed_seconds"]
+        check(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed < 20, "Photos isolation deadline")
+        identifier = value["fixture_asset_id"]
+        check(isinstance(identifier, str) and 0 < len(identifier.encode()) <= 256
+              and all(ord(c) >= 32 for c in identifier), "invalid Photos fixture identifier")
+        for key in ("initial_asset_ids_sha256", "removed_asset_ids_sha256"):
+            check(isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key]), "invalid Photos inventory digest")
+        self.photos_isolated = True
+
     def poll_bridge(self):
         if self.installation_state in ("waiting", "binding"):
             return self._poll_installation()
@@ -444,6 +501,7 @@ class Collector:
             for name, digest in self.installation_files.items():
                 raw, _ = self._read(self.bridge / name, 16384)
                 check(sha(raw) == digest, "installation handshake changed after acknowledgement")
+            self._poll_photos_isolation()
         if not self.bridge.exists():
             return len(self.barriers)
         entries = self._entries(self.bridge, [24])
@@ -456,7 +514,7 @@ class Collector:
         for entry in entries:
             if entry.name.startswith("."):
                 continue  # In-progress atomic publication, never consumed.
-            if self.installation_state == "accepted" and entry.name in self.installation_files:
+            if self.installation_state == "accepted" and (entry.name in self.installation_files or entry.name == "photos-isolation.json"):
                 continue  # Exact immutable bytes were checked above.
             match = re.fullmatch(r"(request|ack)-(0[1-6])\.json", entry.name)
             check(match is not None, "unexpected bridge file")
@@ -467,6 +525,7 @@ class Collector:
         request_path = self.bridge / f"request-{number:02d}.json"
         if not request_path.exists():
             return len(self.barriers)
+        check(self.installation_state != "accepted" or self.photos_isolated, "Photos isolation missing before export barrier")
         raw, _ = self._read(request_path, 16384)
         request = parse(raw)
         self._validate_request(request, number)

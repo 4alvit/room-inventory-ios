@@ -17,6 +17,9 @@ final class RecoveryJourneyBridge {
     private let directory: URL
     private var completedBarriers = 0
     private var installationAcknowledged = false
+    private var installationRequestSHA: String?
+    private var photosIsolationAttempted = false
+    private var photosIsolated = false
 
     init(journeyID: String, sourceID: String, targetID: String, deviceID: String) throws {
         guard Bundle.main.bundleIdentifier == "com.alvit.roominventory.uitests.xctrunner" else {
@@ -79,12 +82,49 @@ final class RecoveryJourneyBridge {
         try waitForAcknowledgement(request: request, requestData: requestData,
                                    requestURL: requestURL, acknowledgementURL: acknowledgementURL,
                                    attachmentName: "recovery-installation-ack.json", test: test)
+        installationRequestSHA = SHA256.hash(data: requestData).map { String(format: "%02x", $0) }.joined()
         installationAcknowledged = true
     }
 
+    func isolatePhotosFixture(test: XCTestCase) throws {
+        guard installationAcknowledged, !photosIsolationAttempted, completedBarriers == 0,
+              let installationRequestSHA else {
+            throw BridgeError.invalid("Photos isolation requires this owned installation acknowledgement exactly once")
+        }
+        photosIsolationAttempted = true
+        let receiptURL = directory.appendingPathComponent("photos-isolation.json")
+        guard try Self.entryType(receiptURL) == nil else { throw BridgeError.invalid("Photos receipt already exists") }
+        var receipt: [String: Any] = [
+            "schema_version": 1, "phase": "photos_isolation", "status": "failed",
+            "journey_run_id": journeyID, "source_run_id": sourceID, "target_run_id": targetID,
+            "simulator_udid": deviceID, "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner",
+            "installation_request_sha256": installationRequestSHA,
+            "fixture_filename": RecoveryPhotosFixture.filename, "fixture_bytes": RecoveryPhotosFixture.bytes,
+            "fixture_sha256": RecoveryPhotosFixture.digest, "deadline_seconds": RecoveryPhotosFixture.seconds
+        ]
+        var primary: Error?
+        do {
+            try RecoveryPhotosFixture.isolate(deviceID: deviceID, report: &receipt)
+            receipt["status"] = "passed"
+        } catch {
+            primary = error
+            receipt["error"] = String(String(describing: error).prefix(512))
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            guard data.count <= 16_384 else { throw BridgeError.invalid("Photos receipt byte bound") }
+            try Self.publish(data, at: receiptURL, nonce: UUID().uuidString)
+            Self.attach(data, name: "recovery-photos-isolation.json", test: test)
+        } catch {
+            throw BridgeError.invalid("Photos isolation: \(String(describing: primary)); receipt publication: \(error)")
+        }
+        if let primary { throw primary }
+        photosIsolated = true
+    }
+
     func synchronize(role: Role, phase: Phase, test: XCTestCase) throws {
-        guard installationAcknowledged else {
-            throw BridgeError.invalid("installation handshake missing")
+        guard installationAcknowledged, photosIsolated else {
+            throw BridgeError.invalid("installation handshake or Photos isolation missing")
         }
         let sequence = completedBarriers + 1
         let roles: [Role] = [.sourceZIP, .sourceZIP, .backup, .backup, .targetZIP, .targetZIP]
@@ -120,7 +160,7 @@ final class RecoveryJourneyBridge {
     }
 
     func requireComplete() throws {
-        guard installationAcknowledged, completedBarriers == 6 else {
+        guard installationAcknowledged, photosIsolated, completedBarriers == 6 else {
             throw BridgeError.invalid("incomplete host capture")
         }
     }

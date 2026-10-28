@@ -28,13 +28,55 @@ class OperationAllowanceTests(base.ControllerCase):
         collector.capture_initial_exports.assert_not_called()
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
-                         ["boot-device", "boot-status", "install-app", "install-runner", "seed-sole-photo"])
-        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 90, 90, 90, 30])
+                         ["boot-device", "boot-status", "install-app", "install-runner", "authorize-runner-photos", "seed-sole-photo"])
+        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 90, 90, 90, 30, 30])
+        self.assertEqual(calls[4].args[0], ["xcrun", "simctl", "privacy", run.device_id,
+                                             "grant", "photos", C.RUNNER_BUNDLE])
+        self.assertEqual(calls[5].args[0][:4], ["xcrun", "simctl", "addmedia", run.device_id])
+        self.permission_request = calls[4]
         installs = [c for c in calls if c.args[1].startswith("install-")]
         for call, app in zip(installs, (run.app, run.runner)):
             self.assertEqual(call.args[0], ["xcrun", "simctl", "install", run.device_id, app])
         self.popen.assert_not_called()
         return installs
+
+    def test_photos_permission_targets_only_owned_runner_before_single_seed(self):
+        self.install_requests()
+        # install_requests already exercises the real prepare_device builder.
+        for value in ({}, {"NSPhotoLibraryUsageDescription": ""},
+                      {"NSPhotoLibraryUsageDescription": "  "},
+                      {"NSPhotoLibraryUsageDescription": True},
+                      {"NSPhotoLibraryUsageDescription": "a" * 4097}):
+            with self.subTest(value=value), self.assertRaises(C.ConfigurationFailure):
+                C.validate_runner_photos_metadata(value)
+        C.validate_runner_photos_metadata({"NSPhotoLibraryUsageDescription": "Automated testing"})
+        self.popen.assert_not_called()
+
+    def test_photos_grant_uses_existing_thirty_second_admission_and_startup_end(self):
+        self.install_requests()
+        request = self.permission_request
+        with devices.World(module=C) as w:
+            run = w.run
+            w.clock.now = run.start + 200
+            run.phase("device")
+            original = run.work_end, run.outer_end
+            run.guard = lambda force=False: run.tick()
+            start = w.clock.now
+            w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + 25.5) or 0)
+            run.command(*request.args, **request.kwargs)
+            record = run.record["commands"][0]
+            self.assertEqual(record["end_deadline_elapsed"], 230)
+            self.assertLess(record["child_completed_elapsed"], 226)
+            self.assertEqual((run.work_end, run.outer_end), original)
+        for elapsed in (1016, 1020):
+            with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
+                run = w.run
+                run.phase("device")
+                w.clock.now = run.start + elapsed
+                run.guard = lambda force=False: run.tick()
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(*request.args, **request.kwargs)
+                self.assertFalse(any(e[0] == "spawn" for e in w.events))
 
     def cleanup_requests(self):
         run = self.run_fixture(output=False)

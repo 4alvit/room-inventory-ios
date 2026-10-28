@@ -46,8 +46,8 @@ evidence; repair and review the cause before separately authorizing another run.
    isolated checkout and new, empty result directory. Record the source tree digest.
    Preserve the existing accepted preview ZIP and all historical evidence unchanged.
 2. Use one **new dedicated iPhone simulator**, created for this attempt, with a
-   known installed runtime and a unique recorded UDID/name. This gives Photos a
-   known empty library. Never use `booted`, erase a shared device, or clean a global
+   known installed runtime and a unique recorded UDID/name. Do not assume its
+   Photos library is empty; the bound runner verifies and isolates the fixture. Never use `booted`, erase a shared device, or clean a global
    simulator directory. Fail preflight if there is insufficient free storage or
    another native job would violate the host's coordination slot.
 3. Generate the Xcode project from `project.yml` with the pinned repository helper.
@@ -70,8 +70,9 @@ evidence; repair and review the cause before separately authorizing another run.
    final scenario pins once, before source/target launches or data-bearing actions.
    Later container identity or metadata changes fail collection; they never
    trigger rediscovery or repinning.
-   Do not seed any app inventory or asset folder. If Photos or app export storage
-   contains prior data, stop the run.
+   Do not seed any app inventory or asset folder. Prior app/export data still
+   stops the run. Only the newly created, acknowledged device may have its bounded
+   local Photos inventory isolated; shared or surviving user devices are forbidden.
 5. Prepare an attempt-local copy of the generated `.xctestrun` beside its original
    so `__TESTROOT__` paths remain valid. Keep only the UI target, set its
    `EnvironmentVariables.RUN_INVENTORY_RECOVERY_JOURNEY` to `1` and
@@ -188,9 +189,36 @@ installation-only launch. Existing
 selected build paths, source and `.xctestrun` hashes bind the installed products;
 this does not add an independent installed-binary attestation.
 
-The single Photos seed is not repeated or replaced. The existing UI check for one
-photo and final original/fixture verification still reject a missing or wrong
-seed. After ACK, request/ACK bytes, both final container identities and metadata
+The single Photos seed is not repeated or replaced. A fresh Simulator is not
+assumed to have an empty Photos library. After the installation ACK and before
+launching the data-bearing scenario, the UI-test runner verifies and isolates the
+seed using PhotoKit. The controller validates the actual built runner's Photos
+usage description and grants full Photos access only to that runner on its newly
+owned device. The app's privacy permissions and built payload are unchanged.
+
+The runner also checks the actual Simulator UUID, runner bundle, usage description
+and full read/write authorization. One 20-second monotonic deadline inside the
+unchanged XCTest/controller limits covers at most 64 local assets, at most eight
+resources per asset, the unique named 1400×1800 PNG, and two network-disabled
+resource reads of at most 74,736 bytes each. Both reads must match the source
+fixture's SHA-256. After a stable inventory re-read, one PhotoKit change removes
+only the other asset IDs. The fixture itself is never deleted, replaced or seeded
+again. A per-change system confirmation, when presented, must name this runner and
+the exact removal count; only its Delete button may be tapped, at most once.
+Unknown alerts fail. The native permission/confirmation presentation remains a
+runtime compatibility gate, not a source-validation claim.
+
+`photos-isolation.json` is published atomically in the runner bridge, binds the
+installation request hash and all run/device identifiers, and records counts,
+original hashes, callback/confirmation results and elapsed time. The host retains
+failure receipts and requires a successful immutable receipt before acknowledging
+the first of the original six export barriers. An overdue/missing callback is a
+failure, never success inferred from a submitted request. PhotoKit has no change-
+request cancellation API; if a change callback is unresolved, the ordinary owned
+process/device cleanup remains mandatory and no scenario acceptance is recorded.
+The existing strict picker check for one photo and all OCR/original/export checks
+remain. Picker evidence is captured before the cardinality assertion so an
+unexpected accessibility representation is retained even when selection stops. After ACK, request/ACK bytes, both final container identities and metadata
 remain pinned for every live export check. Installation failure never permits a
 second handshake or opportunistic midjourney repin. The original source/target
 launches, relaunch, assertions and six export barriers follow ACK unchanged. The

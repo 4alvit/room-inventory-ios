@@ -12,8 +12,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private var completed = false
 
     private func finishEvidence() throws {
+        defer { application?.terminate() }
         if let evidence, let application {
-            defer { application.terminate() }
             let failures = (testRun?.failureCount ?? 1) + (testRun?.unexpectedExceptionCount ?? 0)
             if failures > 0 { evidence.recordIssue("XCTest recorded \(failures) failure(s)") }
             try evidence.finish(completed: completed && failures == 0, runID: activeRunID, app: application, test: self)
@@ -35,8 +35,25 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let deviceID = try requiredUUID("RECOVERY_SIMULATOR_UDID", environment)
         let startupBridge = try RecoveryJourneyBridge(journeyID: journeyID, sourceID: sourceID,
                                                        targetID: targetID, deviceID: deviceID)
-        // XCTest installs Simulator products before entering this test. Pause
-        // before constructing/launching the AUT or performing any data action.
+        let app = XCUIApplication()
+        application = app
+        // Cleanup also covers an installation-only launch that fails before the
+        // evidence ledger or final host acknowledgement exists.
+        addTeardownBlock { @MainActor [self] () async throws in try finishEvidence() }
+        app.launchArguments = ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        // First AUT launch may replace its preinstalled Simulator container.
+        // Use only the distinct journey UUID; source/target data remain absent.
+        app.launchEnvironment["UITEST_RUN_ID"] = journeyID
+        app.launch()
+        guard app.state == .runningForeground else {
+            throw RecoveryJourneyFailure.assertion("installation launch", String(app.state.rawValue), "foreground")
+        }
+        app.terminate()
+        guard app.state == .notRunning else {
+            throw RecoveryJourneyFailure.assertion("installation termination", String(app.state.rawValue), "not running")
+        }
+        // The host now verifies the empty installation namespace and pins the
+        // final containers once, before either scenario namespace is launched.
         try startupBridge.synchronizeInstallation(test: self)
         bridge = startupBridge
         let suffix = String(journeyID.prefix(8))
@@ -44,12 +61,6 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                      "item_name": "Recovery Item \(suffix)", "notes": "Recovery receipt QA"]
         let ledger = RecoveryJourneyEvidence(journeyID: journeyID, sourceID: sourceID, targetID: targetID, expected: names)
         evidence = ledger
-        let app = XCUIApplication()
-        application = app
-        // Async teardown crosses to this class's MainActor explicitly and also
-        // runs after XCTest failures that can bypass a Swift defer statement.
-        addTeardownBlock { @MainActor [self] () async throws in try finishEvidence() }
-        app.launchArguments = ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         activeRunID = sourceID
         app.launchEnvironment["UITEST_RUN_ID"] = sourceID
         app.launch()

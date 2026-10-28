@@ -292,7 +292,7 @@ class Collector:
         check(all("/" not in name and info["kind"] == "file" for name, info in tree.items()), "unexpected saved Files nesting")
         return {"folder": folder.relative_to(self.simulator).as_posix(), "identity": identity(folder.stat()), "entries": tree}
 
-    def _empty_installation_baseline(self):
+    def _empty_installation_baseline(self, *, require_warmup=False):
         exports, saved = self._exports(), self._files()
         check(exports == {} and saved["folder"] is None, "installation exports or saved folder are not empty")
         for key in ("source_run_id", "target_run_id"):
@@ -300,7 +300,22 @@ class Collector:
             check(not path.exists(), "scenario namespace exists before installation acknowledgement")
         fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
         check(sha(fixture) == self.config["fixture_sha256"], "installation fixture binding changed")
-        return {"exports": exports, "saved": saved, "fixture_sha256": sha(fixture)}
+        result = {"exports": exports, "saved": saved, "fixture_sha256": sha(fixture)}
+        warmup = self._plain(self.app / "tmp/RoomInventoryUITests" / self.ids["journey_run_id"])
+        if require_warmup:
+            # InventoryRepository initialization/load creates only this empty
+            # assets directory and zero-byte storage lock; no inventory is seeded.
+            tree = self._snapshot(warmup, 0, 2)
+            check(set(tree) == {"assets", ".repository.lock"}
+                  and tree["assets"]["kind"] == "directory"
+                  and tree[".repository.lock"]["kind"] == "file"
+                  and tree[".repository.lock"]["bytes"] == 0,
+                  "installation namespace is not the exact empty warmup layout")
+            result["warmup"] = {"namespace": warmup.relative_to(self.app).as_posix(),
+                                "root": identity(warmup.stat()), "entries": tree}
+        else:
+            check(not warmup.exists(), "installation namespace exists before first launch")
+        return result
 
     def begin_installation(self):
         check(self.installation_state == "unstarted" and self.baseline is None and not self.pins,
@@ -371,7 +386,7 @@ class Collector:
         self.runner = self._root(runner)
         check(self.app != self.runner, "installed AUT and runner containers must differ")
         self.bridge = bridge
-        baseline = self._empty_installation_baseline()
+        baseline = self._empty_installation_baseline(require_warmup=True)
         self.pins = self._containers()
         self.baseline = {k: baseline[k] for k in ("exports", "saved")}
         current, _ = self._read(self.bridge / "installation-request.json", 16384)
@@ -390,7 +405,7 @@ class Collector:
         self._write("bridge/installation-ack.json", ack_raw)
         # Revalidate after all evidence writes, before allowing data-bearing UI.
         self._containers()
-        check(self._empty_installation_baseline() == baseline, "installation baseline changed before acknowledgement")
+        check(self._empty_installation_baseline(require_warmup=True) == baseline, "installation baseline changed before acknowledgement")
         current, _ = self._read(self.bridge / "installation-request.json", 16384)
         check(current == raw, "installation request changed before acknowledgement")
         check(identity(self.simulator.stat()) == self.installation_device, "owned device changed before installation acknowledgement")

@@ -64,8 +64,10 @@ evidence; repair and review the cause before separately authorizing another run.
    `UseDestinationArtifacts` disabled and no destination-relative test-bundle path.
    Xcode rejects that destination-artifacts mode on Simulator because it requires
    a physical iOS device. Xcode may install the same selected products again.
-   After that installation, the explicit startup handshake below establishes
-   final scenario pins once, before any AUT launch or data-bearing test action.
+   The first XCTest AUT launch can replace its preinstalled container even after
+   runner startup. One installation-only launch uses the distinct journey UUID
+   namespace and confirms termination. The startup handshake below then establishes
+   final scenario pins once, before source/target launches or data-bearing actions.
    Later container identity or metadata changes fail collection; they never
    trigger rediscovery or repinning.
    Do not seed any app inventory or asset folder. If Photos or app export storage
@@ -162,9 +164,11 @@ manifests, exported attachments, and the verifier's `collection.json` input.
 
 ### Installation-to-scenario handshake
 
-At test entry, before constructing or launching `XCUIApplication`, the runner
-atomically publishes one `installation-request.json` in its own fresh journey
-bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
+At test entry, the runner performs exactly one installation-only AUT launch with
+`UITEST_RUN_ID` set to the distinct journey UUID, checks foreground state, terminates
+it and checks that it is not running. It performs no inventory or Photos action.
+Only then does it atomically publish one `installation-request.json` in its own
+fresh journey bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
 and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK uses the
 existing 20-second wait inside the unchanged XCTest allowance and controller test
 phase; no deadline is renewed.
@@ -174,8 +178,13 @@ The host's existing guarded callback searches only the owned Simulator's
 no-follow metadata reads. Missing old installation metadata is not a scenario
 failure before the request. A duplicate, foreign, malformed or ambiguous request
 or bundle match fails. A valid request can establish final containers only once:
-empty source/target namespaces, empty exports/Files inventory, unchanged fixture
-hash and owned-device identity must hold before durable receipts and ACK. Existing
+absent source/target namespaces, empty exports/Files inventory, unchanged fixture
+hash and owned-device identity must hold before durable receipts and ACK. The
+journey UUID warmup namespace must contain exactly an empty `assets` directory and
+a zero-byte regular `.repository.lock`, with no manifest, originals, symlinks or
+other entries. Its observed root/entry identities are retained in the installation
+receipt and checked again before ACK. This namespace must be absent before the
+installation-only launch. Existing
 selected build paths, source and `.xctestrun` hashes bind the installed products;
 this does not add an independent installed-binary attestation.
 
@@ -183,7 +192,11 @@ The single Photos seed is not repeated or replaced. The existing UI check for on
 photo and final original/fixture verification still reject a missing or wrong
 seed. After ACK, request/ACK bytes, both final container identities and metadata
 remain pinned for every live export check. Installation failure never permits a
-second handshake or opportunistic midjourney repin.
+second handshake or opportunistic midjourney repin. The original source/target
+launches, relaunch, assertions and six export barriers follow ACK unchanged. The
+installation-only launch shares the existing XCTest/controller deadlines; it does
+not add a host command, retry or additional allowance. Hosted execution must
+still prove that later scenario launches preserve the final pinned containers.
 
 ### Live export origin barriers
 

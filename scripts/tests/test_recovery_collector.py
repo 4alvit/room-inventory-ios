@@ -384,7 +384,7 @@ class InstallationHandshakeTests(unittest.TestCase):
         runner.rename(root / "preinstalled-runner")
         return state
 
-    def install(self, state):
+    def install(self, state, *, warmup=True):
         state.app = state.app.parent / "INSTALLEDAPP"
         state.runner = state.app.parent / "INSTALLEDRUNNER"
         for path, key in ((state.app, "app_bundle_id"), (state.runner, "runner_bundle_id")):
@@ -392,7 +392,15 @@ class InstallationHandshakeTests(unittest.TestCase):
             (path / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": state.config[key]}))
         state.bridge = state.runner / "Documents/RecoveryJourneyBridge" / state.config["journey_run_id"]
         state.bridge.mkdir(parents=True)
+        if warmup:
+            self.warmup(state)
         return state
+
+    def warmup(self, state):
+        path = state.app / "tmp/RoomInventoryUITests" / state.config["journey_run_id"]
+        (path / "assets").mkdir(parents=True)
+        (path / ".repository.lock").write_bytes(b"")
+        return path
 
     def request(self, state, **changes):
         request = {"schema_version": 1, **state.collector.ids, "phase": "installation",
@@ -424,6 +432,11 @@ class InstallationHandshakeTests(unittest.TestCase):
         ack = C.parse((state.bridge / "installation-ack.json").read_bytes())
         self.assertEqual(ack, {**C.parse(raw), "request_sha256": C.sha(raw), "success": True})
         self.assertEqual(collector.baseline, {"exports": {}, "saved": {"folder": None, "identity": None, "entries": {}}})
+        receipt = C.parse((collector.root / "bridge/installation-receipt.json").read_bytes())
+        warmup = receipt["baseline"]["warmup"]
+        self.assertEqual(warmup["namespace"], "tmp/RoomInventoryUITests/" + state.config["journey_run_id"])
+        self.assertEqual(set(warmup["entries"]), {"assets", ".repository.lock"})
+        self.assertEqual(warmup["entries"][".repository.lock"]["bytes"], 0)
         for action in (collector.begin_installation, collector.capture_initial_exports):
             with self.assertRaises(C.CollectorError): action()
         # The normal six-barrier path is still used after the startup gate.
@@ -543,3 +556,77 @@ class InstallationHandshakeTests(unittest.TestCase):
                 state.collector.poll_bridge()
         self.assertEqual(state.collector.pins, {})
         self.assertIsNone(state.collector.baseline)
+
+
+    def test_request_before_first_aut_launch_is_rejected_without_ack(self):
+        state = self.install(self.fixture(), warmup=False)
+        self.request(state)
+        with self.assertRaisesRegex(C.CollectorError, "missing snapshot root"):
+            state.collector.poll_bridge()
+        self.assertEqual(state.collector.pins, {})
+        self.assertEqual(state.collector.installation_state, "binding")
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        with self.assertRaisesRegex(C.CollectorError, "consumed or failed"):
+            state.collector.poll_bridge()
+
+    def test_first_aut_launch_replacement_precedes_final_request_and_never_repins_after_ack(self):
+        state = self.install(self.fixture(), warmup=False)
+        old_app = state.app
+        # Runner entry alone is insufficient: the first AUT launch removes this
+        # still-preinstalled AUT, before it initializes its warmup namespace.
+        old_app.rename(state.root / "aut-before-first-launch")
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertEqual(state.collector.pins, {})
+        self.assertIsNone(state.collector.baseline)
+        state.app = old_app.parent / "AFTERFIRSTLAUNCH"
+        state.app.mkdir()
+        (state.app / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": state.config["app_bundle_id"]}))
+        self.warmup(state)
+        self.request(state)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertEqual(state.collector.app, state.app)
+        self.assertNotEqual(state.collector.app, old_app)
+        for key in ("source_run_id", "target_run_id"):
+            self.assertFalse((state.app / "tmp/RoomInventoryUITests" / state.config[key]).exists())
+        pins = copy.deepcopy(state.collector.pins)
+        state.app.rename(state.root / "lost-final-aut")
+        with patch.object(state.collector, "_poll_installation", side_effect=AssertionError("rediscovery forbidden")):
+            with self.assertRaises(FileNotFoundError): state.collector.poll_bridge()
+        self.assertEqual(state.collector.pins, pins)
+        self.assertEqual(state.collector.installation_state, "accepted")
+
+    def test_warmup_must_have_only_empty_assets_and_regular_zero_byte_lock(self):
+        for mode in ("missing-assets", "missing-lock", "nonempty-lock", "manifest", "original",
+                     "extra-directory", "asset-symlink", "lock-symlink", "wrong-namespace"):
+            with self.subTest(mode=mode):
+                state = self.install(self.fixture())
+                path = state.app / "tmp/RoomInventoryUITests" / state.config["journey_run_id"]
+                if mode == "missing-assets": (path / "assets").rmdir()
+                elif mode == "missing-lock": (path / ".repository.lock").unlink()
+                elif mode == "nonempty-lock": (path / ".repository.lock").write_bytes(b"prior data")
+                elif mode == "manifest": (path / "inventory.json").write_bytes(b'{"homes":[]}')
+                elif mode == "original": (path / "assets/original.png").write_bytes(b"prior photo")
+                elif mode == "extra-directory": (path / "unexpected").mkdir()
+                elif mode == "asset-symlink":
+                    (path / "assets").rmdir(); (path / "assets").symlink_to(state.root, target_is_directory=True)
+                elif mode == "lock-symlink":
+                    (path / ".repository.lock").unlink(); (path / ".repository.lock").symlink_to(state.fixture)
+                else: path.rename(path.with_name("55555555-5555-4555-8555-555555555555"))
+                self.request(state)
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse((state.bridge / "installation-ack.json").exists())
+                self.assertEqual(state.collector.installation_state, "binding")
+
+    def test_warmup_change_during_receipt_write_cannot_publish_final_ack(self):
+        state = self.install(self.fixture()); self.request(state)
+        changed = []
+        def mutate():
+            if not changed and (state.collector.root / "bridge/installation-receipt.json").exists():
+                changed.append(True)
+                path = state.app / "tmp/RoomInventoryUITests" / state.config["journey_run_id"]
+                (path / "assets/unexpected").write_bytes(b"late data")
+        state.guard_hook = mutate
+        with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+        self.assertTrue(changed)
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        self.assertEqual(state.collector.installation_state, "binding")

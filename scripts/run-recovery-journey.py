@@ -310,10 +310,17 @@ def kill_owned(process, deadline, *, state=None, clock=time.monotonic, sleep=tim
         report["errors"].append(item)
         state["observation_errors"].append(item)
 
+    def note_known_reap():
+        code = getattr(process, "returncode", None)
+        if code is not None:
+            state["returncode"] = code
+            state["leader_reaped"] = True
+
     def observe():
         if clock() >= end:
             report["budget_exhausted"] = True
             return False
+        note_known_reap()
         if not state["leader_reaped"]:
             try:
                 state["returncode"] = process.wait(timeout=0)
@@ -339,7 +346,11 @@ def kill_owned(process, deadline, *, state=None, clock=time.monotonic, sleep=tim
         return state["group_state"] == "absent" and state["leader_reaped"]
 
     def send(sig):
-        if clock() >= end or state["group_state"] == "absent":
+        # Reaping releases the leader PID; its numeric PGID is no longer a
+        # destructive-signal capability. Unknown observations stay failures.
+        note_known_reap()
+        if (clock() >= end or state["leader_reaped"]
+                or state["group_state"] != "present" or state["observation_errors"]):
             return
         try:
             killpg(process.pid, sig)

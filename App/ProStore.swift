@@ -41,6 +41,9 @@ final class ProStore {
         do {
             product = try await Product.products(for: [productID]).first
             displayPrice = product?.displayPrice
+            if product == nil {
+                message = ServiceL10n.text("pro.storeUnavailable")
+            }
         } catch {
             message = ServiceL10n.text("pro.storeUnavailable")
         }

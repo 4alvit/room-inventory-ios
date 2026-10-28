@@ -178,7 +178,7 @@ class OwnedGroupTests(ControllerCase):
         no_reprobe.assert_not_called()
 
     def test_signal_eperm_is_not_erased_by_following_successful_probe(self):
-        process = FakeProcess()
+        process = FakeProcess(running=True)
         calls = []
 
         def signal_denied(pgid, sig):
@@ -186,6 +186,7 @@ class OwnedGroupTests(ControllerCase):
             if sig == signal.SIGTERM:
                 raise PermissionError(errno.EPERM, "cannot signal")
             if len(calls) > 2:
+                process.running = False
                 raise ProcessLookupError(errno.ESRCH, "gone")
 
         state = {}

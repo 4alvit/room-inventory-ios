@@ -49,6 +49,45 @@ final class ProStoreTests: XCTestCase {
 
     private enum StoreKitResetFailure: Error { case notClean }
 
+    @discardableResult
+    private func diagnostic(_ phase: String, _ fields: [String: Any] = [:]) -> String {
+        let value = fields.merging(["phase": phase,
+            "uptime": ProcessInfo.processInfo.systemUptime]) { _, new in new }
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              data.count <= 2_048, let text = String(data: data, encoding: .utf8) else {
+            XCTFail("StoreKit diagnostic exceeded its bounded fixed-field shape")
+            return "diagnostic unavailable"
+        }
+        print("ROOM_STOREKIT_DIAGNOSTIC " + text)
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "StoreKit-" + phase
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        return text
+    }
+
+    private func catalogProbe(_ phase: String, session: SKTestSession,
+                              expected: SKTestFailures.LoadProducts, productID: String) async -> String {
+        diagnostic(phase + "-setting-before")
+        let configured = await session.simulatedError(forAPI: .loadProducts)
+        XCTAssertEqual(configured, expected, "Catalog error setting changed: \(phase)")
+        let setting = String(String(describing: configured).prefix(192))
+        diagnostic(phase + "-products-before", ["setting_matches": configured == expected,
+                    "setting": setting])
+        do {
+            let products = try await Product.products(for: [productID])
+            return diagnostic(phase + "-products-after", ["outcome": "returned",
+                "count": products.count, "matching_product_count": products.filter { $0.id == productID }.count,
+                "setting_matches": configured == expected, "setting": setting])
+        } catch {
+            let value = error as NSError
+            return diagnostic(phase + "-products-after", ["outcome": "threw",
+                "error_type": String(String(reflecting: type(of: error)).prefix(96)),
+                "error_domain": String(value.domain.prefix(96)), "error_code": value.code,
+                "setting_matches": configured == expected, "setting": setting])
+        }
+    }
+
     private func requireCurrentLocalPurchase(_ session: SKTestSession, store: ProStore) async throws {
         _ = try XCTUnwrap(session.allTransactions().first {
             $0.productIdentifier == store.productID
@@ -154,12 +193,26 @@ final class ProStoreTests: XCTestCase {
         XCTAssertFalse(store.isPro)
         XCTAssertTrue(store.message?.contains("awaiting approval") == true)
         let transaction = try XCTUnwrap(session.allTransactions().first)
+        diagnostic("pending-approval-before", ["session_transactions": session.allTransactions().count,
+            "store_isPro": store.isPro])
         try session.approveAskToBuyTransaction(identifier: transaction.identifier)
+        diagnostic("pending-approval-after", ["session_transactions": session.allTransactions().count])
         await waitForObservedEntitlement(true, store: store)
-        XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.")
+        var observation = "approval observed"
+        if !store.isPro {
+            diagnostic("pending-failed-entitlements-before")
+            let current = await verifiedEntitlements()
+            observation = diagnostic("pending-failed-entitlements-after", [
+                "session_transactions": session.allTransactions().count,
+                "verified_product_entitlements": current.filter { $0.productID == store.productID }.count,
+                "verified_xcode_product_entitlements": current.filter {
+                    $0.productID == store.productID && $0.environment == .xcode && $0.revocationDate == nil
+                }.count, "store_isPro": store.isPro, "message": store.message ?? "<nil>"])
+        }
+        XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.", observation)
     }
 
-    func testThrownPurchaseCancellationPreservesEntitlementAndSavedOriginal() async throws {
+    func testNativePurchaseCancellationPreservesEntitlementAndSavedOriginal() async throws {
         let session = try await makeSession()
         defer { session.resetToDefaultState(); session.clearTransactions() }
         let directory = FileManager.default.temporaryDirectory
@@ -185,8 +238,8 @@ final class ProStoreTests: XCTestCase {
 
         let products = try await Product.products(for: [store.productID])
         let product = try XCTUnwrap(products.first)
-        // The error override throws StoreKitError.userCancelled; it does not test
-        // tapping Cancel in the system payment sheet or PurchaseResult.userCancelled.
+        // Record the actual cancellation route returned by this StoreKit runtime.
+        // This injected native outcome does not prove tapping the system Cancel UI.
         for previouslyPurchased in [false, true] {
             if previouslyPurchased {
                 try await session.setSimulatedError(nil, forAPI: .purchase)
@@ -199,16 +252,40 @@ final class ProStoreTests: XCTestCase {
             try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
             let configured = await session.simulatedError(forAPI: .purchase)
             XCTAssertEqual(configured, .generic(.userCancelled))
-            // Calibrate the actual API outcome before testing the app's handler.
+            diagnostic("cancellation-calibration-before", ["previously_purchased": previouslyPurchased,
+                "setting": String(String(describing: configured).prefix(192))])
+            let route: String
             do {
-                _ = try await product.purchase()
-                XCTFail("The configured cancellation error must be thrown by Product.purchase")
-                return
+                switch try await product.purchase() {
+                case .userCancelled:
+                    route = "returned_userCancelled"
+                case .pending:
+                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_pending"])
+                    XCTFail("Configured cancellation produced a pending purchase: \(details)")
+                    return
+                case .success(let verification):
+                    let verified: Bool
+                    if case .verified = verification { verified = true } else { verified = false }
+                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_success", "verified": verified])
+                    XCTFail("Configured cancellation produced a successful purchase: \(details)")
+                    return
+                @unknown default:
+                    XCTFail("Configured cancellation produced an unknown purchase result")
+                    return
+                }
             } catch StoreKitError.userCancelled {
-                // Expected typed error, not a generic failure or returned cancellation.
+                route = "thrown_userCancelled"
+            } catch {
+                let value = error as NSError
+                diagnostic("cancellation-calibration-after", ["outcome": "thrown_other",
+                    "error_type": String(String(reflecting: type(of: error)).prefix(96)),
+                    "error_domain": String(value.domain.prefix(96)), "error_code": value.code])
+                throw error
             }
+            let details = diagnostic("cancellation-calibration-after", ["outcome": route,
+                "previously_purchased": previouslyPurchased])
             await store.purchase()
-            XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"))
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"), details)
             XCTAssertFalse(store.isBusy)
             XCTAssertEqual(store.isPro, previouslyPurchased)
             let after = await verifiedEntitlements()
@@ -248,10 +325,15 @@ final class ProStoreTests: XCTestCase {
         let configured = await session.simulatedError(forAPI: .loadProducts)
         XCTAssertEqual(configured, failure)
         let fresh = ProStore()
+        let freshProbe = await catalogProbe("catalog-fresh", session: session,
+            expected: failure, productID: fresh.productID)
+        diagnostic("catalog-fresh-load-before")
         await fresh.load()
+        let freshOutcome = diagnostic("catalog-fresh-load-after", ["isPro": fresh.isPro,
+            "display_price_present": fresh.displayPrice != nil, "message": fresh.message ?? "<nil>"])
         XCTAssertFalse(fresh.isPro, "Catalog failure cannot create purchase rights")
-        XCTAssertNil(fresh.displayPrice)
-        XCTAssertEqual(fresh.message, ServiceL10n.text("pro.storeUnavailable"))
+        XCTAssertNil(fresh.displayPrice, freshProbe + "; " + freshOutcome)
+        XCTAssertEqual(fresh.message, ServiceL10n.text("pro.storeUnavailable"), freshProbe + "; " + freshOutcome)
         let emptyEntitlements = await verifiedEntitlements()
         XCTAssertTrue(emptyEntitlements.isEmpty)
 
@@ -268,20 +350,30 @@ final class ProStoreTests: XCTestCase {
 
         try await session.setSimulatedError(failure, forAPI: .loadProducts)
         let reopened = ProStore()
+        let paidProbe = await catalogProbe("catalog-paid", session: session,
+            expected: failure, productID: reopened.productID)
+        diagnostic("catalog-paid-load-before")
         await reopened.load()
+        let paidOutcome = diagnostic("catalog-paid-load-after", ["isPro": reopened.isPro,
+            "display_price_present": reopened.displayPrice != nil, "message": reopened.message ?? "<nil>"])
         XCTAssertTrue(reopened.isPro, "A verified receipt survives catalog failure on a new store")
-        XCTAssertNil(reopened.displayPrice)
-        XCTAssertEqual(reopened.message, ServiceL10n.text("pro.storeUnavailable"))
+        XCTAssertNil(reopened.displayPrice, paidProbe + "; " + paidOutcome)
+        XCTAssertEqual(reopened.message, ServiceL10n.text("pro.storeUnavailable"), paidProbe + "; " + paidOutcome)
         try await requireCurrentLocalPurchase(session, store: reopened)
 
         try session.refundTransaction(identifier: transaction.identifier)
         await waitForObservedEntitlement(false, store: purchaser)
         await waitForObservedEntitlement(false, store: reopened)
         let afterRefund = ProStore()
+        let refundProbe = await catalogProbe("catalog-refund", session: session,
+            expected: failure, productID: afterRefund.productID)
+        diagnostic("catalog-refund-load-before")
         await afterRefund.load()
+        let refundOutcome = diagnostic("catalog-refund-load-after", ["isPro": afterRefund.isPro,
+            "display_price_present": afterRefund.displayPrice != nil, "message": afterRefund.message ?? "<nil>"])
         XCTAssertFalse(afterRefund.isPro, "Catalog failure must not preserve revoked purchase rights")
-        XCTAssertNil(afterRefund.displayPrice)
-        XCTAssertEqual(afterRefund.message, ServiceL10n.text("pro.storeUnavailable"))
+        XCTAssertNil(afterRefund.displayPrice, refundProbe + "; " + refundOutcome)
+        XCTAssertEqual(afterRefund.message, ServiceL10n.text("pro.storeUnavailable"), refundProbe + "; " + refundOutcome)
         let finalEntitlements = await verifiedEntitlements()
         XCTAssertFalse(finalEntitlements.contains {
             $0.productID == purchaser.productID && $0.revocationDate == nil

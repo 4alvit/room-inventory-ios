@@ -394,12 +394,11 @@ def configure_xctestrun(value, ids):
             and target.get("UITargetAppPath") == "__TESTROOT__/Debug-iphonesimulator/RoomInventory.app"
             and target.get("TestBundlePath") == "__TESTHOST__/PlugIns/RoomInventoryUITests.xctest",
             "Unexpected UI application or runner target", ConfigurationFailure)
-    # xcodebuild.xctestrun(5): preinstalled destination artifacts prevent an
-    # implicit reinstall from invalidating the pinned container identities.
-    target["UseDestinationArtifacts"] = True
-    target["TestBundleDestinationRelativePath"] = target.pop("TestBundlePath")
-    target.pop("TestHostPath")
-    target.pop("UITargetAppPath")
+    # UseDestinationArtifacts is device-only; Simulator testing requires the
+    # validated generated paths. Existing collector pins still reject any
+    # app/runner container relocation or metadata change during installation.
+    target["UseDestinationArtifacts"] = False
+    target.pop("TestBundleDestinationRelativePath", None)
     target["UITargetAppBundleIdentifier"] = BUNDLE
     env = target.setdefault("EnvironmentVariables", {})
     require(isinstance(env, dict), "Malformed test environment", ConfigurationFailure)

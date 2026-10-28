@@ -7,6 +7,7 @@ import datetime as dt
 import errno
 import importlib.util
 import json
+import plistlib
 from pathlib import Path
 import signal
 import stat
@@ -1285,7 +1286,7 @@ class XctestrunTests(ControllerCase):
                 "source_run_id": "22222222-2222-4222-8222-222222222222",
                 "target_run_id": "33333333-3333-4333-8333-333333333333"}
 
-    def test_one_case_no_parallel_and_destination_artifacts_pin_installed_bundles(self):
+    def test_one_case_no_parallel_and_simulator_paths_preserve_generated_products(self):
         result = controller.configure_xctestrun(self.generated(), self.ids())
         targets = result["TestConfigurations"][0]["TestTargets"]
         self.assertEqual(len(targets), 1)
@@ -1293,11 +1294,11 @@ class XctestrunTests(ControllerCase):
         self.assertEqual(target["OnlyTestIdentifiers"], [controller.CASE.split("/", 1)[1]])
         self.assertEqual(target["SkipTestIdentifiers"], [])
         self.assertIs(target["ParallelizationEnabled"], False)
-        self.assertIs(target["UseDestinationArtifacts"], True)
-        self.assertNotIn("TestHostPath", target)
-        self.assertNotIn("TestBundlePath", target)
-        self.assertNotIn("UITargetAppPath", target)
-        self.assertEqual(target["TestBundleDestinationRelativePath"], "__TESTHOST__/PlugIns/RoomInventoryUITests.xctest")
+        self.assertIs(target["UseDestinationArtifacts"], False)
+        generated = self.generated()["TestConfigurations"][0]["TestTargets"][1]
+        for key in ("TestHostPath", "TestBundlePath", "UITargetAppPath"):
+            self.assertEqual(target[key], generated[key])
+        self.assertNotIn("TestBundleDestinationRelativePath", target)
         self.assertEqual(target["TestHostBundleIdentifier"], controller.RUNNER_BUNDLE)
         self.assertEqual(target["UITargetAppBundleIdentifier"], controller.BUNDLE)
         self.assertEqual(target["SystemAttachmentLifetime"], "keepAlways")
@@ -1307,6 +1308,50 @@ class XctestrunTests(ControllerCase):
         self.assertEqual(target["EnvironmentVariables"]["RUN_INVENTORY_RECOVERY_JOURNEY"], "1")
         self.assertEqual(target["UITargetAppEnvironmentVariables"], {"APP_GENERATED": "keep"})
         self.assertEqual((target["TestLanguage"], target["TestRegion"]), ("en", "US"))
+
+    def test_build_writes_simulator_paths_beside_original_and_keeps_original_unchanged(self):
+        run = self.run_fixture()
+        run.device_id = "44444444-4444-4444-8444-444444444444"
+        run.phase = Mock()
+        run.prepare_derived_resource_root = Mock()
+        products = run.derived / "Build/Products"
+        products.mkdir(parents=True)
+        generated = self.generated()
+        target = generated["TestConfigurations"][0]["TestTargets"][1]
+        # Even a preexisting destination-artifacts override must not restore
+        # the Xcode 16.4 physical-device-only path that failed in hosted CI.
+        target["UseDestinationArtifacts"] = True
+        target["TestBundleDestinationRelativePath"] = "__TESTHOST__/PlugIns/RoomInventoryUITests.xctest"
+        original = products / "RoomInventory_iphonesimulator.xctestrun"
+        raw = plistlib.dumps(generated)
+        original.write_bytes(raw)
+        for name, bundle in (("RoomInventory.app", controller.BUNDLE),
+                             ("RoomInventoryUITests-Runner.app", controller.RUNNER_BUNDLE)):
+            app = products / "Debug-iphonesimulator" / name
+            app.mkdir(parents=True)
+            (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle}))
+        run.command = Mock(return_value=b"")
+
+        run.build()
+
+        self.assertEqual(run.xctestrun.parent, original.parent)
+        self.assertEqual(original.read_bytes(), raw)
+        self.assertEqual((run.output / "generated.xctestrun.plist").read_bytes(), raw)
+        selected = run.xctestrun.read_bytes()
+        self.assertEqual((run.output / "selected.xctestrun.plist").read_bytes(), selected)
+        self.assertEqual(run.xctestrun_sha, controller.sha(selected))
+        selected_target = plistlib.loads(selected)["TestConfigurations"][0]["TestTargets"][0]
+        self.assertIs(selected_target["UseDestinationArtifacts"], False)
+        self.assertNotIn("TestBundleDestinationRelativePath", selected_target)
+        for key in ("TestHostPath", "UITargetAppPath", "TestBundlePath"):
+            self.assertEqual(selected_target[key], target[key])
+        self.assertEqual(selected_target["OnlyTestIdentifiers"], [controller.CASE.split("/", 1)[1]])
+        self.assertEqual(run.record["build_count"], 1)
+        self.assertEqual(run.command.call_count, 1)
+        args, label = run.command.call_args.args
+        self.assertEqual(args[:2], ["xcodebuild", "build-for-testing"])
+        self.assertEqual(label, "build")
+        self.popen.assert_not_called()
 
     def test_one_ui_invocation_uses_default_iteration_and_preserves_failure(self):
         for failed in (False, True):

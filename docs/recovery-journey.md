@@ -58,12 +58,15 @@ evidence; repair and review the cause before separately authorizing another run.
    Record the input hash and command result. Install the freshly built app on this
    dedicated device together with its UI test runner without launching them, then
    pin both data-container identities and record the actual empty export inventory.
-   The selected `.xctestrun` uses `UseDestinationArtifacts` with exact app/runner
-   bundle IDs and the test-bundle destination-relative path. The generated host,
-   target-app and test-bundle source paths are removed as required by
-   `xcodebuild.xctestrun(5)`. This prevents a test-command reinstall from relocating
-   the pinned containers. A changed identity fails collection. Do not seed any app inventory
-   or asset folder. If Photos or app export storage contains prior data, stop the run.
+   The selected `.xctestrun` keeps the validated generated Simulator host,
+   target-app and test-bundle paths beside the original file, with
+   `UseDestinationArtifacts` disabled and no destination-relative test-bundle path.
+   Xcode rejects that destination-artifacts mode on Simulator because it requires
+   a physical iOS device. Exact app/runner bundle IDs and the original container
+   pins remain mandatory. Xcode may install the same built products again; any
+   container identity or metadata change fails collection rather than repinning.
+   Do not seed any app inventory or asset folder. If Photos or app export storage
+   contains prior data, stop the run.
 5. Prepare an attempt-local copy of the generated `.xctestrun` beside its original
    so `__TESTROOT__` paths remain valid. Keep only the UI target, set its
    `EnvironmentVariables.RUN_INVENTORY_RECOVERY_JOURNEY` to `1` and

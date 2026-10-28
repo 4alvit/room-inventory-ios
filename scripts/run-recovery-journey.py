@@ -770,7 +770,6 @@ class RecoveryRun:
         free = min(self.disk_usage(self.output.parent).free, self.disk_usage(self.device_base).free)
         require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
         if force or self.clock() - self.last_resource_check >= 2:
-            self.last_resource_check = self.clock()
             sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
                       "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,)),
                       # DerivedData is a live disk budget, not a logical copy/input bound.
@@ -789,6 +788,10 @@ class RecoveryRun:
             self.last_samples.append(sample)
             require(len(self.last_samples) <= 2000, "Resource observation cap exceeded")
             write_json(self.output / "resource-samples.json", self.last_samples)
+            # Only completed, persisted accounting advances the periodic clock.
+            completed = self.clock()
+            self.tick()
+            self.last_resource_check = completed
 
     def phase(self, name):
         self.diagnostic_stage = "phase"

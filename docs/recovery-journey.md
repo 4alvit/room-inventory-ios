@@ -175,8 +175,18 @@ files and never writes application data or supplies entitlements.
 
 Admission requires **at least 24 GiB free** on both the output and simulator-device
 filesystems before creating a device or building. During work, free space below
-8 GiB aborts. At most every two seconds the controller checks owned roots using
-bounded `lstat` walks without following symlinks. DerivedData has a **4 GiB
+8 GiB aborts. Periodic full resource walks become due two seconds after the
+previous successfully completed full accounting. During work every guard call
+still checks the deadline and free-space floors, including calls before another
+periodic walk is due. Forced accounting always performs a full uncached walk.
+A completion timestamp is published only after all root walks, sample persistence
+and a final deadline check succeed; failed, interrupted or late accounting does
+not advance it. This prevents a long walk from immediately triggering another
+periodic walk merely because its start was more than two seconds ago. It caches
+no resource values and does not establish that a later install or test will finish
+within its unchanged command cap.
+
+The controller uses bounded `lstat` walks without following symlinks. DerivedData has a **4 GiB
 allocated disk budget** (`st_blocks * 512`); its logical length is recorded
 separately, so sparse cache reservations do not consume that disk budget. The
 DerivedData root directory's own allocation is charged before visiting children,

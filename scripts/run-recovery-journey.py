@@ -48,6 +48,10 @@ class DeadlineFailure(RunFailure):
     exit_code = 124
 
 
+class _DeviceScanDeferred(BaseException):
+    """Private per-command handoff, never evidence of a completed resource scan."""
+
+
 class ResourceAccountingFailure(RunFailure):
     """An allocated disk budget cannot be established from this filesystem stat."""
 
@@ -380,6 +384,8 @@ class RecoveryRun:
         self.resource_cap_observed = False
         self.cleanup_mode = False
         self._derived_scan_service = None
+        self._device_scan_service = None
+        self._device_scan_context = None
         self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -603,8 +609,23 @@ class RecoveryRun:
         try:
             checkpoint = (self._derived_scan_service if category == "derived_data" and root == self.derived
                           and not self.cleanup_mode and self._derived_scan_service is not None else self.tick)
-            result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
-                               on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
+            binding = self._device_scan_service if category == "device" and not self.cleanup_mode else None
+            if binding is not None:
+                require(root is binding[0] and root is self.device_root and self._device_scan_context is None,
+                        "Invalid active device scan binding", ConfigurationFailure)
+                checkpoint = binding[1]
+                self._device_scan_context = binding
+            try:
+                result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
+                                   on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
+            finally:
+                if binding is not None:
+                    self._device_scan_context = None
+        except _DeviceScanDeferred:
+            # This is not an error primary: a control interruption during optional
+            # metadata must still fail the command rather than authorize handoff.
+            self.observe_runtime("scan_end", value=span, failed=True)
+            raise
         except BaseException:
             try:
                 self.observe_runtime("scan_end", value=span, failed=True, preserve_primary=True)
@@ -657,7 +678,8 @@ class RecoveryRun:
         """One owned process group, bounded pipe draining, sticky cleanup result."""
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
-        require(self._derived_scan_service is None, "Stale scan service", ConfigurationFailure)
+        require(self._derived_scan_service is None and self._device_scan_service is None
+                and self._device_scan_context is None, "Stale scan service", ConfigurationFailure)
         self.guard()
         end = min(self.phase_end, self.clock() + cap)
         require(end - self.clock() >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
@@ -678,24 +700,53 @@ class RecoveryRun:
         previous_deadline = self.command_deadline
         self.command_deadline = end - 4
         service_checkpoints, service_last, service_busy = 0, None, False
+        device_checkpoints, device_last = 0, None
+        device_root, device_id = self.device_root, self.device_id
+        device_binding = (device_root, lambda: service_scan(device_scan=True))
+        device_deferred = _DeviceScanDeferred()
+        pipe_eof = [False, False]
+
+        def require_device_owner(*, active_scan=True):
+            # Python object/ledger identity only; never infer kernel group absence.
+            require(self._device_scan_service is device_binding
+                    and self._device_scan_context is (device_binding if active_scan else None)
+                    and self.device_root is device_root and self.device_id == device_id
+                    and device_id is not None and device_root == self.device_base / device_id
+                    and bool(self.groups) and self.groups[-1] is entry
+                    and entry["process"] is process and entry["record"] is record
+                    and record["pid"] == record["pgid"] == process.pid
+                    and not entry["state"].get("leader_reaped")
+                    and not entry["state"].get("observation_errors")
+                    and entry["state"].get("group_state") != "absent",
+                    "Stale device scan owner", ConfigurationFailure)
 
         def service_derived_scan():
+            service_scan()
+
+        def service_scan(*, device_scan=False):
             """Cooperative work between returning walker checkpoints, never a worker.
 
             No callback/guard/flush here. A single blocked syscall still blocks
             supervision; every returning boundary checks the original deadline.
             """
-            nonlocal service_checkpoints, service_last, service_busy
+            nonlocal service_checkpoints, service_last, service_busy, device_checkpoints, device_last
             self.tick()
             require(self._derived_scan_service is service_derived_scan and not service_busy,
                     "Invalid or reentrant scan service", ConfigurationFailure)
-            service_checkpoints += 1
-            if service_checkpoints < 64 and self.clock() - service_last < .05:
+            if device_scan:
+                require_device_owner()
+                device_checkpoints += 1
+                checkpoints, last = device_checkpoints, device_last
+            else:
+                service_checkpoints += 1
+                checkpoints, last = service_checkpoints, service_last
+            if checkpoints < 64 and self.clock() - last < .05:
                 self.tick()
                 return
             service_busy = True
             try:
-                self.observe_derived_service(record, "quantum_started")
+                if not device_scan:
+                    self.observe_derived_service(record, "quantum_started")
                 # The outer loop checked this floor before each read batch.
                 # Repeat it here without recursively entering the resource guard.
                 free = self.disk_usage(self.output.parent).free
@@ -717,13 +768,16 @@ class RecoveryRun:
                     try:
                         data = os.read(key.fileobj.fileno(), 65536)
                     except BlockingIOError:
-                        self.observe_derived_service(record, "would_block", index=index)
+                        if not device_scan:
+                            self.observe_derived_service(record, "would_block", index=index)
                         self.tick()
                         continue
-                    self.observe_derived_service(record, "read_return", index=index, value=len(data))
+                    if not device_scan:
+                        self.observe_derived_service(record, "read_return", index=index, value=len(data))
                     self.tick()
                     if not data:
                         selector.unregister(key.fileobj)
+                        pipe_eof[index] = True  # Only an actual empty read establishes EOF.
                         self.observe_runtime("stdout_eof" if index == 0 else "stderr_eof", record)
                         continue
                     require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
@@ -734,7 +788,8 @@ class RecoveryRun:
                     drained = True
                 self.tick()
                 polled = process.poll()
-                self.observe_derived_service(record, "poll_return")
+                if not device_scan:
+                    self.observe_derived_service(record, "poll_return")
                 self.observe_runtime("poll", record, polled)
                 self.tick()
                 if drained:
@@ -743,9 +798,18 @@ class RecoveryRun:
                     tree_size(logs, LOG_CAP, self.tick, max_entries=256,
                               on_cap=lambda *data: self.record_resource_cap("logs", *data))
                     self.tick()
-                service_checkpoints, service_last = 0, self.clock()
+                if device_scan:
+                    device_checkpoints, device_last = 0, self.clock()
+                else:
+                    service_checkpoints, service_last = 0, self.clock()
                 self.tick()
-                self.observe_derived_service(record, "quantum_completed", value=service_last)
+                if not device_scan:
+                    self.observe_derived_service(record, "quantum_completed", value=service_last)
+                elif all(pipe_eof) and polled is not None:
+                    require(type(polled) is int and polled in allowed_codes, "Command failed: " + name)
+                    require_device_owner()
+                    self.tick()  # The allowed exit AND EOF must be observed in time.
+                    raise device_deferred
             finally:
                 service_busy = False
 
@@ -783,18 +847,38 @@ class RecoveryRun:
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, index)
             service_last = self.clock()
+            device_last = service_last
             if not self.cleanup_mode:
                 self._derived_scan_service = service_derived_scan
+                if device_root is not None:
+                    self._device_scan_service = device_binding
             self.diagnostic_stage = "command_loop"
             # Preserve the original short circuit and consume map truth once.
             # This outer condition alone adds no poll for a nonempty selector.
             while (self.observe_runtime("selector", record, bool(selector.get_map())) or
                    self.observe_runtime("poll", record, process.poll()) is None):
-                self.guard()
+                device_handoff = False
+                try:
+                    self.guard()
+                except _DeviceScanDeferred as deferred:
+                    # Only this command's sentinel may cross the walker boundary.
+                    # A scandir close/stat/cap exception replaces it and fails normally.
+                    require(deferred is device_deferred and self._device_scan_service is device_binding
+                            and self._device_scan_context is None,
+                            "Invalid device scan handoff", ConfigurationFailure)
+                    self.tick()  # Context-manager unwinding consumed the same budget.
+                    record["device_scan_handoff"] = {
+                        "state": "incomplete", "reason": "allowed_exit_and_both_pipe_eof"}
+                    device_handoff = True
                 self.tick()
                 if on_poll:
                     on_poll()
                 self.tick()
+                if device_handoff:
+                    # Preserve the normal callback boundary outside the walker.
+                    require_device_owner(active_scan=False)
+                    self.tick()
+                    break
                 for key, _ in selector.select(timeout=min(.1, max(0, end - 4 - self.clock()))):
                     self.tick()
                     try:
@@ -802,7 +886,11 @@ class RecoveryRun:
                     except BlockingIOError:
                         continue
                     if not data:
+                        require(type(key.data) is int and key.data in (0, 1)
+                                and key.fileobj is (process.stdout, process.stderr)[key.data],
+                                "Unexpected command pipe identity", ConfigurationFailure)
                         selector.unregister(key.fileobj)
+                        pipe_eof[key.data] = True
                         self.observe_runtime("stdout_eof" if key.data == 0 else "stderr_eof", record)
                         continue
                     index = key.data
@@ -816,6 +904,8 @@ class RecoveryRun:
             # Preserve the child-work deadline check before any cleanup or
             # transition to phase-bounded post-command accounting.
             self._derived_scan_service = None
+            self._device_scan_service = None
+            self._device_scan_context = None
             if self.cleanup_mode:
                 self.guard(force=True)  # Existing time-only cleanup-mode guard.
             self.tick()
@@ -836,6 +926,8 @@ class RecoveryRun:
                 pass
         finally:
             self._derived_scan_service = None
+            self._device_scan_service = None
+            self._device_scan_context = None
             self.diagnostic_stage = "command_cleanup"
             self.disarm()
             self.command_deadline = previous_deadline

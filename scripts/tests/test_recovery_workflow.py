@@ -53,7 +53,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.profile["workflow_path"], ".github/workflows/ci.yml")
         self.assertEqual(self.profile["job_id"], "recovery")
         self.assertEqual(self.profile["runner_label"], self.job["runs-on"])
-        self.assertEqual(self.job["runs-on"], "macos-15-intel")
+        self.assertEqual(self.job["runs-on"], "macos-15")
         self.assertEqual(self.profile["job_timeout_minutes"], int(self.job["timeout-minutes"]))
         stages = sum(self.profile[key] for key in ("discovery_seconds", "recovery_seconds", "retention_seconds"))
         self.assertLess(stages, 36 * 60)
@@ -64,12 +64,12 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(set(self.profile["allowed_events"]),
                          {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"})
 
-    def test_all_four_mac_jobs_use_same_installed_intel_toolchain(self):
+    def test_all_four_mac_jobs_use_same_installed_arm_toolchain(self):
         codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(), Loader=yaml.BaseLoader)
         release = yaml.load((ROOT / ".github/workflows/release-build.yml").read_text(), Loader=yaml.BaseLoader)
         ordinary = (self.ci["jobs"]["ios"], codeql["jobs"]["swift"], release["jobs"]["package"])
-        self.assertEqual(self.profile["runner_arch"], "X64")
-        self.assertEqual(self.profile["process_arch"], "x86_64")
+        self.assertEqual(self.profile["runner_arch"], "ARM64")
+        self.assertEqual(self.profile["process_arch"], "arm64")
         self.assertEqual(self.profile["xcode_version"], "Xcode 16.4\nBuild version 16F6")
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
@@ -77,8 +77,8 @@ class RecoveryWorkflowTests(unittest.TestCase):
         guards = []
         for job in ordinary:
             steps = job["steps"]
-            guards.append(next(step["run"] for step in steps if step.get("name") == "Verify installed Intel toolchain"))
-            guard_index = next(i for i, step in enumerate(steps) if step.get("name") == "Verify installed Intel toolchain")
+            guards.append(next(step["run"] for step in steps if step.get("name") == "Verify installed ARM toolchain"))
+            guard_index = next(i for i, step in enumerate(steps) if step.get("name") == "Verify installed ARM toolchain")
             build_index = next(i for i, step in enumerate(steps) if step.get("name") in {
                 "Run source contracts, Core tests, Simulator build and app tests", "Build app for analysis", "Build committed preview assets"})
             self.assertLess(guard_index, build_index)

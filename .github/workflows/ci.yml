@@ -6,7 +6,7 @@ permissions:
 jobs:
   ios:
     name: Core and iOS tests
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
@@ -26,10 +26,10 @@ jobs:
       - name: Install locked workflow validation dependency
         run: |
           python3 -m pip install --require-hashes --only-binary=:all: -r .github/requirements-workflow-contracts.txt
-      - name: Verify installed Intel toolchain
+      - name: Verify installed ARM toolchain
         run: |
-          test "$RUNNER_ARCH" = X64
-          test "$(uname -m)" = x86_64
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
           test "$ImageOS" = macos15
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
@@ -69,7 +69,7 @@ jobs:
   recovery:
     name: Recovery journey
     needs: ios
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 45
     permissions:
       contents: read
@@ -89,7 +89,7 @@ jobs:
           python-version: '3.12'
       - name: Run one bounded hosted recovery journey
         timeout-minutes: 36
-        run: python3 scripts/recovery_hosted.py --profile-sha256 21d1f5e7a169ea088c59f7e9d4d220640f466b33aad6dbba925e1c7958a298f3
+        run: python3 scripts/recovery_hosted.py --profile-sha256 da98b5d20a706df89068f03f9a621e291006a2030c5a229dcd46a47842347113
       - name: Preserve compact recovery evidence
         if: ${{ always() }}
         timeout-minutes: 5

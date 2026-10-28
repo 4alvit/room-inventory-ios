@@ -72,14 +72,54 @@ final class LocalizationUITests: XCTestCase {
     }
 
     private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(element.waitForExistence(timeout: 10), file: file, line: line)
+        var observed = ["exists": false, "enabled": false, "hittable": false]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let exists = element.exists
+            let enabled = exists && element.isEnabled
+            let hittable = exists && element.isHittable
+            observed = ["exists": exists, "enabled": enabled, "hittable": hittable]
+            return exists && enabled && hittable
+        }, object: nil)
+        let admitted = XCTWaiter.wait(for: [ready], timeout: 10) == .completed
+        if !admitted { keepActionFailureEvidence(observed: observed, file: file, line: line) }
+        XCTAssertTrue(admitted, "Expected an existing, enabled, hittable action within 10 seconds", file: file, line: line)
+        guard admitted else { return }
+        XCTAssertTrue(element.exists, file: file, line: line)
+        XCTAssertTrue(element.isEnabled, file: file, line: line)
         XCTAssertTrue(element.isHittable, file: file, line: line)
         element.tap()
     }
 
-    private func enterName(_ value: String, app: XCUIApplication) {
+    private func keepActionFailureEvidence(observed: [String: Bool], file: StaticString, line: UInt) {
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "ru-action-readiness-failure"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCUIApplication().debugDescription
+        let count = hierarchy.unicodeScalars.count
+        let headCount = min(count, 2_048)
+        let tailCount = min(max(0, count - headCount), 2_048)
+        let context: [String: Any] = ["phase": "action-readiness-failed",
+            "caller_file": String(describing: file).split(separator: "/").last.map(String.init) ?? "unknown",
+            "caller_line": line, "last_observed": observed,
+            "ax_original_scalars": count, "ax_omitted_scalars": count - headCount - tailCount,
+            "ax_head": String(String.UnicodeScalarView(hierarchy.unicodeScalars.prefix(headCount))),
+            "ax_tail": String(String.UnicodeScalarView(hierarchy.unicodeScalars.suffix(tailCount)))]
+        guard let data = try? JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]),
+              data.count <= 64 * 1_024, let text = String(data: data, encoding: .utf8) else {
+            print("ROOM_LOCALIZATION_DIAGNOSTIC {\"phase\":\"action-readiness-failed\",\"context_omitted\":true}")
+            return
+        }
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "ru-action-readiness-failure-accessibility"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("ROOM_LOCALIZATION_DIAGNOSTIC {\"phase\":\"action-readiness-failed\",\"caller_line\":\(line),\"exists\":\(observed["exists"] == true),\"enabled\":\(observed["enabled"] == true),\"hittable\":\(observed["hittable"] == true),\"ax_attachment_bytes\":\(data.count)}")
+    }
+
+    private func enterName(_ value: String, app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.textFields["entry.name"]
-        tap(field)
+        tap(field, file: file, line: line)
         field.typeText(value)
         tap(app.buttons["entry.save"])
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: field)

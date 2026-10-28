@@ -55,7 +55,7 @@ class HostedCase(unittest.TestCase):
         self.env = {"GITHUB_ACTIONS": "true", "CI": "true", "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "macOS", "ImageOS": "macos15", "ImageVersion": "20261020.1",
                     "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "4alvit/room-inventory-ios",
-                    "GITHUB_JOB": "recovery", "RUNNER_ARCH": "X64", "GITHUB_SHA": "a" * 40,
+                    "GITHUB_JOB": "recovery", "RUNNER_ARCH": "ARM64", "GITHUB_SHA": "a" * 40,
                     "GITHUB_WORKFLOW_SHA": "c" * 40, "RECOVERY_TESTED_COMMIT": "a" * 40,
                     "RECOVERY_TESTED_TREE": "b" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
@@ -71,7 +71,7 @@ class HostedCase(unittest.TestCase):
         self.popen = self.mock(hosted.subprocess, "Popen", side_effect=AssertionError("real subprocess forbidden"))
         self.mock(hosted.os, "killpg", side_effect=AssertionError("real process signal forbidden"))
         self.mock(hosted.platform, "system", return_value="Darwin")
-        self.mock(hosted.platform, "machine", return_value="x86_64")
+        self.mock(hosted.platform, "machine", return_value="arm64")
         self.timer = self.mock(hosted.signal, "getitimer", return_value=(0.0, 0.0))
         self.previous_handler = object()
         self.mock(hosted.signal, "getsignal", return_value=self.previous_handler)
@@ -130,18 +130,18 @@ class ContextTests(HostedCase):
 
     def test_self_hosted_and_wrong_class_rejected(self):
         for key, value in (("RUNNER_ENVIRONMENT", "self-hosted"), ("ImageOS", "macos14"), ("GITHUB_JOB", "ios"),
-                           ("GITHUB_SERVER_URL", "https://enterprise.invalid"), ("RUNNER_ARCH", "ARM64")):
+                           ("GITHUB_SERVER_URL", "https://enterprise.invalid"), ("RUNNER_ARCH", "X64")):
             with self.subTest(key=key), self.assertRaises(hosted.Failure):
                 hosted.validate_host({**self.env, key: value}, hosted.POLICY, self.root)
 
-    def test_intel_host_records_actual_architecture(self):
-        value = hosted.validate_host(self.env, hosted.POLICY, self.root, machine="x86_64")
-        self.assertEqual(value["runner_arch"], "X64")
-        self.assertEqual(value["process_arch"], "x86_64")
+    def test_arm_host_records_actual_architecture(self):
+        value = hosted.validate_host(self.env, hosted.POLICY, self.root, machine="arm64")
+        self.assertEqual(value["runner_arch"], "ARM64")
+        self.assertEqual(value["process_arch"], "arm64")
         self.assertEqual(value["image_os"], "macos15")
 
     def test_other_or_inconsistent_architecture_rejected_before_commands(self):
-        for arch, machine in (("ARM64", "arm64"), ("X64", "arm64"), ("ARM64", "x86_64"), ("", "x86_64")):
+        for arch, machine in (("X64", "x86_64"), ("ARM64", "x86_64"), ("X64", "arm64"), ("", "arm64")):
             with self.subTest(arch=arch, machine=machine), self.assertRaisesRegex(hosted.Failure, "architecture"):
                 hosted.validate_host({**self.env, "RUNNER_ARCH": arch}, hosted.POLICY, self.root, machine=machine)
         self.popen.assert_not_called()

@@ -1,4 +1,4 @@
-"""Device-only child-stat ENOENT policy. Runtime filesystem/process/time are fake."""
+"""Device-only child-stat/queued-directory ENOENT policy. Runtime I/O is fake."""
 from contextlib import contextmanager, ExitStack
 import errno
 import importlib.util
@@ -83,17 +83,19 @@ class World:
         if self.before_lstat:self.before_lstat()
         if self.root_error:raise self.root_error
         return self.root_info
-    @contextmanager
     def scan(self,path):
         self.opens.append(path);self.events.append(('open',str(path)))
         if path in self.open_errors:raise self.open_errors[path]
-        try:
-            def iterator():
-                yield from self.entries.get(path,[])
-                if self.iter_error:raise self.iter_error
-            yield iterator()
-        finally:
-            if self.close_error:raise self.close_error
+        @contextmanager
+        def opened():
+            try:
+                def iterator():
+                    yield from self.entries.get(path,[])
+                    if self.iter_error:raise self.iter_error
+                yield iterator()
+            finally:
+                if self.close_error:raise self.close_error
+        return opened()  # Match os.scandir: open errors occur before __enter__.
     def bind(self):self.run.bind_device_resource_root()
     def service(self):
         self.service_calls+=1
@@ -126,7 +128,8 @@ class VanishedDeviceTests(unittest.TestCase):
             w.bind();w.set_children(info(size=5),FileNotFoundError(errno.ENOENT,'mock child'),info(size=7,blocks=2))
             result=w.scan_device()
             self.assertEqual(result,dict(logical_bytes=12,allocated_bytes=1536,entries=2,
-                                         cap_metric='max_logical_allocated',attempted_entries=3,vanished_entries=1))
+                                         cap_metric='max_logical_allocated',attempted_entries=3,vanished_entries=1,
+                                         vanished_directories=0))
             self.assertEqual(w.stats,['0','1','2'])
     def test_generic_tree_still_propagates_exact_missing_stat(self):
         with World() as w:
@@ -161,13 +164,11 @@ class VanishedDeviceTests(unittest.TestCase):
             w.set_children(vanished)
             self.assertIsInstance(thrown(w.scan_device),C.DeadlineFailure)
             self.assertEqual(w.stats,['0'])
-    def test_queued_scandir_enoent_and_iteration_close_enoent_stay_strict(self):
-        for site in ('open','iteration','close'):
+    def test_scandir_iteration_and_close_enoent_stay_strict(self):
+        for site in ('iteration','close'):
             with self.subTest(site=site),World() as w:
                 w.bind();original=FileNotFoundError(errno.ENOENT,'strict boundary')
-                if site=='open':
-                    w.set_children(info(mode=stat.S_IFDIR));w.open_errors[w.root/'0']=original
-                elif site=='iteration':w.iter_error=original
+                if site=='iteration':w.iter_error=original
                 else:w.close_error=original
                 self.assertIs(thrown(w.scan_device),original)
     def test_mandatory_root_missing_before_scan_not_zero(self):
@@ -337,5 +338,111 @@ class VanishedDeviceTests(unittest.TestCase):
             w.root_info.st_dev+=1
             self.assertIsInstance(thrown(w.scan_device),C.ResourceAccountingFailure)
             self.assertIs(w.run._owned_device_identity,bound)
+
+class QueuedDirectoryTests(unittest.TestCase):
+    setUp = VanishedDeviceTests.setUp
+
+    def queued(self,w):
+        w.bind();w.set_children(info(mode=stat.S_IFDIR,blocks=2),info(size=7))
+        child=w.root/'0'
+        missing=FileNotFoundError(errno.ENOENT,'queued directory disappeared',str(child))
+        w.open_errors[child]=missing
+        return child,missing
+
+    def test_nested_trial_disappears_after_stat_before_open(self):
+        with World() as w:
+            w.bind()
+            w.entries[w.root]=[w.child('data',info(mode=stat.S_IFDIR)),w.child('kept',info(size=3))]
+            w.entries[w.root/'data']=[w.child('data/Library',info(mode=stat.S_IFDIR))]
+            w.entries[w.root/'data/Library']=[w.child('data/Library/Trial',info(mode=stat.S_IFDIR,blocks=2))]
+            trial=w.root/'data/Library/Trial'
+            w.open_errors[trial]=FileNotFoundError(errno.ENOENT,'removed after stat',str(trial))
+            result=w.scan_device()
+            self.assertEqual(result,dict(logical_bytes=3,allocated_bytes=2560,entries=4,
+                cap_metric='max_logical_allocated',attempted_entries=4,vanished_entries=0,vanished_directories=1))
+            self.assertLess(w.events.index(('stat','data/Library/Trial')),w.events.index(('open',str(trial))))
+            self.assertEqual(w.opens.count(trial),1)  # No retry or cache.
+
+    def test_nondevice_and_root_scandir_enoent_remain_exact_failures(self):
+        for category in ('generic','output','device-root'):
+            with self.subTest(category=category),World() as w:
+                child,missing=self.queued(w)
+                if category=='generic':call=lambda:C.tree_size(w.root,C.DEVICE_CAP,w.run.tick)
+                elif category=='output':call=lambda:w.run.resource_size('output',w.root,C.OUTPUT_CAP)
+                else:w.open_errors[w.root]=missing;call=w.scan_device
+                self.assertIs(thrown(call),missing)
+
+    def test_non_enoent_open_errors_are_never_skipped(self):
+        for original in (PermissionError(errno.EACCES,'access'),PermissionError(errno.EPERM,'policy'),
+                         OSError(errno.EIO,'io'),NotADirectoryError(errno.ENOTDIR,'changed kind'),
+                         FileNotFoundError(errno.EIO,'wrong errno'),KeyboardInterrupt('stop')):
+            with self.subTest(error=type(original).__name__,errno=getattr(original,'errno',None)),World() as w:
+                child,_=self.queued(w);w.open_errors[child]=original
+                self.assertIs(thrown(w.scan_device),original)
+
+    def test_root_identity_loss_at_missing_directory_is_fatal(self):
+        for mode in ('missing','replaced','symlink','ownership','permission'):
+            with self.subTest(mode=mode),World() as w:
+                child,missing=self.queued(w);scan=w.scan;bound=w.run._owned_device_identity
+                def changed(path):
+                    if path==child:
+                        if mode=='missing':w.root_error=FileNotFoundError(errno.ENOENT,'root removed')
+                        elif mode=='replaced':w.root_info.st_ino+=1
+                        elif mode=='symlink':w.root_info.st_mode=stat.S_IFLNK
+                        elif mode=='ownership':w.run.device_id='stale'
+                        else:w.root_error=PermissionError(errno.EACCES,'root permission')
+                        raise missing
+                    return scan(path)
+                with patch.object(C.os,'scandir',side_effect=changed):error=thrown(w.scan_device)
+                if w.root_error:self.assertIs(error,w.root_error)
+                else:self.assertIsInstance(error,C.RunFailure)
+                self.assertIs(w.run._owned_device_identity,bound)
+
+    def test_late_open_cannot_query_root_or_publish_partial_accounting(self):
+        with World() as w:
+            child,missing=self.queued(w);scan=w.scan;before=[]
+            def late(path):
+                if path==child:
+                    before.append(w.lstats);w.clock.now=w.run.phase_end;raise missing
+                return scan(path)
+            with patch.object(C.os,'scandir',side_effect=late):
+                self.assertIsInstance(thrown(lambda:w.run.guard(force=True)),C.DeadlineFailure)
+            self.assertEqual(w.lstats,before[0]);self.assertEqual(w.run.last_samples,[]);self.assertEqual(w.saved,[])
+
+    def test_service_handoff_after_missing_open_is_not_a_completed_sample(self):
+        with World() as w:
+            child,missing=self.queued(w);scan=w.scan;sentinel=C._DeviceScanDeferred();w.active()
+            def defer(path):
+                if path==child:w.service_error=sentinel;raise missing
+                return scan(path)
+            with patch.object(C.os,'scandir',side_effect=defer):
+                self.assertIs(thrown(lambda:w.run.guard(force=True)),sentinel)
+            self.assertIsNone(w.run._device_scan_context);self.assertEqual(w.run.last_samples,[])
+            self.assertEqual(w.saved,[])
+
+    def test_context_entry_enoent_is_not_an_open_error(self):
+        with World() as w:
+            child,missing=self.queued(w);scan=w.scan
+            @contextmanager
+            def later(path):
+                if path==child:raise missing
+                with scan(path) as iterator:yield iterator
+            with patch.object(C.os,'scandir',side_effect=later):self.assertIs(thrown(w.scan_device),missing)
+
+    def test_observed_byte_and_entry_caps_fail_before_missing_open(self):
+        for kind in ('bytes','entries'):
+            with self.subTest(kind=kind),World() as w:
+                child,_=self.queued(w)
+                call=(lambda:w.run.resource_size('device',w.root,1024)) if kind=='bytes' else (lambda:w.scan_device(max_entries=1))
+                self.assertIsInstance(thrown(call),C.RunFailure);self.assertNotIn(child,w.opens)
+
+    def test_active_and_terminal_fresh_scan_both_account_remaining_tree(self):
+        with World() as w:
+            child,_=self.queued(w);w.active();first=w.scan_device()
+            self.assertGreater(w.service_calls,0)
+            w.run._device_scan_service=None;services=w.service_calls;w.run.guard(force=True)
+            self.assertEqual(w.service_calls,services);self.assertEqual(w.run.last_samples[0]['device'],first)
+            self.assertEqual(first['vanished_directories'],1);self.assertEqual(first['allocated_bytes'],1536)
+            self.assertEqual(w.opens.count(child),2)  # One attempt in each independent fresh scan.
 
 if __name__=='__main__':unittest.main(verbosity=2)

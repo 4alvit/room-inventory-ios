@@ -195,7 +195,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
     require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
     pending, logical, allocated, entries = [root], 0, 0, 0
-    attempted_entries, vanished_entries = 0, 0
+    attempted_entries, vanished_entries, vanished_directories = 0, 0, 0
     excluded = set(excluded)
 
     def allocation_bytes(info):
@@ -230,8 +230,21 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
     while pending:
         tick()
         directory = pending.pop()
-        with os.scandir(directory) as iterator:
-            for entry in iterator:
+        try:
+            iterator = os.scandir(directory)
+        except FileNotFoundError as error:
+            if (vanished_child_check is None or error.errno != errno.ENOENT
+                    or directory == root or not directory.is_relative_to(root)):
+                raise
+            # A previously charged device directory can disappear while queued.
+            # Only the scandir open is eligible; iteration/context errors stay strict.
+            tick()  # Do not query identity after a late open return.
+            vanished_child_check()
+            tick()
+            vanished_directories += 1
+            continue  # Retain the directory's already observed allocated bytes.
+        with iterator as children:
+            for entry in children:
                 tick()
                 path = Path(entry.path)
                 if path in excluded:
@@ -245,8 +258,8 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                 except FileNotFoundError as error:
                     if vanished_child_check is None or error.errno != errno.ENOENT:
                         raise
-                    # Only this child-stat syscall is eligible. Root, callback,
-                    # iterator/open/close, metadata and cap failures stay strict.
+                    # Only this child-stat syscall is eligible here. Root, callback,
+                    # iterator/context, metadata and cap failures stay strict.
                     tick()  # A late stat return cannot start another filesystem query.
                     vanished_child_check()
                     tick()
@@ -270,7 +283,8 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         tick()  # Iterator closure is a returning boundary under the same deadline.
         vanished_child_check()
         tick()
-        result.update(attempted_entries=attempted_entries, vanished_entries=vanished_entries)
+        result.update(attempted_entries=attempted_entries, vanished_entries=vanished_entries,
+                      vanished_directories=vanished_directories)
     return result
 
 

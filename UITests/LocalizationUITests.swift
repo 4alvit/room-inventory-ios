@@ -47,8 +47,19 @@ final class LocalizationUITests: XCTestCase {
         tap(app.buttons["inventory.exportMenu"])
         XCTAssertTrue(app.buttons["Таблица предметов · CSV"].waitForExistence(timeout: 5))
         keepEvidence("ru-export-menu", app: app)
+        let shareControllers = app.descendants(matching: .any).matching(identifier: "inventory.exportShare")
+        let beforeShareCount = shareControllers.count
+        if beforeShareCount != 0 { keepShareFailureEvidence(app: app) }
+        XCTAssertEqual(beforeShareCount, 0, "A share controller must not preexist the CSV action")
         tap(app.buttons["Таблица предметов · CSV"])
-        XCTAssertTrue(app.otherElements["ActivityListView"].waitForExistence(timeout: 15) || app.buttons["Close"].exists || app.buttons["Закрыть"].exists)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard shareControllers.count == 1 else { return false }
+            let controller = shareControllers.element(boundBy: 0)
+            return controller.exists && controller.isHittable
+        }, object: nil)
+        let sharePresented = XCTWaiter.wait(for: [ready], timeout: 15) == .completed
+        if !sharePresented { keepShareFailureEvidence(app: app) }
+        XCTAssertTrue(sharePresented, "Expected exactly one visible, hittable real CSV share controller")
         keepEvidence("ru-csv-share", app: app)
         app.terminate()
     }
@@ -78,6 +89,49 @@ final class LocalizationUITests: XCTestCase {
     private func openRecord(_ value: String, app: XCUIApplication) {
         tap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", value)).firstMatch)
         XCTAssertTrue(app.navigationBars[value].waitForExistence(timeout: 10))
+    }
+
+    private func keepShareFailureEvidence(app: XCUIApplication) {
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "ru-csv-share-failure"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = app.debugDescription
+        let tree = XCTAttachment(string: hierarchy)
+        tree.name = "ru-csv-share-failure-accessibility"
+        tree.lifetime = .keepAlways
+        add(tree)
+        // Export failures surface through the dashboard's real error alert.
+        // Preserve that observed UI separately from bounded head/tail AX context.
+        let alerts = app.alerts.debugDescription
+        let prefix = "ROOM_LOCALIZATION_DIAGNOSTIC "
+        var printedBytes = 0
+        func emit(_ category: String, _ scalars: [Unicode.Scalar], originalCount: Int, offset: Int) {
+            for start in stride(from: 0, to: scalars.count, by: 128) {
+                let end = min(start + 128, scalars.count)
+                let text = String(String.UnicodeScalarView(scalars[start..<end]))
+                let record: [String: Any] = ["phase": "csv-share-assertion-failed", "category": category,
+                    "scalar_offset": offset + start, "original_scalars": originalCount,
+                    "selected_scalars": scalars.count, "omitted_scalars": originalCount - scalars.count,
+                    "text": text]
+                guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                      data.count <= 2_800, printedBytes + prefix.utf8.count + data.count + 1 <= 63 * 1_024,
+                      let json = String(data: data, encoding: .utf8) else {
+                    print(prefix + "{\"phase\":\"csv-share-assertion-failed\",\"diagnostic_omitted\":true}")
+                    return
+                }
+                print(prefix + json)
+                printedBytes += prefix.utf8.count + data.count + 1
+            }
+        }
+        let alertCount = alerts.unicodeScalars.count
+        emit("actual-alerts", Array(alerts.unicodeScalars.prefix(1_024)), originalCount: alertCount, offset: 0)
+        let count = hierarchy.unicodeScalars.count
+        let headCount = min(count, 2_048)
+        let tailCount = min(max(0, count - headCount), 2_048)
+        emit("app-ax-head", Array(hierarchy.unicodeScalars.prefix(headCount)), originalCount: count, offset: 0)
+        emit("app-ax-tail", Array(hierarchy.unicodeScalars.suffix(tailCount)), originalCount: count,
+             offset: count - tailCount)
     }
 
     private func keepEvidence(_ name: String, app: XCUIApplication) {

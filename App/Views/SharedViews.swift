@@ -67,7 +67,10 @@ struct NameEntrySheet: View {
 struct ExportShareSheet: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        // Identify the real share controller without changing its accessibility grouping.
+        controller.view.accessibilityIdentifier = "inventory.exportShare"
+        return controller
     }
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

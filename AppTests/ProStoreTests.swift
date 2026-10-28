@@ -213,14 +213,14 @@ final class ProStoreTests: XCTestCase {
     }
 
     func testNativeCancellationPreservesUnpaidInventoryAndOriginal() async throws {
-        try await checkNativeCancellationPreservation(previouslyPurchased: false)
+        try await checkNativePurchasePreservation(previouslyPurchased: false)
     }
 
-    func testNativeCancellationPreservesVerifiedPurchaseAndOriginal() async throws {
-        try await checkNativeCancellationPreservation(previouslyPurchased: true)
+    func testRepeatedNonConsumablePurchasePreservesVerifiedEntitlementAndOriginal() async throws {
+        try await checkNativePurchasePreservation(previouslyPurchased: true)
     }
 
-    private func checkNativeCancellationPreservation(previouslyPurchased: Bool) async throws {
+    private func checkNativePurchasePreservation(previouslyPurchased: Bool) async throws {
         let session = try await makeSession()
         defer { session.resetToDefaultState(); session.clearTransactions() }
         let directory = FileManager.default.temporaryDirectory
@@ -249,8 +249,8 @@ final class ProStoreTests: XCTestCase {
             "setting": String(String(describing: initialFailure).prefix(192)),
             "store_isPro": store.isPro, "session_transactions": session.allTransactions().count])
         XCTAssertNil(initialFailure, setup)
-        // Each producer owns a clean session. Establish the paid precondition
-        // before this case injects any cancellation or other purchase error.
+        // Each producer owns a clean session. The paid case verifies an already-owned
+        // non-consumable; only the unpaid case injects purchase failures.
         if previouslyPurchased {
             diagnostic("cancellation-setup-purchase-before", ["previously_purchased": true])
             await store.purchase()
@@ -263,51 +263,105 @@ final class ProStoreTests: XCTestCase {
 
         let products = try await Product.products(for: [store.productID])
         let product = try XCTUnwrap(products.first)
-        // Record the actual cancellation route returned by this StoreKit runtime.
-        // This injected native outcome does not prove tapping the system Cancel UI.
         let before = await verifiedEntitlements()
         let beforeIDs = Set(before.map(\.id))
-        try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
-        let configured = await session.simulatedError(forAPI: .purchase)
-        XCTAssertEqual(configured, .generic(.userCancelled))
-        diagnostic("cancellation-calibration-before", ["previously_purchased": previouslyPurchased,
-            "setting": String(String(describing: configured).prefix(192))])
-        let route: String
-        do {
-            switch try await product.purchase() {
-            case .userCancelled:
-                route = "returned_userCancelled"
-            case .pending:
-                let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_pending"])
-                XCTFail("Configured cancellation produced a pending purchase: \(details)")
-                return
-            case .success(let verification):
-                let verified: Bool
-                if case .verified = verification { verified = true } else { verified = false }
-                let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_success", "verified": verified])
-                XCTFail("Configured cancellation produced a successful purchase: \(details)")
-                return
-            @unknown default:
-                XCTFail("Configured cancellation produced an unknown purchase result")
+        let beforeOriginalIDs = Set(before.map(\.originalID))
+        let details: String
+        if previouslyPurchased {
+            guard before.count == 1, let owned = before.first,
+                  owned.productID == store.productID, owned.productType == .nonConsumable,
+                  owned.environment == .xcode, owned.revocationDate == nil else {
+                XCTFail("Paid precondition requires exactly one expected verified local entitlement")
                 return
             }
-        } catch StoreKitError.userCancelled {
-            route = "thrown_userCancelled"
-        } catch {
-            let value = error as NSError
-            diagnostic("cancellation-calibration-after", ["outcome": "thrown_other",
-                "error_type": String(String(reflecting: type(of: error)).prefix(96)),
-                "error_domain": String(value.domain.prefix(96)), "error_code": value.code])
-            throw error
+            // A non-consumable is purchased once. Re-purchasing an owned product
+            // may return its verified ownership, so it cannot calibrate cancellation.
+            diagnostic("owned-purchase-before")
+            switch try await product.purchase() {
+            case .success(.verified(let transaction)):
+                guard transaction.productID == store.productID,
+                      transaction.productType == .nonConsumable,
+                      transaction.environment == .xcode,
+                      transaction.revocationDate == nil,
+                      beforeOriginalIDs.contains(transaction.originalID) else {
+                    XCTFail("Owned purchase must verify the same local non-consumable purchase")
+                    return
+                }
+                details = diagnostic("owned-purchase-after", ["outcome": "returned_verified_success",
+                    "same_original_purchase": true])
+                await transaction.finish()
+            case .success(.unverified):
+                XCTFail("Owned purchase returned an unverified transaction")
+                return
+            case .userCancelled:
+                XCTFail("Owned purchase unexpectedly returned cancellation without error injection")
+                return
+            case .pending:
+                XCTFail("Owned purchase unexpectedly requires approval")
+                return
+            @unknown default:
+                XCTFail("Owned purchase returned an unknown result")
+                return
+            }
+            await store.purchase()
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.ready"), details)
+        } else {
+            // Record the actual injected native cancellation route. This does not
+            // prove tapping Cancel in the system payment sheet.
+            try await session.setSimulatedError(.generic(.userCancelled), forAPI: .purchase)
+            let configured = await session.simulatedError(forAPI: .purchase)
+            XCTAssertEqual(configured, .generic(.userCancelled))
+            diagnostic("cancellation-calibration-before", ["previously_purchased": previouslyPurchased,
+                "setting": String(String(describing: configured).prefix(192))])
+            let route: String
+            do {
+                switch try await product.purchase() {
+                case .userCancelled:
+                    route = "returned_userCancelled"
+                case .pending:
+                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_pending"])
+                    XCTFail("Configured cancellation produced a pending purchase: \(details)")
+                    return
+                case .success(let verification):
+                    let verified: Bool
+                    if case .verified = verification { verified = true } else { verified = false }
+                    let details = diagnostic("cancellation-calibration-after", ["outcome": "returned_success", "verified": verified])
+                    XCTFail("Configured cancellation produced a successful purchase: \(details)")
+                    return
+                @unknown default:
+                    XCTFail("Configured cancellation produced an unknown purchase result")
+                    return
+                }
+            } catch StoreKitError.userCancelled {
+                route = "thrown_userCancelled"
+            } catch {
+                let value = error as NSError
+                diagnostic("cancellation-calibration-after", ["outcome": "thrown_other",
+                    "error_type": String(String(reflecting: type(of: error)).prefix(96)),
+                    "error_domain": String(value.domain.prefix(96)), "error_code": value.code])
+                throw error
+            }
+            details = diagnostic("cancellation-calibration-after", ["outcome": route,
+                "previously_purchased": previouslyPurchased])
+            await store.purchase()
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"), details)
         }
-        let details = diagnostic("cancellation-calibration-after", ["outcome": route,
-            "previously_purchased": previouslyPurchased])
-        await store.purchase()
-        XCTAssertEqual(store.message, ServiceL10n.text("pro.cancelled"), details)
         XCTAssertFalse(store.isBusy)
         XCTAssertEqual(store.isPro, previouslyPurchased)
         let after = await verifiedEntitlements()
-        XCTAssertEqual(Set(after.map(\.id)), beforeIDs)
+        if previouslyPurchased {
+            guard after.count == 1, let owned = after.first,
+                  owned.productID == store.productID, owned.productType == .nonConsumable,
+                  owned.environment == .xcode, owned.revocationDate == nil else {
+                XCTFail("Owned purchase must preserve exactly one expected verified local entitlement")
+                return
+            }
+            // Restore-style transactions can have a new id; ownership must still
+            // refer to the same original purchase, with no extra entitlement.
+            XCTAssertEqual(Set(after.map(\.originalID)), beforeOriginalIDs)
+        } else {
+            XCTAssertEqual(Set(after.map(\.id)), beforeIDs)
+        }
         let reopened = ProStore()
         await reopened.load()
         XCTAssertEqual(reopened.isPro, previouslyPurchased)
@@ -320,15 +374,23 @@ final class ProStoreTests: XCTestCase {
         XCTAssertEqual(reopenedInventory.inventory, inventory)
         XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
         XCTAssertEqual(try repository.data(for: attachment), original)
-        if previouslyPurchased {
-            // Only the cancellation error gets the cancellation status.
-            try await session.setSimulatedError(
-                .generic(.networkError(URLError(.notConnectedToInternet))), forAPI: .purchase)
+        if !previouslyPurchased {
+            // A fresh unpaid purchase exercises the generic failure route; an
+            // already-owned non-consumable may return ownership without that route.
+            let failure: SKTestFailures.Purchase = .generic(
+                .networkError(URLError(.notConnectedToInternet)))
+            try await session.setSimulatedError(failure, forAPI: .purchase)
+            let configuredFailure = await session.simulatedError(forAPI: .purchase)
+            XCTAssertEqual(configuredFailure, failure)
+            diagnostic("unpaid-failure-before", ["setting_matches": configuredFailure == failure])
             await store.purchase()
-            XCTAssertEqual(store.message, ServiceL10n.text("pro.failed"))
+            let failed = diagnostic("unpaid-failure-after", ["store_isPro": store.isPro,
+                "store_isBusy": store.isBusy, "message": store.message ?? "<nil>"])
+            XCTAssertEqual(store.message, ServiceL10n.text("pro.failed"), failed)
             XCTAssertFalse(store.isBusy)
-            XCTAssertTrue(store.isPro)
-            try await requireCurrentLocalPurchase(session, store: store)
+            XCTAssertFalse(store.isPro)
+            let afterFailure = await verifiedEntitlements()
+            XCTAssertEqual(Set(afterFailure.map(\.id)), beforeIDs)
             XCTAssertEqual(try Data(contentsOf: manifestURL), manifest)
             XCTAssertEqual(try repository.data(for: attachment), original)
         }

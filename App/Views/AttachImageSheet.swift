@@ -36,6 +36,7 @@ struct AttachImageSheet: View {
                         Text(UIL10n.text("Receipt")).tag(AttachmentKind.receipt)
                     }
                     .accessibilityIdentifier("import.purpose")
+                    .accessibilityValue(Text(verbatim: kind.title))
                 } header: { Text(UIL10n.text("What are you adding?")) } footer: {
                     Text(kind == .photo ? UIL10n.text("Photograph the whole item so it is easy to identify later.") : UIL10n.text("Fill the frame with clear, well-lit text. A single image opens text review after saving. For a batch, open each saved image to recognize its text."))
                 }

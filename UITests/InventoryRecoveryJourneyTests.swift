@@ -90,8 +90,17 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try tap(element("import.purpose", app), app: app)
         try tap(app.buttons["Receipt"], app: app)
         let purpose = element("import.purpose", app)
-        let observedPurpose = (purpose.value as? String) ?? purpose.label
-        try ledger.require("Receipt purpose selected", observedPurpose.contains("Receipt"))
+        let selectedReceipt = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND value == %@", "Receipt"), object: purpose)
+        let selectionSettled = XCTWaiter.wait(for: [selectedReceipt], timeout: 10)
+        let purposeValue = purpose.value
+        let observedPurpose = purposeValue as? String ?? "<missing string value>"
+        if selectionSettled != .completed || observedPurpose != "Receipt" {
+            let actual = "value=\(String(describing: purposeValue)); label=\(purpose.label); wait=\(selectionSettled)"
+            try ledger.require("Receipt purpose selected", actual: actual,
+                               expected: "exact Receipt value within the selection wait")
+        }
+        try ledger.require("Receipt purpose selected", actual: observedPurpose, expected: "Receipt")
         try tap(element("import.photos", app), app: app)
         // The runner must provide a dedicated library with this one fixture.
         // Reject an unexpected visible asset inventory instead of guessing.

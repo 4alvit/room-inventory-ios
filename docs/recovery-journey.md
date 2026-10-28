@@ -80,8 +80,9 @@ evidence; repair and review the cause before separately authorizing another run.
    `RoomInventoryUITests/InventoryRecoveryJourneyTests/testPhotosOCRExportRestoreIntoFreshNamespace`,
    an attempt-owned result bundle,
    `-parallel-testing-enabled NO`, `-maximum-concurrent-test-simulator-destinations 1`,
-   `-test-iterations 1`, `-test-timeouts-enabled YES`, and
-   `-maximum-test-execution-time-allowance 420`. Do not pass retry flags. Keep the
+   `-test-timeouts-enabled YES`, and `-maximum-test-execution-time-allowance 420`.
+   Omit repetition and retry flags for this single invocation: Xcode 16.4 rejects
+   `-test-iterations 1` before XCTest starts. Keep the
    effective xctestrun/selection proving no unit commerce tests were selected.
 7. Retain the raw xcresult and logs even on failure. Inventory and hash the original
    **before any xcresult reader**, copy it into the collection directory, and verify

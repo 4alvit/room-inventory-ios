@@ -1316,7 +1316,7 @@ class RecoveryRun:
                           "-destination", "platform=iOS Simulator,id=" + self.device_id,
                           "-resultBundlePath", self.xcresult, "-only-testing:" + CASE,
                           "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-                          "-test-iterations", "1", "-test-timeouts-enabled", "YES",
+                          "-test-timeouts-enabled", "YES",
                           "-maximum-test-execution-time-allowance", "420"], "ui-test", cap=480, on_poll=self.collector.poll_bridge)
         except BaseException as error:
             test_error = error

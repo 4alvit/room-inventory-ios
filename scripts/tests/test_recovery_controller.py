@@ -1308,6 +1308,68 @@ class XctestrunTests(ControllerCase):
         self.assertEqual(target["UITargetAppEnvironmentVariables"], {"APP_GENERATED": "keep"})
         self.assertEqual((target["TestLanguage"], target["TestRegion"]), ("en", "US"))
 
+    def test_one_ui_invocation_uses_default_iteration_and_preserves_failure(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                run = self.run_fixture(output=False)
+                run.output = self.root / ("failed-output" if failed else "success-output")
+                run.output.mkdir()
+                run.device_id = "44444444-4444-4444-8444-444444444444"
+                run.xctestrun = run.output / "selected.xctestrun"
+                run.xctestrun.write_bytes(b"approved selection")
+                run.xctestrun_sha = controller.sha(run.xctestrun.read_bytes())
+                run.pin_sources = Mock()
+                run.guard = Mock()
+                run.collector = Mock()
+                copied = run.output / "verified.xcresult"
+                collected = run.output / "collection.json"
+                run.collector.capture_xcresult.return_value = copied
+                run.collector.collect.return_value = collected
+                failure = controller.RunFailure("injected UI failure")
+
+                def command(args, name, **options):
+                    if name == "ui-test":
+                        self.assertEqual(args[:2], ["xcodebuild", "test-without-building"])
+                        # Xcode 16.4 rejects -test-iterations 1 before XCTest starts.
+                        for flag in ("-test-iterations", "-retry-tests-on-failure",
+                                     "-run-tests-until-failure", "-test-repetition-relaunch-enabled"):
+                            self.assertNotIn(flag, args)
+                        self.assertEqual([a for a in args if isinstance(a, str) and a.startswith("-only-testing:")],
+                                         ["-only-testing:" + controller.CASE])
+                        for flag, value in (("-xctestrun", run.xctestrun),
+                                            ("-destination", "platform=iOS Simulator,id=" + run.device_id),
+                                            ("-resultBundlePath", run.output / "original.xcresult"),
+                                            ("-parallel-testing-enabled", "NO"),
+                                            ("-maximum-concurrent-test-simulator-destinations", "1"),
+                                            ("-test-timeouts-enabled", "YES"),
+                                            ("-maximum-test-execution-time-allowance", "420")):
+                            self.assertEqual(args.count(flag), 1)
+                            self.assertEqual(args[args.index(flag) + 1], value)
+                        self.assertEqual(options, {"cap": 480, "on_poll": run.collector.poll_bridge})
+                        if failed:
+                            raise failure
+                    else:
+                        self.assertEqual(name, "verify-artifacts")
+                    return b""
+
+                run.command = Mock(side_effect=command)
+                if failed:
+                    with self.assertRaises(controller.RunFailure) as caught:
+                        run.test_and_collect()
+                    self.assertIs(caught.exception, failure)
+                    run.collector.collect.assert_not_called()
+                    run.guard.assert_not_called()
+                else:
+                    run.test_and_collect()
+                    run.collector.collect.assert_called_once_with(copied)
+                    run.guard.assert_called_once_with(force=True)
+                names = [call.args[1] for call in run.command.call_args_list]
+                self.assertEqual(names, ["ui-test"] if failed else ["ui-test", "verify-artifacts"])
+                self.assertEqual(run.record["test_count"], 1)
+                run.pin_sources.assert_called_once_with("-pretest")
+                run.collector.capture_xcresult.assert_called_once_with(run.output / "original.xcresult")
+                self.popen.assert_not_called()
+
     def test_commerce_settings_are_rejected_even_inside_discarded_target(self):
         for key, value in [("StoreKitConfigurationFileReference", "anything"), ("Other", "path/LOCAL.STOREKIT")]:
             generated = self.generated()

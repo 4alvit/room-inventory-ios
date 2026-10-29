@@ -125,6 +125,34 @@ final class ProStoreTests: XCTestCase {
         XCTAssertNotNil(store.displayPrice)
     }
 
+    func testSuccessfulPurchaseAppliesVerifiedTransactionWithoutRefreshingSnapshot() async throws {
+        let session = try await makeSession()
+        defer { session.clearTransactions() }
+        let snapshot = FalseEntitlementSnapshot()
+        let store = ProStore(entitlementSnapshot: { _ in snapshot.readFalse() },
+                             observeTransactionUpdates: false)
+
+        await store.load()
+        XCTAssertFalse(store.isPro)
+        XCTAssertNotNil(store.displayPrice)
+        XCTAssertEqual(snapshot.reads, 1, "load performs the initial entitlement read")
+
+        await store.purchase()
+
+        XCTAssertTrue(store.isPro, "The verified Xcode purchase result must apply even while the injected snapshot stays empty")
+        XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.")
+        XCTAssertFalse(store.isBusy)
+        XCTAssertEqual(snapshot.reads, 1, "purchase success must not perform a second entitlement read")
+        try await requireCurrentLocalPurchase(session, store: store)
+        #if DEBUG
+        XCTAssertEqual(store.processingDiagnostics.received, 0)
+        XCTAssertEqual(store.processingDiagnostics.approvalUpdates, 0)
+        XCTAssertEqual(store.processingDiagnostics.approvalsApplied, 0)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .approval)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, true)
+        #endif
+    }
+
     func testPurchaseUnlocksNewStoreAndRefundRemovesEntitlement() async throws {
         let session = try await makeSession()
         defer { session.clearTransactions() }
@@ -474,5 +502,16 @@ final class ProStoreTests: XCTestCase {
         XCTAssertFalse(finalEntitlements.contains {
             $0.productID == purchaser.productID && $0.revocationDate == nil
         })
+    }
+}
+
+
+@MainActor
+private final class FalseEntitlementSnapshot {
+    private(set) var reads = 0
+
+    func readFalse() -> Bool {
+        reads += 1
+        return false
     }
 }

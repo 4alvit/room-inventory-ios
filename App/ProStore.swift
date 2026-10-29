@@ -173,7 +173,13 @@ final class ProStore {
                     message = ServiceL10n.text("pro.unverified")
                     return
                 }
-                await refreshEntitlements()
+                if transaction.productType == .nonConsumable {
+                    // The verified purchase result is authoritative; currentEntitlements may lag it.
+                    _ = await applyTransactionUpdate(result, recordAsListenerUpdate: false)
+                } else {
+                    // Preserve the existing behavior for a verified SKU with an unexpected product type.
+                    await refreshEntitlements()
+                }
                 await transaction.finish()
                 message = isPro ? ServiceL10n.text("pro.ready") : ServiceL10n.text("pro.confirming")
             case .pending:
@@ -230,12 +236,16 @@ final class ProStore {
     }
 
     @discardableResult
-    func applyTransactionUpdate<T: ProEntitlementTransaction>(_ result: VerificationResult<T>) async -> Bool {
+    func applyTransactionUpdate<T: ProEntitlementTransaction>(
+        _ result: VerificationResult<T>, recordAsListenerUpdate: Bool = true
+    ) async -> Bool {
         #if DEBUG
-        let kind = updateKind(result)
-        processingDiagnostics.recordUpdateKind(kind)
-        if kind == .unverified || kind == .foreignProduct || kind == .unsupportedType {
-            processingDiagnostics.rejected &+= 1
+        if recordAsListenerUpdate {
+            let kind = updateKind(result)
+            processingDiagnostics.recordUpdateKind(kind)
+            if kind == .unverified || kind == .foreignProduct || kind == .unsupportedType {
+                processingDiagnostics.rejected &+= 1
+            }
         }
         #endif
         guard case .verified(let transaction) = result,
@@ -243,8 +253,9 @@ final class ProStore {
               transaction.productType == .nonConsumable else { return false }
         entitlementRevision &+= 1
         let revision = entitlementRevision
+        let isRemoval = transaction.revocationDate != nil || transaction.isUpgraded
         let found: Bool
-        if transaction.revocationDate != nil || transaction.isUpgraded {
+        if isRemoval {
             // A revoked older transaction must not remove a newer repurchase.
             // Preserve aggregate verified-receipt reconciliation for removals.
             #if DEBUG
@@ -269,8 +280,8 @@ final class ProStore {
         }
         isPro = found
         #if DEBUG
-        if kind == .approval { processingDiagnostics.approvalsApplied &+= 1 }
-        processingDiagnostics.recordStateWrite(kind == .approval ? .approval : .removal,
+        if recordAsListenerUpdate && !isRemoval { processingDiagnostics.approvalsApplied &+= 1 }
+        processingDiagnostics.recordStateWrite(isRemoval ? .removal : .approval,
             revision: revision, value: found)
         #endif
         return true

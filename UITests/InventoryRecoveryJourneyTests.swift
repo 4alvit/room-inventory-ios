@@ -124,7 +124,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("Apply disabled before explicit selection", !app.buttons["ocr.apply"].isEnabled)
         try checkpoint("ocr_review_unselected", observations: ocr, app: app)
         for key in ["model", "purchasePrice"] {
-            try tap(app.switches["ocr.select.\(key)"], app: app, scroll: true)
+            try selectOCRField(key, app: app)
         }
         let selectedOCR = try readOCR(selected: ["model", "price"], expectedPrice: actualPrice, app: app)
         try ledger.require("Apply exactly two fields", actual: app.buttons["ocr.apply"].label, expected: "Apply 2")
@@ -297,6 +297,41 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             result["selected.\(key)"] = state
         }
         return result
+    }
+
+    private func selectOCRField(_ id: String, app: XCUIApplication) throws {
+        let toggle = app.switches["ocr.select.\(id)"]
+        try reveal(toggle, app: app)
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true AND value == %@", "0"),
+            object: toggle)
+        try ledger.require("OCR \(id) starts unselected and interactive", XCTWaiter.wait(for: [ready], timeout: 10) == .completed)
+        // A SwiftUI labeled switch can expose the whole row as its frame.
+        // This English-only journey activates the trailing switch itself, not
+        // the center of that label/row. Never retry a toggle: a second tap can
+        // undo a delayed first activation and hide a real interaction failure.
+        let frame = toggle.frame
+        let point = CGPoint(x: frame.maxX - 20, y: frame.midY)
+        let navigation = app.navigationBars["Review recognized text"]
+        let form = app.collectionViews.containing(.switch, identifier: "ocr.select.\(id)").firstMatch
+        try ledger.require("OCR \(id) visible form is identifiable", form.exists && navigation.exists)
+        let viewport = form.frame.intersection(app.frame).insetBy(dx: 2, dy: 2)
+        let chrome = app.navigationBars.allElementsBoundByIndex + app.toolbars.allElementsBoundByIndex
+            + app.tabBars.allElementsBoundByIndex + app.keyboards.allElementsBoundByIndex
+        // Hittable alone proves only that some point can receive input. The
+        // actual trailing point must be in this OCR form, below its navigation
+        // bar, and outside every exposed keyboard/bar frame. An alert also
+        // blocks activation. Fail without a tap if any of these checks fail.
+        let covered = chrome.contains { $0.exists && !$0.frame.isEmpty && $0.frame.contains(point) }
+        try ledger.require("OCR \(id) switch point is unobscured", frame.width >= 40 && frame.height >= 20
+            && !viewport.isNull && !viewport.isEmpty && viewport.contains(point)
+            && point.y > navigation.frame.maxY && !covered && app.alerts.count == 0)
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5))
+            .withOffset(CGVector(dx: -20, dy: 0)).tap()
+        let selected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND value == %@", "1"), object: toggle)
+        try ledger.require("OCR \(id) selected after one activation", XCTWaiter.wait(for: [selected], timeout: 10) == .completed)
+        try ledger.require("OCR \(id) selected value", actual: toggle.value as? String ?? "", expected: "1")
     }
 
     private func backToDashboard(_ app: XCUIApplication) throws {

@@ -181,6 +181,17 @@ class RecoveryJourneyVerifierTests(unittest.TestCase):
         self.save_json("ui-evidence.json", self.ui)
         self.verify()
 
+    def test_unselected_or_unintentionally_selected_ocr_field_is_rejected(self):
+        event = next(event for event in self.ui["events"] if event["name"] == "ocr_selection_model_price")
+        for field in ("model", "serial", "price", "date"):
+            key = "selected." + field
+            original = event["observations"][key]
+            with self.subTest(field=field):
+                event["observations"][key] = "0" if original == "1" else "1"
+                self.save_json("ui-evidence.json", self.ui)
+                self.reject("OCR selection differs")
+            event["observations"][key] = original
+
     def test_normalizing_ocr_price_in_storage_is_rejected(self):
         self.item["purchasePrice"] = "USD 149.50"
         self.regenerate()

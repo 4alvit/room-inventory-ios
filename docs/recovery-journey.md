@@ -246,6 +246,28 @@ installation-only launch shares the existing XCTest/controller deadlines; it doe
 not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
+### Explicit OCR selection
+
+The journey verifies all four OCR fields start unselected, then activates only
+model and price. Each activation targets the trailing switch control in this
+English-only journey and waits at most ten seconds for its exact value to become
+`1`. It issues one tap, with no toggle retry. The later four-field observation,
+`Apply 2` check and selective-update artifact checks remain mandatory.
+Before activation, that exact point must lie inside the containing OCR Form's
+visible bounds, below its navigation bar and outside exposed navigation, toolbar,
+tab-bar and keyboard frames. An alert or unidentifiable form fails before tapping.
+
+In CI run `40893851357`, attempt 1, the UI log first reported
+`OCR selection model: observed 0, expected 1` after the two generic element taps.
+Xcode then collected failure diagnostics; a 112,718,394-byte `system.logarchive/dsc`
+entry crossed the unchanged 192 MiB result budget (209,453,056 allocated bytes
+observed). That crossing was real allocation, not a sparse-file accounting error.
+The packet could not retain the oversized result, so it does not establish which
+part of the labeled switch received the original tap. Targeted single activation
+and an immediate state check address the interaction ambiguity; a native run is
+still required to establish that selection and the rest of the journey pass.
+No resource cap, result-retention check or acceptance requirement is relaxed.
+
 ### Live export origin barriers
 
 The test runner publishes six numbered requests in its own

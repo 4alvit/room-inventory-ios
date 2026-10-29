@@ -121,7 +121,8 @@ final class RecoveryPhotosReadTests: XCTestCase {
     func testOnlyExpectedOwnedRunnerAndRemovalCountPermitConfirmation() {
         XCTAssertTrue(RecoveryPhotosFixture.permitsConfirmation(
             text: "RoomInventoryUITests-Runner Would Like to Delete 6 Photos",
-            runnerName: "RoomInventoryUITests-Runner", removed: 6))
+            runnerName: "RoomInventoryUITests-Runner",
+            runnerBundleID: "com.alvit.roominventory.uitests.xctrunner", removed: 6))
         for (text, name, count) in [
             ("Other App Would Like to Delete 6 Photos", "RoomInventoryUITests-Runner", 6),
             ("RoomInventoryUITests-Runner Would Like to Delete 7 Photos", "RoomInventoryUITests-Runner", 6),
@@ -129,7 +130,46 @@ final class RecoveryPhotosReadTests: XCTestCase {
             ("RoomInventoryUITests-Runner Would Like to Delete 6 Photos", "", 6),
             ("RoomInventoryUITests-Runner Would Like to Delete 64 Photos", "RoomInventoryUITests-Runner", 64)
         ] {
-            XCTAssertFalse(RecoveryPhotosFixture.permitsConfirmation(text: text, runnerName: name, removed: count))
+            XCTAssertFalse(RecoveryPhotosFixture.permitsConfirmation(text: text, runnerName: name,
+                runnerBundleID: "com.alvit.roominventory.uitests.xctrunner", removed: count))
         }
     }
+
+    func testObservedXCTestCarrierDeletionRequiresExactRunnerAndRemovalCount() {
+        let text = "Allow “com.apple.XCTRunner” to delete 6 photos?\n"
+            + "These photos will be deleted from the library. They will be in Recently Deleted for 30 days."
+        let bundle = "com.alvit.roominventory.uitests.xctrunner"
+        let name = "RoomInventoryUITests-Runner"
+        XCTAssertTrue(RecoveryPhotosFixture.permitsConfirmation(
+            text: text, runnerName: name, runnerBundleID: bundle, removed: 6))
+        for (runner, identifier, count) in [
+            (name, bundle, 5), (name, bundle, 7), (name, bundle, 0), (name, bundle, 64),
+            (name, "com.apple.XCTRunner", 6), (name, "com.example.other.uitests.xctrunner", 6),
+            (name, "", 6), ("OtherUITests-Runner", bundle, 6), ("com.apple.XCTRunner", bundle, 6)
+        ] {
+            XCTAssertFalse(RecoveryPhotosFixture.permitsConfirmation(
+                text: text, runnerName: runner, runnerBundleID: identifier, removed: count))
+        }
+    }
+
+    func testDeletionTitleCannotBorrowRunnerIdentityOrCountFromOtherText() {
+        let title = "Allow “com.apple.XCTRunner” to delete 6 photos?"
+        for text in [
+            "Allow “Other App” to delete 6 photos?\nRoomInventoryUITests-Runner",
+            "Allow “com.apple.XCTRunner Other” to delete 6 photos?",
+            "Allow “com.apple.XCTRunner” to delete 7 photos?\ndelete 6 photos",
+            "Allow “com.apple.XCTRunner” to access 6 photos?",
+            "Unrelated alert\n" + title, title + "\n" + title,
+            title + " Extra", String(repeating: "x", count: 2049)
+        ] {
+            XCTAssertFalse(RecoveryPhotosFixture.permitsConfirmation(text: text,
+                runnerName: "RoomInventoryUITests-Runner",
+                runnerBundleID: "com.alvit.roominventory.uitests.xctrunner", removed: 6))
+        }
+        XCTAssertTrue(RecoveryPhotosFixture.permitsConfirmation(
+            text: "Allow “RoomInventoryUITests-Runner” to delete 1 photo?",
+            runnerName: "RoomInventoryUITests-Runner",
+            runnerBundleID: "com.alvit.roominventory.uitests.xctrunner", removed: 1))
+    }
+
 }

@@ -383,7 +383,9 @@ final class RecoveryPhotosFixture {
             let text = alert.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: "\n")
             report["confirmation_text"] = String(text.prefix(512))
             try check(deadline)
-            guard permitsConfirmation(text: text, runnerName: runnerName, removed: identifiers.count) else {
+            guard permitsConfirmation(text: text, runnerName: runnerName,
+                                      runnerBundleID: Bundle.main.bundleIdentifier ?? "",
+                                      removed: identifiers.count) else {
                 throw PhotoFixtureError.invalid("Photos confirmation does not name this runner and removal count")
             }
             let deleteExists = alert.buttons["Delete"].exists
@@ -395,7 +397,7 @@ final class RecoveryPhotosFixture {
             let asciiDenyExists = alert.buttons["Don't Allow"].exists
             try check(deadline)
             guard deleteExists, cancelExists || denyExists || asciiDenyExists else {
-                throw PhotoFixtureError.invalid("Photos confirmation does not name this runner and removal count")
+                throw PhotoFixtureError.invalid("Photos confirmation lacks Delete and a denial control")
             }
             report["confirmation_text"] = text
             try check(deadline)
@@ -410,11 +412,24 @@ final class RecoveryPhotosFixture {
         _ = try completed.result()
     }
 
-    nonisolated static func permitsConfirmation(text: String, runnerName: String, removed: Int) -> Bool {
-        guard (1..<64).contains(removed), !runnerName.isEmpty, runnerName.utf8.count <= 128,
-              text.utf8.count <= 2048, text.localizedCaseInsensitiveContains(runnerName) else { return false }
-        let phrase = removed == 1 ? #"delete\s+(?:1\s+)?photo\b"# : #"delete\s+"# + String(removed) + #"\s+photos\b"#
-        return text.range(of: phrase, options: [.regularExpression, .caseInsensitive]) != nil
+    nonisolated static func permitsConfirmation(text: String, runnerName: String,
+                                                runnerBundleID: String, removed: Int) -> Bool {
+        guard (1..<64).contains(removed), text.utf8.count <= 2048,
+              runnerBundleID == "com.alvit.roominventory.uitests.xctrunner",
+              runnerName == "RoomInventoryUITests-Runner" else { return false }
+        // PhotoKit's deletion sheet on the admitted iOS 18.5 Simulator names the
+        // XCTest carrier, while its full-access sheet names this actual runner.
+        // This fixed alias is used only after isolate's owned-device, exact-runner,
+        // authorization and unchanged fixture/asset-ID checks; it is not caller input.
+        let noun = removed == 1 ? "photo" : "photos"
+        var titles = Set(["\(runnerName) Would Like to Delete \(removed) \(noun.capitalized)"])
+        for name in [runnerName, "com.apple.XCTRunner"] {
+            titles.insert("Allow “\(name)” to delete \(removed) \(noun)?")
+            titles.insert("Allow \"\(name)\" to delete \(removed) \(noun)?")
+        }
+        let lines = text.components(separatedBy: "\n")
+        guard (1...8).contains(lines.count), let title = lines.first, titles.contains(title) else { return false }
+        return lines.filter { titles.contains($0) }.count == 1
     }
 
     private static func wait(_ expectation: XCTestExpectation, deadline: ContinuousClock.Instant) throws {

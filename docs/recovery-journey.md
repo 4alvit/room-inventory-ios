@@ -215,8 +215,16 @@ resources per asset, the unique named 1400×1800 PNG, and two network-disabled
 resource reads of at most 74,736 bytes each. Both reads must match the source
 fixture's SHA-256. After a stable inventory re-read, one PhotoKit change removes
 only the other asset IDs. The fixture itself is never deleted, replaced or seeded
-again. A per-change system confirmation, when presented, must name this runner and
-the exact removal count; only its Delete button may be tapped, at most once.
+again. A per-change system confirmation must carry the exact removal count in
+its complete first-line deletion title. For the exact owned
+`com.alvit.roominventory.uitests.xctrunner` / `RoomInventoryUITests-Runner` pair,
+the title may name that runner or the fixed `com.apple.XCTRunner` carrier observed
+on the admitted iOS 18.5 Simulator. The carrier label alone is not identity proof:
+installation ACK, actual Simulator/runner binding, full authorization, unchanged
+fixture hash and exact removed asset IDs remain mandatory before the request.
+Foreign, duplicate, embedded or count-mismatched titles fail. The one SpringBoard
+alert still requires exactly two buttons: Delete and a denial control; only
+Delete may be tapped, at most once. A missing control has a distinct diagnostic.
 Unknown alerts fail. The native permission/confirmation presentation remains a
 runtime compatibility gate, not a source-validation claim.
 

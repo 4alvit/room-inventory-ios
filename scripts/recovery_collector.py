@@ -460,12 +460,42 @@ class Collector:
         self._write("bridge/photos-isolation.json", raw)
         self.photos_isolation_sha = sha(raw)
         check(value.get("status") == "passed", "Photos isolation failed: " + str(value.get("error", "missing status"))[:512])
-        fields = {*expected, "status", "fixture_bytes", "read_write_authorized", "initial_asset_count",
+        fields = {*expected, "status", "fixture_bytes", "read_write_authorized", "authorization", "initial_asset_count",
                   "initial_asset_ids_sha256", "fixture_asset_id", "before_bytes", "before_sha256",
                   "removed_asset_count", "removed_asset_ids_sha256", "change_requested", "change_completed",
                   "confirmation_seen", "confirmation_accepted", "confirmation_text",
                   "final_asset_count", "after_bytes", "after_sha256", "finished_within_deadline", "elapsed_seconds"}
         check(set(value) == fields, "invalid Photos isolation fields")
+        authorization = value["authorization"]
+        check(isinstance(authorization, dict) and set(authorization) == {
+            "before_raw", "after_raw", "requested", "callback_raw", "prompt_seen", "prompt_accepted",
+            "prompt_runner", "prompt_text", "prompt_button"}, "invalid Photos authorization evidence")
+        # PHAuthorizationStatus: notDetermined=0, authorized=3. Limited is not full access.
+        check(type(authorization["before_raw"]) is int and authorization["before_raw"] in (0, 3)
+              and type(authorization["after_raw"]) is int and authorization["after_raw"] == 3,
+              "Photos full authorization status differs")
+        requested = authorization["before_raw"] == 0
+        check(authorization["requested"] is requested
+              and type(authorization["prompt_seen"]) is bool and type(authorization["prompt_accepted"]) is bool
+              and authorization["prompt_seen"] == authorization["prompt_accepted"],
+              "Photos authorization interaction incomplete")
+        if requested:
+            check(type(authorization["callback_raw"]) is int and authorization["callback_raw"] == 3,
+                  "Photos authorization callback is unconfirmed")
+        else:
+            check(authorization["callback_raw"] is None and not authorization["prompt_seen"],
+                  "Unexpected request or interaction for preauthorized runner")
+        if authorization["prompt_seen"]:
+            check(authorization["prompt_runner"] == "RoomInventoryUITests-Runner"
+                  and authorization["prompt_button"] == "Allow Full Access"
+                  and isinstance(authorization["prompt_text"], str)
+                  and 0 < len(authorization["prompt_text"].encode()) <= 2048
+                  and authorization["prompt_runner"] in authorization["prompt_text"],
+                  "Photos runner prompt or callback is unconfirmed")
+        else:
+            check(all(authorization[k] == ""
+                  for k in ("prompt_runner", "prompt_text", "prompt_button")),
+                  "Unexpected prompt evidence without interaction")
         fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
         check(sha(fixture) == self.config["fixture_sha256"], "Photos fixture source changed")
         for key in ("fixture_bytes", "before_bytes", "after_bytes"):

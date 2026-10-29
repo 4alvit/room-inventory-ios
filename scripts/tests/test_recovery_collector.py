@@ -419,6 +419,9 @@ class InstallationHandshakeTests(unittest.TestCase):
                  "installation_request_sha256": collector.installation_files["installation-request.json"],
                  "fixture_filename": "SyntheticRecoveryReceipt.png", "fixture_bytes": len(fixture),
                  "fixture_sha256": C.sha(fixture), "deadline_seconds": 20,
+                 "authorization": {"before_raw": 3, "after_raw": 3, "requested": False, "callback_raw": None,
+                                   "prompt_seen": False, "prompt_accepted": False,
+                                   "prompt_runner": "", "prompt_text": "", "prompt_button": ""},
                  "read_write_authorized": True, "initial_asset_count": 7, "initial_asset_ids_sha256": "a" * 64,
                  "fixture_asset_id": "synthetic-owned-asset/L0/001", "before_bytes": len(fixture),
                  "before_sha256": C.sha(fixture), "removed_asset_count": 6, "removed_asset_ids_sha256": "b" * 64,
@@ -676,6 +679,42 @@ class InstallationHandshakeTests(unittest.TestCase):
         with self.assertRaisesRegex(C.CollectorError, "Photos isolation missing"):
             state.collector.poll_bridge()
         self.assertFalse((state.bridge / "ack-01.json").exists())
+
+    def test_photos_postinstallation_full_authorization_requires_exact_callback_and_prompt(self):
+        valid = {"before_raw": 0, "after_raw": 3, "requested": True, "callback_raw": 3,
+                 "prompt_seen": True, "prompt_accepted": True, "prompt_runner": "RoomInventoryUITests-Runner",
+                 "prompt_text": "“RoomInventoryUITests-Runner” Would Like Full Access to Your Photo Library\nAccess is necessary for automated testing.",
+                 "prompt_button": "Allow Full Access"}
+        state = self.photos_state(); self.photos_receipt(state, authorization=valid)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertTrue(state.collector.photos_isolated)
+        for change in ({"before_raw": 2}, {"before_raw": 4}, {"before_raw": False}, {"after_raw": 4},
+                       {"after_raw": True}, {"callback_raw": None}, {"callback_raw": 4}, {"requested": False},
+                       {"prompt_seen": False}, {"prompt_accepted": False}, {"prompt_runner": "Other App"},
+                       {"prompt_text": "unrelated prompt"}, {"prompt_button": "Select Photos…"}):
+            with self.subTest(change=change):
+                state = self.photos_state(); self.photos_receipt(state, authorization={**valid, **change})
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse(state.collector.photos_isolated)
+                self.assertFalse((state.bridge / "ack-01.json").exists())
+
+    def test_photos_authorized_callback_without_prompt_does_not_claim_interaction(self):
+        automatic = {"before_raw": 0, "after_raw": 3, "requested": True, "callback_raw": 3,
+                     "prompt_seen": False, "prompt_accepted": False,
+                     "prompt_runner": "", "prompt_text": "", "prompt_button": ""}
+        state = self.photos_state(); raw = self.photos_receipt(state, authorization=automatic)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertTrue(state.collector.photos_isolated)
+        self.assertEqual((state.collector.root / "bridge/photos-isolation.json").read_bytes(), raw)
+        for change in ({"callback_raw": None}, {"callback_raw": 2}, {"after_raw": 4},
+                       {"prompt_seen": True}, {"prompt_accepted": True},
+                       {"prompt_runner": "RoomInventoryUITests-Runner"}, {"prompt_text": "unobserved"},
+                       {"prompt_button": "Allow Full Access"}):
+            with self.subTest(change=change):
+                state = self.photos_state(); self.photos_receipt(state, authorization={**automatic, **change})
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertFalse(state.collector.photos_isolated)
+                self.assertFalse((state.bridge / "ack-01.json").exists())
 
     def test_photos_foreign_incomplete_overdue_and_changed_original_receipts_fail(self):
         variants = [{"simulator_udid": "foreign"}, {"installation_request_sha256": "0" * 64},

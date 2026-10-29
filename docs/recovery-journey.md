@@ -193,8 +193,20 @@ The single Photos seed is not repeated or replaced. A fresh Simulator is not
 assumed to have an empty Photos library. After the installation ACK and before
 launching the data-bearing scenario, the UI-test runner verifies and isolates the
 seed using PhotoKit. The controller validates the actual built runner's Photos
-usage description and grants full Photos access only to that runner on its newly
-owned device. The app's privacy permissions and built payload are unchanged.
+usage description and pregrants Photos access only to that runner on its newly
+owned device. This command is not proof of the later PhotoKit authorization state:
+XCTest may install the runner after the pregrant. After ACK, the runner records
+the actual read/write status. Authorized proceeds; only not-determined may request
+read/write access through PhotoKit. That asynchronous request returns before UI
+interaction. Only one system alert naming the exact runner, declaring the actual
+usage message and offering the enabled/hittable Allow Full Access control is
+accepted. The callback and final status must both report full authorization.
+If the request completes authorized without any prompt being observed or tapped,
+the full callback and fresh status are accepted with both prompt flags false and
+empty prompt fields. This proves authorization without claiming UI interaction.
+Denied, restricted, limited, foreign/ambiguous prompts and incomplete callbacks
+fail. Before/after raw statuses and the actual prompt association are retained.
+The app's privacy permissions and built payload are unchanged.
 
 The runner also checks the actual Simulator UUID, runner bundle, usage description
 and full read/write authorization. One 20-second monotonic deadline inside the

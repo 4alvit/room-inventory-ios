@@ -64,6 +64,27 @@ enum PhotoFixtureError: Error, CustomStringConvertible {
     }
 }
 
+/// The permission callback may arrive on a background queue or after the deadline.
+final class PhotoFixtureAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private let completion: PhotoFixtureRead
+    private var rawStatus: Int?
+    var expectation: XCTestExpectation { completion.expectation }
+    var isFinished: Bool { completion.isFinished }
+    init(deadline: ContinuousClock.Instant) { completion = PhotoFixtureRead(limit: 0, deadline: deadline) }
+    func complete(_ status: PHAuthorizationStatus, at now: ContinuousClock.Instant = ContinuousClock().now) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let error: Error? = status == .authorized ? nil
+            : PhotoFixtureError.invalid("authorization callback status \(status.rawValue)")
+        guard completion.complete(error: error, at: now) else { return false }
+        rawStatus = status.rawValue
+        return true
+    }
+    func signal() { completion.signal() }
+    func observedStatus() -> Int? { lock.lock(); defer { lock.unlock() }; return rawStatus }
+    func result() throws { _ = try completion.result() }
+}
+
 @MainActor
 final class RecoveryPhotosFixture {
     static let filename = "SyntheticRecoveryReceipt.png"
@@ -90,9 +111,7 @@ final class RecoveryPhotosFixture {
               !usage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PhotoFixtureError.invalid("actual runner lacks Photos usage metadata")
         }
-        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
-            throw PhotoFixtureError.invalid("runner requires pregranted full Photos read/write access")
-        }
+        try authorize(deadline: deadline, usage: usage, report: &report)
         report["read_write_authorized"] = true
         let before = try inventory(deadline: deadline)
         report["initial_asset_count"] = before.count
@@ -136,6 +155,118 @@ final class RecoveryPhotosFixture {
         try check(deadline)
         report["finished_within_deadline"] = true
         #endif
+    }
+
+    enum AuthorizationAction: Equatable { case proceed, request, reject }
+    nonisolated static func authorizationAction(_ status: PHAuthorizationStatus) -> AuthorizationAction {
+        switch status {
+        case .authorized: .proceed
+        case .notDetermined: .request
+        default: .reject
+        }
+    }
+
+    nonisolated static func authorizationRequestCompleted(callbackRaw: Int?, after: PHAuthorizationStatus,
+                                                          promptSeen: Bool, promptAccepted: Bool) -> Bool {
+        callbackRaw == PHAuthorizationStatus.authorized.rawValue && after == .authorized
+            && promptSeen == promptAccepted
+    }
+
+    nonisolated static func permitsAuthorizationPrompt(texts: [String], buttons: [String],
+                                                       runnerName: String, usage: String, alertCount: Int) -> Bool {
+        guard alertCount == 1, (2...8).contains(texts.count), (2...3).contains(buttons.count),
+              Set(buttons).count == buttons.count, !runnerName.isEmpty, runnerName.utf8.count <= 128,
+              !usage.isEmpty, usage.utf8.count <= 1024,
+              texts.allSatisfy({ $0.utf8.count <= 1024 }), texts.joined(separator: "\n").utf8.count <= 2048,
+              texts.filter({ $0 == usage }).count == 1,
+              buttons.filter({ $0 == "Allow Full Access" }).count == 1,
+              buttons.contains("Don’t Allow") || buttons.contains("Don't Allow") else { return false }
+        let name = NSRegularExpression.escapedPattern(for: runnerName)
+        let title = "^[“\"]" + name + "[”\"] Would Like (?:(?:Full )?Access to|to Access) (?:Your )?(?:Photos|Photo Library)$"
+        return texts.filter({ $0.range(of: title, options: [.regularExpression, .caseInsensitive]) != nil }).count == 1
+    }
+
+    private static func authorize(deadline: ContinuousClock.Instant, usage: String, report: inout [String: Any]) throws {
+        try check(deadline)
+        let before = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        var authorization: [String: Any] = ["before_raw": before.rawValue, "requested": false,
+            "callback_raw": NSNull(), "prompt_seen": false, "prompt_accepted": false,
+            "prompt_runner": "", "prompt_text": "", "prompt_button": ""]
+        var callback: PhotoFixtureAuthorization?
+        defer {
+            authorization["after_raw"] = PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue
+            if let raw = callback?.observedStatus() { authorization["callback_raw"] = raw }
+            report["authorization"] = authorization
+        }
+        switch authorizationAction(before) {
+        case .proceed: return
+        case .reject: throw PhotoFixtureError.invalid("runner Photos read/write status \(before.rawValue)")
+        case .request: break
+        }
+        let completed = PhotoFixtureAuthorization(deadline: deadline)
+        callback = completed
+        authorization["requested"] = true
+        try check(deadline)
+        // Return immediately; do not await on the main actor before interacting
+        // with the permission sheet. Callback storage is independently locked.
+        PHPhotoLibrary.requestAuthorization(for: .readWrite) { @Sendable status in
+            if completed.complete(status) { completed.signal() }
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let runnerName = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? ""
+        for _ in 0..<20 {
+            try check(deadline)
+            if completed.isFinished { break }
+            let alert = springboard.alerts.firstMatch
+            let remaining = min(1, duration(ContinuousClock().now.duration(to: deadline)))
+            guard remaining > 0 else { throw PhotoFixtureError.invalid("authorization observation deadline") }
+            let present = alert.waitForExistence(timeout: remaining)
+            try check(deadline)
+            if completed.isFinished { break }
+            guard present else { continue }
+            authorization["prompt_seen"] = true
+            let alertCount = springboard.alerts.count
+            try check(deadline)
+            let textCount = alert.staticTexts.count
+            try check(deadline)
+            let buttonCount = alert.buttons.count
+            try check(deadline)
+            guard alertCount == 1, (2...8).contains(textCount), (2...3).contains(buttonCount) else {
+                throw PhotoFixtureError.invalid("ambiguous Photos authorization prompt")
+            }
+            let texts = alert.staticTexts.allElementsBoundByIndex.map(\.label)
+            try check(deadline)
+            let buttons = alert.buttons.allElementsBoundByIndex.map(\.label)
+            try check(deadline)
+            guard permitsAuthorizationPrompt(texts: texts, buttons: buttons, runnerName: runnerName,
+                                             usage: usage, alertCount: alertCount) else {
+                throw PhotoFixtureError.invalid("Photos authorization prompt is not this runner's full-access request")
+            }
+            authorization["prompt_runner"] = runnerName
+            authorization["prompt_text"] = texts.joined(separator: "\n")
+            authorization["prompt_button"] = "Allow Full Access"
+            let allow = alert.buttons["Allow Full Access"]
+            guard allow.isEnabled else { throw PhotoFixtureError.invalid("Photos full-access control disabled") }
+            try check(deadline)
+            guard allow.isHittable else { throw PhotoFixtureError.invalid("Photos full-access control unreachable") }
+            try check(deadline)
+            allow.tap()
+            try check(deadline)
+            authorization["prompt_accepted"] = true
+            break
+        }
+        try wait(completed.expectation, deadline: deadline)
+        try completed.result()
+        // The OS can honor an existing grant without presenting a prompt. The
+        // callback and fresh readback prove authorization, not a UI interaction.
+        guard authorizationRequestCompleted(callbackRaw: completed.observedStatus(),
+              after: PHPhotoLibrary.authorizationStatus(for: .readWrite),
+              promptSeen: authorization["prompt_seen"] as? Bool == true,
+              promptAccepted: authorization["prompt_accepted"] as? Bool == true) else {
+            throw PhotoFixtureError.invalid("runner full Photos authorization is unconfirmed")
+        }
+        try check(deadline)
     }
 
     private static func inventory(deadline: ContinuousClock.Instant) throws -> [PHAsset] {

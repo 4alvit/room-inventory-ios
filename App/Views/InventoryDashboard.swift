@@ -10,6 +10,9 @@ struct InventoryDashboard: View {
     @State private var showingPrivacy = false
     @State private var renamingHome: InventoryHome?
     @State private var deletingHome: InventoryHome?
+    @State private var searchQuery = ""
+
+    private var isSearching: Bool { !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -28,6 +31,30 @@ struct InventoryDashboard: View {
                     Section {
                         ContentUnavailableView(UIL10n.text("Inventory could not be loaded"), systemImage: "externaldrive.badge.exclamationmark", description: Text(UIL10n.text("Your saved files have not been replaced. Try loading them again.")))
                         Button(UIL10n.text("Retry loading")) { Task { await store.load() } }
+                    }
+                } else if isSearching {
+                    let results = store.inventory.searchItems(searchQuery)
+                    Section(UIL10n.text("search.results")) {
+                        if results.isEmpty {
+                            ContentUnavailableView(UIL10n.text("search.empty.title"), systemImage: "magnifyingglass",
+                                                   description: Text(UIL10n.text("search.empty.body")))
+                                .accessibilityIdentifier("inventory.searchEmpty")
+                        }
+                        ForEach(results) { result in
+                            NavigationLink {
+                                ItemDetailView(homeID: result.homeID, roomID: result.roomID, itemID: result.item.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(result.item.name).font(.headline)
+                                    Text(UIL10n.format("search.location", result.homeName, result.roomName))
+                                        .font(.subheadline).foregroundStyle(.secondary)
+                                    if !result.item.model.isEmpty {
+                                        Text(result.item.model).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }.padding(.vertical, 5)
+                            }
+                            .accessibilityIdentifier("inventory.searchResult.\(result.item.id)")
+                        }
                     }
                 } else if store.inventory.homes.isEmpty {
                     Section {
@@ -72,6 +99,8 @@ struct InventoryDashboard: View {
                 }
             }
             .navigationTitle(UIL10n.text("Room Inventory"))
+            .searchable(text: $searchQuery, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: Text(UIL10n.text("search.prompt")))
             .scrollContentBackground(.hidden)
             .background(InventoryTheme.background)
             .overlay { if store.isBusy { ProgressView(UIL10n.text("Saving your inventory…")).padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } }

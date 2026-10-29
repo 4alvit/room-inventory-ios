@@ -236,3 +236,9 @@
 "privacy.link.apple" = "Apple: App Store & Privacy (English)";
 "privacy.link.github" = "GitHub privacy statement (English)";
 "privacy.link.hint" = "Opens an external website in your browser. Internet access is required.";
+
+"search.prompt" = "Search items, models or serial numbers";
+"search.results" = "Matching items";
+"search.empty.title" = "No matching items";
+"search.empty.body" = "Try an item name, model, serial number, note, home or room. Clear the search to see your homes.";
+"search.location" = "Home: %@ · Room: %@";

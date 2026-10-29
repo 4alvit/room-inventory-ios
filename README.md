@@ -14,6 +14,7 @@ does not mean a release passed validation.
 ## Product scope
 
 - Homes, rooms and items with model, serial number, purchase amount/date and notes.
+- Local search across homes by item name, model, serial number, notes and room.
 - Camera and selected photo/file import for photos, labels and receipt images.
 - On-device OCR suggestions require explicit review before they update item fields.
 - Missing-material prompts help identify incomplete item records.

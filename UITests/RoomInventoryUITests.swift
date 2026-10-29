@@ -8,6 +8,71 @@ final class RoomInventoryUITests: XCTestCase {
     private let itemName = "Synthetic Monitor"
     private let modelName = "TEST-MODEL-42"
 
+    func testSearchFindsItemByModelWithoutOpeningItsHomeOrRoom() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["UITEST_RUN_ID"] = UUID().uuidString
+        app.launch()
+        tap(app.buttons["inventory.addFirstHome"])
+        enterName(homeName, in: app)
+        openRecord(homeName, in: app)
+        tap(app.buttons["Add a room"])
+        enterName(roomName, in: app)
+        openRecord(roomName, in: app)
+        tap(app.buttons["Add an item"])
+        enterName(itemName, in: app)
+        openRecord(itemName, in: app)
+        tap(app.buttons["item.editDetails"])
+        let model = app.textFields["itemEditor.model"]
+        tap(model)
+        model.typeText(modelName)
+        tap(app.buttons["itemEditor.save"])
+        XCTAssertTrue(app.staticTexts[modelName].waitForExistence(timeout: 10))
+        backToDashboard(app)
+
+        let search = app.searchFields.firstMatch
+        tap(search)
+        search.typeText("test-model-42")
+        let result = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "inventory.searchResult.")).firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        XCTAssertTrue(result.label.contains(homeName))
+        XCTAssertTrue(result.label.contains(roomName))
+        tap(result)
+        XCTAssertTrue(app.navigationBars[itemName].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[modelName].exists)
+    }
+
+    func testNameEntryRequiresExplicitDiscardForAnUnsavedName() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["UITEST_RUN_ID"] = UUID().uuidString
+        app.launch()
+        tap(app.buttons["inventory.addFirstHome"])
+        let field = app.textFields["entry.name"]
+        tap(field)
+        field.typeText("Unsaved synthetic home")
+        tap(app.buttons["entry.cancel"])
+        tap(app.buttons["Keep editing"])
+        XCTAssertEqual(field.value as? String, "Unsaved synthetic home")
+        tap(app.buttons["entry.cancel"])
+        tap(app.buttons["Discard changes"])
+        XCTAssertTrue(app.buttons["inventory.addFirstHome"].waitForExistence(timeout: 5))
+        XCTAssertFalse(record("Unsaved synthetic home", in: app).exists)
+
+        tap(app.buttons["inventory.addFirstHome"])
+        enterName(homeName, in: app)
+        record(homeName, in: app).press(forDuration: 1.2)
+        tap(app.buttons["Rename home"])
+        tap(field)
+        field.typeText(" changed")
+        tap(app.buttons["entry.cancel"])
+        tap(app.buttons["Discard changes"])
+        XCTAssertTrue(record(homeName, in: app).waitForExistence(timeout: 5))
+        XCTAssertFalse(record(homeName + " changed", in: app).exists)
+    }
+
     func testIPadLandscapeAtMaximumDynamicType() throws {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "This flow verifies the supported iPad layout.")
         continueAfterFailure = false

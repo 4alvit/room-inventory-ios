@@ -13,17 +13,19 @@ struct NameEntrySheet: View {
     let placeholder: String
     let explanation: String
     let actionTitle: String
+    let initialName: String
     let save: (String) async -> Bool
     @Environment(InventoryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var saving = false
     @State private var errorMessage: String?
+    @State private var discarding = false
     @FocusState private var focused: Bool
 
     init(title: String, placeholder: String, explanation: String, initialName: String = "", actionTitle: String = UIL10n.text("Add"), save: @escaping (String) async -> Bool) {
         self.title = title; self.placeholder = placeholder; self.explanation = explanation
-        self.actionTitle = actionTitle; self.save = save
+        self.actionTitle = actionTitle; self.initialName = initialName; self.save = save
         _name = State(initialValue: initialName)
     }
 
@@ -37,16 +39,26 @@ struct NameEntrySheet: View {
                 } footer: { Text(explanation) }
                 if let errorMessage { Section { Text(errorMessage).foregroundStyle(.red) } }
             }
+            .disabled(saving)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(UIL10n.text("Cancel")) { dismiss() }.disabled(saving) }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(UIL10n.text("Cancel")) {
+                        if name != initialName { discarding = true } else { dismiss() }
+                    }.disabled(saving)
+                        .accessibilityIdentifier("entry.cancel")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(actionTitle) { submit() }.disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("entry.save")
                 }
             }
-            .interactiveDismissDisabled(saving)
+            .interactiveDismissDisabled(saving || name != initialName)
+            .confirmationDialog(UIL10n.text("Discard unsaved changes?"), isPresented: $discarding, titleVisibility: .visible) {
+                Button(UIL10n.text("Discard changes"), role: .destructive) { dismiss() }
+                Button(UIL10n.text("Keep editing"), role: .cancel) {}
+            }
             .task { focused = true }
         }
     }

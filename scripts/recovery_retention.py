@@ -292,6 +292,109 @@ def capture_build_identity(controller, destination, guard):
     return report
 
 
+def capture_first_files_tap(work, context, collector, files):
+    """Preserve exactly two runner-owned observations, never an acceptance verdict."""
+    report = {"status": "MISSING_OR_INVALID", "complete": False, "acceptance_evidence": False}
+    original_guard = getattr(collector, "guard", None)
+    try:
+        require(collector is not None and collector.pins and collector.photos_isolated,
+                "owned seeded runner unavailable")
+        require(plain(collector.root) == work / "run/evidence/collection", "foreign collection root")
+        collector.guard = files.guard  # Retention's existing deadline, independent of xcresult's cap.
+        collector._containers()
+        pin = files.json(work / "run/source-pin.json", MIB)
+        binding = files.json(collector.root / "source-binding.json", MIB)
+        selected, _ = files.read(work / "run/selected.xctestrun.plist", MIB)
+        require(pin["commit"] == context["source_commit"] == collector.config["source_commit"]
+                and pin["tree"] == context["source_tree"]
+                and pin["tree_listing_sha256"] == collector.config["source_tree_sha256"]
+                and digest(selected) == collector.config["xctestrun_sha256"], "Files capture source differs")
+        expected = {**collector.ids, "simulator_udid": collector.config["simulator_udid"]}
+        require(all(binding.get(k) == v for k, v in {**expected, **{k: collector.config[k] for k in
+                ("source_commit", "source_tree_sha256", "config_sha256", "xctestrun_sha256")}}.items()),
+                "Files capture binding differs")
+        source = collector.runner / "Documents" / ("RecoveryFilesFirstTap-" + collector.ids["journey_run_id"])
+        before = files.snapshot(source, 5 * MIB, 8)
+        names = {stage + suffix for stage in ("before", "after") for suffix in (".png", "-ax.json", ".json")}
+        require(set(before) == names | {""} and before[""]["kind"] == "directory"
+                and all(before[n]["kind"] == "file" for n in names), "Files capture set incomplete or unexpected")
+
+        def parse_capture(raw):
+            def pairs(values):
+                result = {}
+                for key, value in values:
+                    require(key not in result, "duplicate Files capture key")
+                    result[key] = value
+                return result
+            return json.loads(raw, object_pairs_hook=pairs,
+                              parse_constant=lambda _: require(False, "nonfinite Files capture number"))
+
+        payloads, titles = {}, []
+        for stage in ("before", "after"):
+            name = stage + ".json"
+            raw, observed = files.read(source / name, 16_384)
+            require(observed == before[name], "Files receipt changed")
+            payloads[name] = raw
+            receipt = parse_capture(raw)
+            identity = {"schema_version": 1, **expected, "stage": stage}
+            require(type(receipt) is dict and set(receipt) == set(identity) | {"files"}
+                    and all(type(receipt[k]) is type(v) and receipt[k] == v for k, v in identity.items()),
+                    "Files capture run or stage differs")
+            entries = receipt["files"]
+            require(type(entries) is list and len(entries) == 2, "Files pair missing")
+            for entry, suffix, cap in zip(entries, (".png", "-ax.json"), (2 * MIB, 256 * 1024)):
+                name = stage + suffix
+                require(type(entry) is dict and set(entry) == {"name", "bytes", "sha256"}
+                        and entry["name"] == name and type(entry["bytes"]) is int
+                        and 0 < entry["bytes"] <= cap, "Files payload name or length invalid")
+                raw, observed = files.read(source / name, cap)
+                require(observed == before[name] and len(raw) == entry["bytes"]
+                        and digest(raw) == entry["sha256"], "Files payload changed or digest differs")
+                payloads[name] = raw
+                if suffix == ".png":
+                    require(len(raw) >= 45 and raw[:16] == b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                            and raw[-12:] == b"\x00\x00\x00\x00IEND\xaeB`\x82", "Files PNG framing invalid")
+                else:
+                    ax = parse_capture(raw)
+                    require(type(ax) is dict and all(type(ax.get(k)) is type(v) and ax[k] == v for k, v in identity.items())
+                            and ax.get("local_title") in ("On My iPhone", "On My iPad")
+                            and type(ax.get("hierarchy")) is str and ax["hierarchy"].strip()
+                            and type(ax.get("selected_target")) is dict
+                            and type(ax.get("matches")) is list and len(ax["matches"]) <= 16
+                            and type(ax.get("navigation_bars")) is list and len(ax["navigation_bars"]) <= 8,
+                            "Files AX structure or identity invalid")
+                    titles.append(ax["local_title"])
+        require(titles[0] == titles[1], "Files location changed between stage labels")
+        require(files.snapshot(source, 5 * MIB, 8) == before, "Files source changed during capture")
+        receipt = {"schema_version": 1, "status": "CAPTURE_COMPLETE_NOT_ACCEPTANCE", "acceptance_evidence": False,
+                   "source_commit": pin["commit"], "source_tree": pin["tree"], "source_binding": binding,
+                   "source_relative_to_owned_runner": source.relative_to(collector.runner).as_posix(),
+                   "files": {name: {"bytes": len(raw), "sha256": digest(raw)} for name, raw in payloads.items()}}
+        raw_receipt = encoded(receipt)
+        require(len(raw_receipt) <= 16_384, "Files capture receipt bound")
+        payloads["capture.json"] = raw_receipt
+        existing = files.snapshot(collector.root, 512 * MIB, 12000)
+        require(len(existing) + len(payloads) + 1 <= 12000
+                and sum(v.get("bytes", 0) for v in existing.values()) + sum(map(len, payloads.values())) <= 512 * MIB,
+                "Files capture exceeds existing collection budget")
+        # The capture subtree snapshot does not cover runner root/MCM identity.
+        # Revalidate the original pins after reads and before publishing bytes.
+        collector._containers()
+        for name, raw in payloads.items():
+            collector._write("files-first-tap/" + name, raw)
+        retained = {"run/evidence/collection/files-first-tap/" + name:
+                    {"bytes": len(raw), "sha256": digest(raw)} for name, raw in payloads.items()}
+        report.update(status="CAPTURE_COMPLETE_NOT_ACCEPTANCE", complete=True,
+                      receipt="run/evidence/collection/files-first-tap/capture.json",
+                      receipt_sha256=digest(raw_receipt), retained_files=retained)
+    except Exception as error:
+        report["reason"] = type(error).__name__ + ": " + str(error)[:384]
+    finally:
+        if collector is not None and original_guard is not None:
+            collector.guard = original_guard
+    return report
+
+
 def capture_partial(work, collector, files):
     """Capture only already-pinned attempt state; preserve labels as incomplete."""
     destination = work / "partial-capture"
@@ -538,6 +641,7 @@ def package_evidence(work_root, upload_root, context, guard, *, collector=None):
     failures, selected, snapshots, after = [], {}, {}, {}
     try:
         require(len(encoded(context)) <= 65536, "hosted context size limit")
+        report["files_first_tap"] = capture_first_files_tap(work, context, collector, files)
         try:
             validate_complete(work, context, files)
         except Exception as error:
@@ -629,6 +733,13 @@ def package_evidence(work_root, upload_root, context, guard, *, collector=None):
         report.update({"archive": {"path": archive.name, **archive_record}, "archive_members_verified": True})
     except Exception as error:
         failures.append("retention: " + type(error).__name__ + ": " + str(error))
+    capture = report.get("files_first_tap")
+    if capture and capture["complete"]:
+        retained = capture["retained_files"]
+        if not report.get("archive_members_verified") or not all(
+                all(selected.get(name, {}).get(key) == value for key, value in expected.items())
+                for name, expected in retained.items()):
+            capture.update(status="MISSING_OR_INVALID", complete=False, reason="Files capture not retained in verified archive")
     report.update({"complete": not failures, "status": "PARTIAL" if failures else "COMPLETE", "failures": failures,
                    "selected_source_roots": sorted(snapshots), "source_context": context})
     # The initial PARTIAL receipt remains honest if the bounded final write fails.

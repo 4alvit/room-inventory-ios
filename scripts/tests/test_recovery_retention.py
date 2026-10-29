@@ -12,6 +12,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 import uuid
+import zlib
 from unittest.mock import patch
 
 import test_recovery_collector as collector_fixtures
@@ -112,6 +113,172 @@ class RecoveryRetentionTests(unittest.TestCase):
 
     def package(self, collector=None):
         return R.package_evidence(self.work, self.upload, self.context, self.guard, collector=collector)
+
+    def files_capture_fixture(self):
+        """Only synthetic, pinned runner state; no native process or screenshot."""
+        collector = self.fixture.collector
+        collector.root = self.work / "run/evidence/collection"
+        collector.photos_isolated = True
+        collector.config.update(source_tree_sha256=self.source["tree_listing_sha256"],
+                                config_sha256=R.digest(json.dumps(self.grant, sort_keys=True).encode()),
+                                xctestrun_sha256=self.controller.xctestrun_sha)
+        root = collector.runner / "Documents" / ("RecoveryFilesFirstTap-" + collector.ids["journey_run_id"])
+        root.mkdir(parents=True)
+        identity = {**collector.ids, "simulator_udid": collector.config["simulator_udid"]}
+        png = (ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.png").read_bytes()
+        for stage in ("before", "after"):
+            document = {"schema_version": 1, **identity, "stage": stage}
+            ax = {**document, "local_title": "On My iPhone", "selected_target": {"exists": True},
+                  "matches": [], "navigation_bars": [], "hierarchy": "Application\n  StaticText On My iPhone"}
+            (root / (stage + ".png")).write_bytes(png)
+            (root / (stage + "-ax.json")).write_bytes(R.encoded(ax))
+            self.files_stage_receipt(root, document)
+        return collector, root
+
+    def files_stage_receipt(self, root, document):
+        stage = document["stage"]
+        entries = []
+        for suffix in (".png", "-ax.json"):
+            name = stage + suffix
+            raw = (root / name).read_bytes()
+            entries.append({"name": name, "bytes": len(raw), "sha256": R.digest(raw)})
+        (root / (stage + ".json")).write_bytes(R.encoded({**{k: v for k, v in document.items() if k != "files"}, "files": entries}))
+
+    def test_files_capture_survives_oversized_original_without_acceptance(self):
+        collector, root = self.files_capture_fixture()
+        original = {p.name: p.read_bytes() for p in root.iterdir()}
+        self.context.update(controller_exit_code=1, primary_error="injected UI failure")
+        snapshot = R.Files.snapshot
+        def reject_original(files, path, limit, count):
+            if path == self.work / "run/original.xcresult":
+                raise R.RetentionError("file size/type limit")
+            return snapshot(files, path, limit, count)
+        with patch.object(R.Files, "snapshot", reject_original):
+            report = self.package(collector)
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["status"], "PARTIAL")
+        capture = report["files_first_tap"]
+        self.assertTrue(capture["complete"], capture)
+        self.assertFalse(capture["acceptance_evidence"])
+        with tarfile.open(self.upload / "evidence.tar") as archive:
+            for name, raw in original.items():
+                self.assertEqual(archive.extractfile("run/evidence/collection/files-first-tap/" + name).read(), raw)
+            receipt = json.loads(archive.extractfile(capture["receipt"]).read())
+            self.assertEqual(receipt["source_commit"], self.source["commit"])
+            self.assertEqual(receipt["source_tree"], self.source["tree"])
+            self.assertFalse(any(n.startswith("run/original.xcresult") for n in archive.getnames()))
+        self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, original)
+
+    def test_files_capture_rejects_incomplete_corrupt_foreign_and_extra_payloads(self):
+        collector, root = self.files_capture_fixture()
+        baseline = {p.name: p.read_bytes() for p in root.iterdir()}
+        for damage in ("missing", "truncated", "digest", "run", "stage", "duplicate", "extra", "symlink", "png_over", "ax_over"):
+            with self.subTest(damage=damage):
+                for p in root.iterdir(): p.unlink()
+                for name, raw in baseline.items(): (root / name).write_bytes(raw)
+                receipt = json.loads((root / "after.json").read_bytes())
+                if damage == "missing": (root / "after.png").unlink()
+                elif damage == "truncated": (root / "after.png").write_bytes(baseline["after.png"][:-1])
+                elif damage == "digest":
+                    receipt["files"][0]["sha256"] = "0" * 64
+                    (root / "after.json").write_bytes(R.encoded(receipt))
+                elif damage in ("run", "stage"):
+                    receipt["source_run_id" if damage == "run" else "stage"] = "FOREIGN"
+                    (root / "after.json").write_bytes(R.encoded(receipt))
+                elif damage == "duplicate": (root / "after.json").write_bytes(b'{"stage":"after",' + baseline["after.json"][1:])
+                elif damage == "extra": (root / "extra.txt").write_text("unexpected")
+                elif damage == "symlink":
+                    (root / "after.png").unlink()
+                    (root / "after.png").symlink_to(root / "before.png")
+                else:
+                    name, limit = ("after.png", 2 * R.MIB) if damage == "png_over" else ("after-ax.json", 256 * 1024)
+                    (root / name).write_bytes(b"x" * (limit + 1))
+                    self.files_stage_receipt(root, receipt)
+                report = R.capture_first_files_tap(self.work, self.context, collector, R.Files(self.guard))
+                self.assertFalse(report["complete"], report)
+                self.assertEqual(report["status"], "MISSING_OR_INVALID")
+                self.assertFalse((collector.root / "files-first-tap").exists())
+
+    def test_files_capture_accepts_exact_payload_bounds(self):
+        collector, root = self.files_capture_fixture()
+        for stage in ("before", "after"):
+            path = root / (stage + ".png")
+            png = path.read_bytes()
+            padding = b"k\x00" + b"a" * (2 * R.MIB - len(png) - 14)
+            chunk = struct.pack(">I", len(padding)) + b"tEXt" + padding
+            chunk += struct.pack(">I", zlib.crc32(b"tEXt" + padding))
+            path.write_bytes(png[:-12] + chunk + png[-12:])
+            self.assertEqual(path.stat().st_size, 2 * R.MIB)
+            path = root / (stage + "-ax.json")
+            raw = path.read_bytes()
+            path.write_bytes(raw + b" " * (256 * 1024 - len(raw)))
+            self.files_stage_receipt(root, json.loads((root / (stage + ".json")).read_bytes()))
+        report = R.capture_first_files_tap(self.work, self.context, collector, R.Files(self.guard))
+        self.assertTrue(report["complete"], report)
+
+    def test_files_capture_rejects_foreign_source_and_collection_budget(self):
+        collector, root = self.files_capture_fixture()
+        for mode in ("source", "budget"):
+            with self.subTest(mode=mode):
+                context = {**self.context, "source_commit": "0" * 40} if mode == "source" else self.context
+                snapshot = R.Files.snapshot
+                def constrained(files, path, limit, count):
+                    value = snapshot(files, path, limit, count)
+                    if mode == "budget" and path == collector.root:
+                        value["reserved"] = {"kind": "file", "bytes": 512 * R.MIB}
+                    return value
+                with patch.object(R.Files, "snapshot", constrained):
+                    report = R.capture_first_files_tap(self.work, context, collector, R.Files(self.guard))
+                self.assertFalse(report["complete"], report)
+                self.assertFalse((collector.root / "files-first-tap").exists())
+
+    def test_files_capture_missing_does_not_change_existing_acceptance(self):
+        report = self.package()
+        self.assertTrue(report["complete"], report["failures"])
+        self.assertFalse(report["files_first_tap"]["complete"])
+        self.assertFalse(report["files_first_tap"]["acceptance_evidence"])
+
+    def test_files_capture_changed_before_archive_is_not_reported_complete(self):
+        collector, _ = self.files_capture_fixture()
+        copied = collector.root / "files-first-tap"
+        changed = []
+        def mutate():
+            if not changed and (copied / "capture.json").exists():
+                changed.append(True)
+                with (copied / "before.png").open("ab") as stream:
+                    stream.write(b"injected change")
+        self.guard_hook = mutate
+        report = self.package(collector)
+        self.assertTrue(changed)
+        self.assertFalse(report["files_first_tap"]["complete"], report)
+        self.assertEqual(report["files_first_tap"]["status"], "MISSING_OR_INVALID")
+
+    def test_files_capture_rechecks_runner_metadata_after_reads_before_publish(self):
+        collector, root = self.files_capture_fixture()
+        files = R.Files(self.guard)
+        read = files.read
+        reads, changed = [], []
+        metadata = collector.runner / collector_fixtures.C.MCM
+        def mutate(path, limit, *, keep=True):
+            result = read(path, limit, keep=keep)
+            if path == root / "after-ax.json":
+                reads.append(path)
+                # First read is the initial subtree snapshot; second is the
+                # payload read, after the initial container pin validation.
+                if len(reads) == 2:
+                    value = plistlib.loads(metadata.read_bytes())
+                    value["InjectedMetadataChange"] = True
+                    metadata.write_bytes(plistlib.dumps(value))
+                    changed.append(True)
+            return result
+        with patch.object(files, "read", side_effect=mutate), \
+                patch.object(collector, "_write", wraps=collector._write) as publish:
+            report = R.capture_first_files_tap(self.work, self.context, collector, files)
+        self.assertTrue(changed)
+        self.assertFalse(report["complete"], report)
+        self.assertIn("container relocated or metadata changed", report["reason"])
+        publish.assert_not_called()
+        self.assertFalse((collector.root / "files-first-tap").exists())
 
     def test_complete_packet_preserves_raw_bytes_and_omits_live_state(self):
         original = self.work / "run/original.xcresult/Data/payload"

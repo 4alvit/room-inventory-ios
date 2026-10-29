@@ -10,6 +10,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private var application: XCUIApplication?
     private var activeRunID = ""
     private var completed = false
+    private var firstFilesTapCaptured = false
 
     private func finishEvidence() throws {
         defer { application?.terminate() }
@@ -395,7 +396,17 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         for _ in 0..<5 {
             if app.navigationBars[localTitle].exists { break }
             let local = fileItem(localTitle, app: app)
-            if local.exists && local.isHittable { try tap(local, app: app); continue }
+            if local.exists && local.isHittable {
+                if !firstFilesTapCaptured {
+                    firstFilesTapCaptured = true
+                    ledger.captureFirstFilesTap("before", localTitle: localTitle, target: local, app: app)
+                    try tap(local, app: app)
+                    ledger.captureFirstFilesTap("after", localTitle: localTitle, target: local, app: app)
+                } else {
+                    try tap(local, app: app)
+                }
+                continue
+            }
             let browse = app.buttons["Browse"]
             if browse.exists && browse.isHittable { try tap(browse, app: app); continue }
             let back = app.navigationBars.buttons.matching(NSPredicate(format: "label == 'Back' OR label == 'Locations' OR label == 'Browse'")).firstMatch

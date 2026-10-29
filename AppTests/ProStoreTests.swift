@@ -108,6 +108,14 @@ final class ProStoreTests: XCTestCase {
         XCTAssertEqual(store.isPro, expected)
     }
 
+    private func processingFields(_ store: ProStore) -> [String: Any] {
+        #if DEBUG
+        return store.processingDiagnostics.fields
+        #else
+        return [:]
+        #endif
+    }
+
     func testNoPurchaseDoesNotUnlockAndPriceIsFromStoreKit() async throws {
         let session = try await makeSession()
         defer { session.clearTransactions() }
@@ -194,20 +202,27 @@ final class ProStoreTests: XCTestCase {
         XCTAssertTrue(store.message?.contains("awaiting approval") == true)
         let transaction = try XCTUnwrap(session.allTransactions().first)
         diagnostic("pending-approval-before", ["session_transactions": session.allTransactions().count,
-            "store_isPro": store.isPro])
+            "store_isPro": store.isPro].merging(processingFields(store)) { _, new in new })
         try session.approveAskToBuyTransaction(identifier: transaction.identifier)
-        diagnostic("pending-approval-after", ["session_transactions": session.allTransactions().count])
+        diagnostic("pending-approval-after", ["session_transactions": session.allTransactions().count]
+            .merging(processingFields(store)) { _, new in new })
         await waitForObservedEntitlement(true, store: store)
         var observation = "approval observed"
         if !store.isPro {
-            diagnostic("pending-failed-entitlements-before")
+            diagnostic("pending-failed-entitlements-before", processingFields(store)
+                .merging(["store_isPro": store.isPro]) { _, new in new })
             let current = await verifiedEntitlements()
             observation = diagnostic("pending-failed-entitlements-after", [
                 "session_transactions": session.allTransactions().count,
                 "verified_product_entitlements": current.filter { $0.productID == store.productID }.count,
                 "verified_xcode_product_entitlements": current.filter {
                     $0.productID == store.productID && $0.environment == .xcode && $0.revocationDate == nil
-                }.count, "store_isPro": store.isPro, "message": store.message ?? "<nil>"])
+                }.count,
+                "eligible_verified_product_entitlements": current.filter {
+                    $0.productID == store.productID && $0.productType == .nonConsumable
+                        && $0.revocationDate == nil && !$0.isUpgraded
+                }.count, "store_isPro": store.isPro, "message": store.message ?? "<nil>"]
+                .merging(processingFields(store)) { _, new in new })
         }
         XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.", observation)
     }

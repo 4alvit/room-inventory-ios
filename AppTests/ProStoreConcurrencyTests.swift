@@ -4,6 +4,119 @@ import StoreKit
 
 @MainActor
 final class ProStoreConcurrencyTests: XCTestCase {
+    #if DEBUG
+    func testProcessingDiagnosticObservesSuspendedRemovalWithoutRefreshing() async throws {
+        let removal = ControlledSnapshot("suspended removal for passive observation")
+        let scanner = ControlledScanner([removal])
+        let store = ProStore(entitlementSnapshot: { await scanner.read($0) }, observeTransactionUpdates: false)
+        defer { scanner.finishAll() }
+        let task = Task {
+            await self.apply(.verified(UpdateFixture(productID: store.productID,
+                revocationDate: Date(timeIntervalSince1970: 1))), to: store)
+        }
+        defer { task.cancel() }
+        guard await wait(for: removal.started) else { return }
+
+        let before = store.processingDiagnostics
+        XCTAssertEqual(before.listenerPhase, .disabled)
+        XCTAssertEqual(before.lastUpdateKind, .removal)
+        XCTAssertEqual(before.removalScansStarted, 1)
+        XCTAssertEqual(before.removalUpdates, 1)
+        XCTAssertEqual(before.lastStateWriteSource, .none)
+        XCTAssertNil(before.lastStateWriteRevision)
+        XCTAssertEqual(before.removalScansCompleted, 0)
+        XCTAssertEqual(before.refreshesStarted, 0)
+        let data = try JSONSerialization.data(withJSONObject: before.fields)
+        XCTAssertLessThan(data.count, 1_024)
+        XCTAssertFalse(store.isPro)
+
+        // Observation must not add a query or manufacture a completion. The
+        // deliberately held scan is released only by this synthetic producer.
+        XCTAssertEqual(store.processingDiagnostics.removalScansStarted, 1)
+        XCTAssertEqual(store.processingDiagnostics.removalScansCompleted, 0)
+        removal.continuation.finish()
+        await task.value
+        XCTAssertEqual(store.processingDiagnostics.removalScansCompleted, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastObservedSnapshotFound, false)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .removal)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, false)
+        XCTAssertFalse(store.isPro)
+    }
+
+    func testProcessingDiagnosticDistinguishesRejectedUpdateFromAppliedApproval() async throws {
+        let store = ProStore(entitlementSnapshot: { _ in
+            XCTFail("Neither rejected events nor verified approval require an entitlement query")
+            return false
+        }, observeTransactionUpdates: false)
+        await apply(.unverified(UpdateFixture(productID: store.productID), .invalidSignature), to: store, accepted: false)
+        XCTAssertEqual(store.processingDiagnostics.lastUpdateKind, .unverified)
+        await apply(.verified(UpdateFixture(productID: "sensitive.synthetic.product")), to: store, accepted: false)
+        XCTAssertEqual(store.processingDiagnostics.lastUpdateKind, .foreignProduct)
+        await apply(.verified(UpdateFixture(productID: store.productID, productType: .consumable)), to: store, accepted: false)
+        XCTAssertEqual(store.processingDiagnostics.lastUpdateKind, .unsupportedType)
+        XCTAssertEqual(store.processingDiagnostics.rejected, 3)
+        XCTAssertEqual(store.processingDiagnostics.unverifiedUpdates, 1)
+        XCTAssertEqual(store.processingDiagnostics.foreignProductUpdates, 1)
+        XCTAssertEqual(store.processingDiagnostics.unsupportedTypeUpdates, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .none)
+        XCTAssertNil(store.processingDiagnostics.lastStateWriteRevision)
+        XCTAssertNil(store.processingDiagnostics.lastStateWriteValue)
+        XCTAssertFalse(store.isPro)
+        await apply(.verified(UpdateFixture(productID: store.productID)), to: store)
+        XCTAssertEqual(store.processingDiagnostics.lastUpdateKind, .approval)
+        XCTAssertEqual(store.processingDiagnostics.approvalsApplied, 1)
+        XCTAssertEqual(store.processingDiagnostics.approvalUpdates, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .approval)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, true)
+        XCTAssertEqual(store.processingDiagnostics.received, 0, "Direct controls must not claim listener delivery")
+        XCTAssertTrue(store.isPro)
+
+        let data = try JSONSerialization.data(withJSONObject: store.processingDiagnostics.fields)
+        XCTAssertLessThan(data.count, 1_024)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.contains(store.productID))
+        XCTAssertFalse(text.contains("sensitive.synthetic.product"))
+    }
+    func testProcessingDiagnosticFitsFullFailurePayloadAtMaximumCounters() throws {
+        var state = ProStoreProcessingDiagnostics()
+        let counters: [WritableKeyPath<ProStoreProcessingDiagnostics, UInt64>] = [
+            \.received, \.rejected, \.unverifiedUpdates, \.foreignProductUpdates,
+            \.unsupportedTypeUpdates, \.approvalUpdates, \.removalUpdates, \.approvalsApplied,
+            \.removalScansStarted, \.removalScansCompleted, \.removalScansSuperseded,
+            \.refreshesStarted, \.refreshesCompleted, \.refreshesSuperseded,
+            \.finishesStarted, \.finishesCompleted
+        ]
+        for keyPath in counters { state[keyPath: keyPath] = .max }
+        state.listenerPhase = .finishing
+        state.lastUpdateKind = .unsupportedType
+        state.lastObservedSnapshotFound = false
+        state.recordStateWrite(.approval, revision: .max, value: false)
+        let keys = ["pro.storeUnavailable", "pro.unavailable", "pro.unverified", "pro.ready",
+            "pro.confirming", "pro.pending", "pro.cancelled", "pro.incomplete", "pro.failed",
+            "pro.restored", "pro.notFound", "pro.restoreFailed", "pro.inactive"]
+        for language in ["en", "ru"] {
+            for key in keys {
+                let message = ServiceL10n.text(key, language: language)
+                XCTAssertNotEqual(message, key, "Use the actual packaged message")
+                let fields: [String: Any] = [
+                    "phase": "pending-failed-entitlements-after",
+                    "uptime": Double.greatestFiniteMagnitude,
+                    "session_transactions": UInt64.max,
+                    "verified_product_entitlements": UInt64.max,
+                    "verified_xcode_product_entitlements": UInt64.max,
+                    "eligible_verified_product_entitlements": UInt64.max,
+                    "store_isPro": false, "message": message
+                ]
+                let data = try JSONSerialization.data(
+                    withJSONObject: fields.merging(state.fields) { _, new in new }, options: [.sortedKeys])
+                XCTAssertLessThanOrEqual(data.count, 2_048, "\(language)/\(key) must fit the existing diagnostic limit")
+            }
+        }
+    }
+    #endif
+
     func testOlderEntitledScanCannotUndoNewerRevocationOrItsMessage() async {
         let initial = ControlledSnapshot("initial entitlement")
         let older = ControlledSnapshot("older entitled scan")
@@ -64,6 +177,13 @@ final class ProStoreConcurrencyTests: XCTestCase {
         await olderTask.value
         XCTAssertTrue(store.isPro, "An older empty scan must not revoke newer access")
         XCTAssertEqual(store.message, readyMessage)
+        #if DEBUG
+        XCTAssertEqual(store.processingDiagnostics.lastObservedSnapshotFound, false)
+        XCTAssertEqual(store.processingDiagnostics.refreshesSuperseded, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .refresh)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 2)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, true)
+        #endif
     }
 
     func testVerifiedApprovalOverridesLaggingEmptyScanWithoutAnotherLookup() async {
@@ -109,6 +229,12 @@ final class ProStoreConcurrencyTests: XCTestCase {
         await task.value
         XCTAssertFalse(store.isPro, "An older scan cannot undo a newer verified revocation")
         XCTAssertEqual(store.message, inactive)
+        #if DEBUG
+        XCTAssertEqual(store.processingDiagnostics.lastObservedSnapshotFound, true)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .removal)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 3)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, false)
+        #endif
     }
 
     func testRejectedUpdatesNeitherUnlockNorInvalidateMatchingScan() async {
@@ -165,6 +291,13 @@ final class ProStoreConcurrencyTests: XCTestCase {
         await old.value
         XCTAssertTrue(store.isPro)
         XCTAssertEqual(store.message, "Pro is ready. Thank you for supporting Room Inventory.")
+        #if DEBUG
+        XCTAssertEqual(store.processingDiagnostics.lastObservedSnapshotFound, false)
+        XCTAssertEqual(store.processingDiagnostics.removalScansSuperseded, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .approval)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 2)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, true)
+        #endif
     }
 
     func testLaterVerifiedSnapshotStillReconcilesAfterLiveEvent() async {
@@ -173,6 +306,13 @@ final class ProStoreConcurrencyTests: XCTestCase {
         XCTAssertTrue(store.isPro)
         await store.refreshEntitlements()
         XCTAssertFalse(store.isPro, "No persistent override of later verified entitlement scans")
+        #if DEBUG
+        XCTAssertEqual(store.processingDiagnostics.approvalUpdates, 1)
+        XCTAssertEqual(store.processingDiagnostics.approvalsApplied, 1)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteSource, .refresh)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteRevision, 2)
+        XCTAssertEqual(store.processingDiagnostics.lastStateWriteValue, false)
+        #endif
     }
 
     private func apply(_ result: VerificationResult<UpdateFixture>, to store: ProStore, accepted: Bool = true) async {

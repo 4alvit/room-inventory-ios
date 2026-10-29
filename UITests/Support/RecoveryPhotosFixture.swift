@@ -228,17 +228,44 @@ final class RecoveryPhotosFixture {
             authorization["prompt_seen"] = true
             let alertCount = springboard.alerts.count
             try check(deadline)
-            let textCount = alert.staticTexts.count
-            try check(deadline)
-            let buttonCount = alert.buttons.count
-            try check(deadline)
-            guard alertCount == 1, (2...8).contains(textCount), (2...3).contains(buttonCount) else {
+            guard alertCount == 1 else {
                 throw PhotoFixtureError.invalid("ambiguous Photos authorization prompt")
             }
-            let texts = alert.staticTexts.allElementsBoundByIndex.map(\.label)
+            // Read one immutable hierarchy. Index-bound XCUIElement proxies
+            // re-resolve against a live sheet and can outlive a transient child.
+            let snapshot = try alert.snapshot()
             try check(deadline)
-            let buttons = alert.buttons.allElementsBoundByIndex.map(\.label)
+            var pending = Array(snapshot.children.reversed())
+            var visited = 0
+            var texts: [String] = []
+            var buttons: [String] = []
+            guard pending.count <= 64 else {
+                throw PhotoFixtureError.invalid("Photos authorization snapshot node bound")
+            }
+            while let node = pending.popLast() {
+                try check(deadline)
+                visited += 1
+                if node.elementType == .staticText || node.elementType == .button {
+                    let label = node.label
+                    guard label.utf8.count <= 1024 else {
+                        throw PhotoFixtureError.invalid("Photos authorization snapshot label bound")
+                    }
+                    if node.elementType == .staticText { texts.append(label) }
+                    else { buttons.append(label) }
+                    guard texts.count <= 8, buttons.count <= 3 else {
+                        throw PhotoFixtureError.invalid("ambiguous Photos authorization prompt")
+                    }
+                }
+                let children = node.children
+                guard children.count <= 64 - visited - pending.count else {
+                    throw PhotoFixtureError.invalid("Photos authorization snapshot node bound")
+                }
+                pending.append(contentsOf: children.reversed())
+            }
             try check(deadline)
+            guard (2...8).contains(texts.count), (2...3).contains(buttons.count) else {
+                throw PhotoFixtureError.invalid("ambiguous Photos authorization prompt")
+            }
             guard permitsAuthorizationPrompt(texts: texts, buttons: buttons, runnerName: runnerName,
                                              usage: usage, alertCount: alertCount) else {
                 throw PhotoFixtureError.invalid("Photos authorization prompt is not this runner's full-access request")

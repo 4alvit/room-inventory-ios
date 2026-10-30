@@ -1,4 +1,6 @@
 import unittest
+import ast
+import inspect
 import errno
 import json
 from pathlib import Path
@@ -9,6 +11,18 @@ import probe_room_csv as probe
 
 
 class ProbeContracts(unittest.TestCase):
+    def test_single_pass_command_omits_repetition_options(self):
+        tree = ast.parse(inspect.getsource(probe.main))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "command"]
+        test_calls = [node for node in calls if any(isinstance(part, ast.Constant)
+                      and part.value == "test-without-building" for part in ast.walk(node.args[0]))]
+        self.assertEqual(len(test_calls), 1)
+        flags = {part.value for part in ast.walk(test_calls[0].args[0])
+                 if isinstance(part, ast.Constant) and isinstance(part.value, str)}
+        self.assertIn("-only-testing:RoomInventoryUITests/LocalizationUITests", flags)
+        self.assertFalse(flags & {"-test-iterations", "-retry-tests-on-failure", "-run-tests-until-failure"})
+
     def test_expired_global_budget_never_starts_another_process(self):
         with mock.patch.object(probe, "ACTIVE_DEADLINE", 0), mock.patch.object(probe.subprocess, "Popen") as popen:
             result, data = probe.command(["must-not-start"], ".")

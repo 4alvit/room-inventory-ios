@@ -371,7 +371,7 @@ def main():
         report["test_started_epoch"] = time.time()
         report["status"] = "INCOMPLETE_OBSERVATION"
         test, data = command(common + ["-resultBundlePath", str(xcresult), "-only-testing:RoomInventoryUITests/LocalizationUITests",
-                                      "-test-iterations", "1", "test-without-building"], source, 360, 768 * 1024, observe,
+                                      "test-without-building"], source, 360, 768 * 1024, observe,
                              directory_limit=(xcresult, 192 * MIB), stage="test")
         report["test_finished_epoch"] = time.time()
         report["commands"]["test"] = test

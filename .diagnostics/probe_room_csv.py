@@ -87,62 +87,114 @@ def event_count(data):
     return count
 
 
-def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limit=None):
-    if ACTIVE_DEADLINE is not None:
-        timeout = min(timeout, ACTIVE_DEADLINE - time.monotonic())
-    if timeout <= 0:
-        raise RuntimeError("Overall observation time budget exhausted")
+def error_record(phase, error):
+    return {"phase": phase, "type": type(error).__name__, "errno": getattr(error, "errno", None),
+            "message": str(error)[:512]}
+
+
+def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limit=None, stage=None):
+    result = {"stage": stage or str(args[0])[:128], "command": [str(a)[:512] for a in args[:32]],
+              "cwd": str(cwd)[:1024], "pid": None, "pgid": None,
+              "pgid_basis": "start_new_session=True; group ID equals child PID",
+              "exit": None, "timed_out": False, "resource_limited": False,
+              "cleanup_ok": True, "primary_error": None, "cleanup_errors": [], "dropped_bytes": 0}
     tail = Tail(cap)
-    process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    resource_limited = False
-    next_size_check = time.monotonic()
+    process = selector = None
+    phase = "budget"
     try:
+        if ACTIVE_DEADLINE is not None:
+            timeout = min(timeout, ACTIVE_DEADLINE - time.monotonic())
+        if timeout <= 0:
+            result["timed_out"] = True
+            raise RuntimeError("Overall observation time budget exhausted")
+        phase = "spawn"
+        process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        result.update(pid=process.pid, pgid=process.pid)
+        phase = "selector_setup"
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        next_size_check = time.monotonic()
         while selector.get_map():
+            phase = "storage_limit"
             if directory_limit and time.monotonic() >= next_size_check:
                 path, limit = directory_limit
-                size = tree_size(path)
-                if size > limit:
-                    resource_limited = True
+                if tree_size(path) > limit:
+                    result["resource_limited"] = True
                     break
                 next_size_check = time.monotonic() + 1
             if time.monotonic() >= deadline:
-                timed_out = True
+                result["timed_out"] = True
                 break
+            phase = "select"
             for key, _ in selector.select(timeout=min(0.2, max(0, deadline - time.monotonic()))):
+                phase = "read"
                 data = os.read(key.fd, 65536)
                 if not data:
                     selector.unregister(key.fileobj)
                     continue
                 tail.add(data)
                 if on_chunk:
+                    phase = "output_callback"
                     on_chunk(data)
-        if not timed_out and not resource_limited:
+            phase = "select"
+        if not result["timed_out"] and not result["resource_limited"]:
+            phase = "wait"
             try:
                 process.wait(timeout=max(0.01, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                timed_out = True
+                result["timed_out"] = True
         if directory_limit:
+            phase = "storage_limit"
             path, limit = directory_limit
-            size = tree_size(path)
-            resource_limited = resource_limited or size > limit
+            result["resource_limited"] = result["resource_limited"] or tree_size(path) > limit
+    except Exception as exc:
+        result["primary_error"] = error_record(phase, exc)
     finally:
-        cleanup_ok = stop(process)
-        selector.close()
-        process.stdout.close()
-    return {"exit": process.returncode, "timed_out": timed_out,
-            "cleanup_ok": cleanup_ok, "resource_limited": resource_limited,
-            "dropped_bytes": tail.dropped}, bytes(tail.data)
+        # Cleanup failures are evidence too, but must not replace the command's
+        # primary exception, timeout flag or captured output.
+        try:
+            if process is not None:
+                try:
+                    if not stop(process):
+                        result["cleanup_errors"].append(error_record("stop", TimeoutError("Owned process did not stop within its cleanup bound")))
+                except Exception as exc:
+                    result["cleanup_errors"].append(error_record("stop", exc))
+        finally:
+            try:
+                if selector is not None:
+                    try:
+                        selector.close()
+                    except Exception as exc:
+                        result["cleanup_errors"].append(error_record("selector_close", exc))
+            finally:
+                if process is not None and process.stdout is not None:
+                    try:
+                        process.stdout.close()
+                    except Exception as exc:
+                        result["cleanup_errors"].append(error_record("stdout_close", exc))
+    result.update(exit=process.returncode if process is not None else None,
+                  cleanup_ok=not result["cleanup_errors"], dropped_bytes=tail.dropped)
+    return result, bytes(tail.data)
 
 
-def checked(args, cwd, timeout=30):
-    result, data = command(args, cwd, timeout)
-    if result["exit"] or result["timed_out"] or result["dropped_bytes"] or not result["cleanup_ok"]:
-        raise RuntimeError("Command failed: " + args[0] + " " + args[1] + ": " + data[-1000:].decode(errors="replace"))
+def command_ok(result):
+    return (result["exit"] == 0 and not result["timed_out"] and not result["resource_limited"]
+            and result["cleanup_ok"] and result["primary_error"] is None)
+
+
+class CommandFailure(RuntimeError):
+    def __init__(self, result, data):
+        self.result = dict(result, output_tail=data[-4096:].decode(errors="replace"),
+                           output_tail_bytes=min(len(data), 4096))
+        super().__init__("Command failed at " + result["stage"])
+
+
+def checked(args, cwd, timeout=30, stage=None):
+    result, data = command(args, cwd, timeout, stage=stage)
+    if not command_ok(result) or result["dropped_bytes"]:
+        raise CommandFailure(result, data)
     return data.decode().strip()
 
 
@@ -218,50 +270,69 @@ def main():
         nonlocal logger_closed
         if logger is None or logger_closed:
             return
+        logger_closed = True
         alive = logger.poll() is None
-        cleanup_ok = stop(logger)
-        log_stop.set()
-        if log_thread:
-            log_thread.join(timeout=3)
+        cleanup_errors = []
+        cleanup_ok = False
+        try:
+            cleanup_ok = stop(logger)
+        except Exception as exc:
+            cleanup_errors.append(error_record("logger_stop", exc))
+        finally:
+            log_stop.set()
+            if log_thread:
+                try:
+                    log_thread.join(timeout=3)
+                except Exception as exc:
+                    cleanup_errors.append(error_record("logger_join", exc))
+            # Closing a buffered pipe while its reader is still blocked can
+            # itself block. Retain an explicit failure instead of waiting.
+            if log_thread is None or not log_thread.is_alive():
+                try:
+                    logger.stdout.close()
+                except Exception as exc:
+                    cleanup_errors.append(error_record("logger_stdout_close", exc))
         payload = bytes(log_tail.data)
         (output / "share-system-tail.ndjson").write_bytes(payload)
         report["system_log"] = {"exit": logger.returncode, "dropped_bytes": log_tail.dropped,
                                 "bytes": len(payload), "parsed_events": event_count(payload),
                                 "reader_stopped": log_thread is not None and not log_thread.is_alive(),
-                                "collector_errors": log_errors, "cleanup_ok": cleanup_ok,
+                                "collector_errors": log_errors, "cleanup_errors": cleanup_errors,
+                                "pid": logger.pid, "pgid": logger.pid,
+                                "cleanup_ok": cleanup_ok and not cleanup_errors,
                                 "alive_until_test_end": alive,
                                 "scope": "test pass, filtered processes/messages; tail on cap"}
-        logger_closed = True
     try:
-        if checked(["git", "rev-parse", "HEAD"], source) != HEAD or checked(["git", "rev-parse", "HEAD^{tree}"], source) != TREE:
+        if (checked(["git", "rev-parse", "HEAD"], source, stage="precheck.source_head") != HEAD
+                or checked(["git", "rev-parse", "HEAD^{tree}"], source, stage="precheck.source_tree") != TREE):
             raise RuntimeError("Immutable application source mismatch")
-        checked(["git", "diff", "--exit-code", "HEAD"], source)
-        version = checked(["xcodebuild", "-version"], source)
-        sdk = checked(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], source)
+        checked(["git", "diff", "--exit-code", "HEAD"], source, stage="precheck.source_diff")
+        version = checked(["xcodebuild", "-version"], source, stage="precheck.xcode")
+        sdk = checked(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], source, stage="precheck.sdk")
         report.update(xcode=version, sdk=sdk)
         if version != "Xcode 16.4\nBuild version 16F6" or sdk != "18.5":
             raise RuntimeError("Original toolchain unavailable; no substitution")
         if os.environ.get("RUNNER_ARCH") != "ARM64":
             raise RuntimeError("Original ARM runner required")
-        device = select_device(json.loads(checked(["xcrun", "simctl", "list", "devices", "available", "--json"], source)))
+        device = select_device(json.loads(checked(["xcrun", "simctl", "list", "devices", "available", "--json"], source, stage="precheck.simctl_devices")))
         report["device"] = device
         udid = device["udid"]
-        checked(["xcrun", "xcresulttool", "export", "attachments", "--help"], source)
-        generator = checked([sys.executable, "scripts/install-xcodegen.py"], source, 120)
-        checked([generator, "generate", "--spec", "project.yml"], source, 60)
+        checked(["xcrun", "xcresulttool", "export", "attachments", "--help"], source, stage="precheck.xcresulttool")
+        generator = checked([sys.executable, "scripts/install-xcodegen.py"], source, 120, stage="prepare.xcodegen_install")
+        checked([generator, "generate", "--spec", "project.yml"], source, 60, stage="prepare.xcodegen_generate")
         derived, xcresult = root / "DerivedData", root / "Probe.xcresult"
         common = ["xcodebuild", "-project", "RoomInventory.xcodeproj", "-scheme", "RoomInventory",
                   "-configuration", "Debug", "-destination", "platform=iOS Simulator,id=" + udid,
                   "-derivedDataPath", str(derived), "-parallel-testing-enabled", "NO", "CODE_SIGNING_ALLOWED=NO"]
-        build, data = command(common + ["build-for-testing"], source, 600)
+        build, data = command(common + ["build-for-testing"], source, 600, stage="build")
         report["commands"]["build"] = build
         (output / "build-tail.log").write_bytes(data)
-        if build["exit"] or build["timed_out"] or not build["cleanup_ok"]:
+        if not command_ok(build):
             report["status"] = "BUILD_FAILED"
             raise RuntimeError("Build failed before the single test pass")
         if device.get("state") != "Booted":
-            checked(["xcrun", "simctl", "boot", udid], source, 30)
-        checked(["xcrun", "simctl", "bootstatus", udid, "-b"], source, 120)
+            checked(["xcrun", "simctl", "boot", udid], source, 30, stage="prepare.boot")
+        checked(["xcrun", "simctl", "bootstatus", udid, "-b"], source, 120, stage="prepare.bootstatus")
         predicate = ('process == "RoomInventory" OR process CONTAINS[c] "sharing" OR '
                      'process CONTAINS[c] "share" OR eventMessage CONTAINS "UIActivity" OR '
                      'eventMessage CONTAINS "com.alvit.roominventory"')
@@ -301,15 +372,17 @@ def main():
         report["status"] = "INCOMPLETE_OBSERVATION"
         test, data = command(common + ["-resultBundlePath", str(xcresult), "-only-testing:RoomInventoryUITests/LocalizationUITests",
                                       "-test-iterations", "1", "test-without-building"], source, 360, 768 * 1024, observe,
-                             directory_limit=(xcresult, 192 * MIB))
+                             directory_limit=(xcresult, 192 * MIB), stage="test")
         report["test_finished_epoch"] = time.time()
         report["commands"]["test"] = test
         report["case_start_sequence"] = starts
         (output / "test-tail.log").write_bytes(data)
         archive_log()
-        summary_result, summary_data = command(["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(xcresult), "--compact"], source, 30, 128 * 1024)
+        if test["primary_error"] is not None or not test["cleanup_ok"]:
+            raise RuntimeError("Test command failed during execution or cleanup; see retained command details")
+        summary_result, summary_data = command(["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(xcresult), "--compact"], source, 30, 128 * 1024, stage="summary")
         report["commands"]["summary"] = summary_result
-        if summary_result["exit"] or summary_result["timed_out"] or summary_result["dropped_bytes"] or not summary_result["cleanup_ok"]:
+        if not command_ok(summary_result) or summary_result["dropped_bytes"]:
             raise RuntimeError("Complete bounded test summary unavailable")
         summary = json.loads(summary_data)
         (output / "summary.json").write_bytes(summary_data)
@@ -322,11 +395,10 @@ def main():
         attachment_result, _ = command(["xcrun", "xcresulttool", "export", "attachments", "--path", str(xcresult),
                                        "--output-path", str(attachments), "--test-id",
                                        "LocalizationUITests/testRussianCreationEditingAndCSVExportWithUSRegion()"], source, 45, 32 * 1024,
-                                      directory_limit=(attachments, 96 * MIB))
+                                      directory_limit=(attachments, 96 * MIB), stage="attachments")
         report["commands"]["attachments"] = attachment_result
         report["retained_attachments"] = []
-        if (attachment_result["exit"] == 0 and attachment_result["cleanup_ok"]
-                and not attachment_result["timed_out"] and not attachment_result["resource_limited"]):
+        if command_ok(attachment_result):
             manifest = attachments / "manifest.json"
             if manifest.is_file() and manifest.stat().st_size <= 256 * 1024:
                 for record, target, limit in choose_attachments(json.loads(manifest.read_text())):
@@ -342,18 +414,24 @@ def main():
                                                            "sha256": hashlib.sha256(payload).hexdigest()})
     except Exception as exc:
         report["error"] = str(exc)[:3000]
+        if isinstance(exc, CommandFailure):
+            report["failed_command_stage"] = exc.result["stage"]
+            report["commands"][exc.result["stage"]] = exc.result
     finally:
         archive_log()
         ACTIVE_DEADLINE = time.monotonic() + FINALIZE_SECONDS
         try:
-            report["source_unchanged_after"] = (checked(["git", "rev-parse", "HEAD"], source) == HEAD
-                and checked(["git", "rev-parse", "HEAD^{tree}"], source) == TREE
-                and checked(["git", "diff", "--exit-code", "HEAD"], source) == "")
-        except Exception:
+            report["source_unchanged_after"] = (checked(["git", "rev-parse", "HEAD"], source, stage="final.source_head") == HEAD
+                and checked(["git", "rev-parse", "HEAD^{tree}"], source, stage="final.source_tree") == TREE
+                and checked(["git", "diff", "--exit-code", "HEAD"], source, stage="final.source_diff") == "")
+        except Exception as exc:
             report["source_unchanged_after"] = False
+            report["source_verification_error"] = str(exc)[:3000]
+            if isinstance(exc, CommandFailure):
+                report["commands"][exc.result["stage"]] = exc.result
         if not report["source_unchanged_after"]:
             report["status"] = "SOURCE_PIN_INVALID"
-            report["error"] = "Source head/tree/content did not remain at the requested revision"
+            report.setdefault("error", "Source head/tree/content did not remain at the requested revision")
         log = report.get("system_log", {})
         completeness = {"summary": (output / "summary.json").is_file(),
                         "png": (output / "share.png").is_file(),

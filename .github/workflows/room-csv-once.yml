@@ -1,5 +1,5 @@
 name: Room CSV observation (not acceptance)
-run-name: Room CSV one observation at 060c24a
+run-name: Room CSV second observation at 060c24a
 on:
   push:
     branches: [diagnostics/room-csv-060c24a-20261030]
@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   observe:
-    if: github.run_attempt == 1 && github.event.created == true && github.event.before == '0000000000000000000000000000000000000000'
+    if: github.run_attempt == 1 && github.event.created == false && github.event.before == 'e002d4c7b7c50a1151f3e0f851cc6ab7abf41c11'
     runs-on: macos-15
     timeout-minutes: 22
     env:

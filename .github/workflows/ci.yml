@@ -1,0 +1,117 @@
+name: iOS validation
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  ios:
+    name: Core and iOS tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    outputs:
+      version: ${{ steps.preview-version.outputs.version }}
+      tested-commit: ${{ steps.preview-version.outputs.commit }}
+      tested-tree: ${{ steps.preview-version.outputs.tree }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install locked workflow validation dependency
+        run: |
+          python3 -m pip install --require-hashes --only-binary=:all: -r .github/requirements-workflow-contracts.txt
+      - name: Verify installed ARM toolchain
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$ImageOS" = macos15
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
+          test "$xcode_version" = $'Xcode 16.4\nBuild version 16F6'
+          swift --version
+          xcrun simctl list runtimes
+      - name: Run source contracts, Core tests, Simulator build and app tests
+        run: bash scripts/ci.sh
+      - name: Record validated source and preview version
+        id: preview-version
+        run: |
+          python3 - <<'PY_VERSION'
+          import os, pathlib, re, subprocess
+          if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], text=True).strip():
+              raise SystemExit("Validated source must remain clean")
+          version = pathlib.Path("VERSION").read_text().strip()
+          if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
+              raise SystemExit("Invalid committed preview version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+              for name, ref in (("commit", "HEAD"), ("tree", "HEAD^{tree}")):
+                  value = subprocess.check_output(["git", "rev-parse", ref], text=True).strip()
+                  if not re.fullmatch(r"[0-9a-f]{40}", value):
+                      raise SystemExit("Invalid tested Git identity")
+                  output.write(f"{name}={value}\n")
+          PY_VERSION
+      - name: Preserve Simulator test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: simulator-test-results-${{ github.run_attempt }}
+          path: .build/*.xcresult
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  recovery:
+    name: Recovery journey
+    needs: ios
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      RECOVERY_TESTED_COMMIT: ${{ needs.ios.outputs.tested-commit }}
+      RECOVERY_TESTED_TREE: ${{ needs.ios.outputs.tested-tree }}
+    steps:
+      - name: Checkout validated event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Run one bounded hosted recovery journey
+        timeout-minutes: 36
+        run: python3 scripts/recovery_hosted.py --profile-sha256 da98b5d20a706df89068f03f9a621e291006a2030c5a229dcd46a47842347113
+      - name: Preserve compact recovery evidence
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: recovery-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/room-recovery-upload/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  preview:
+    name: PR Simulator candidate
+    needs: [ios, recovery]
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ needs.ios.outputs.version }}
+      channel: beta
+      source-ref: ${{ github.event.pull_request.head.sha }}
+      tested-commit: ${{ needs.ios.outputs.tested-commit }}
+      tested-tree: ${{ needs.ios.outputs.tested-tree }}

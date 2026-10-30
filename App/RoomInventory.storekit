@@ -1,0 +1,16 @@
+{
+  "identifier": "D791C9F1-1091-49B3-93AE-AF8448B3DBA3",
+  "nonRenewingSubscriptions": [],
+  "products": [{
+    "displayPrice": "19.99",
+    "familyShareable": false,
+    "internalID": "8174740D-1677-46C0-B3D2-EC5BE8CCAC0D",
+    "localizations": [{"description": "More rooms and belongings, with a single purchase.", "displayName": "Room Inventory Pro", "locale": "en_US"}],
+    "productID": "com.alvit.roominventory.pro",
+    "referenceName": "Room Inventory Pro",
+    "type": "NonConsumable"
+  }],
+  "settings": {"_applicationInternalID": "0", "_developerTeamID": "", "_failTransactionsEnabled": false, "_locale": "en_US", "_storefront": "USA"},
+  "subscriptionGroups": [],
+  "version": {"major": 3, "minor": 0}
+}

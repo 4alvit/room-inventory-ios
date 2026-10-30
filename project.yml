@@ -1,0 +1,99 @@
+name: RoomInventory
+options:
+  bundleIdPrefix: com.alvit
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+packages:
+  InventoryCore:
+    path: Core
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+targets:
+  RoomInventory:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes: ["RoomInventory.storekit"]
+    dependencies:
+      - package: InventoryCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alvit.roominventory
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, ru]
+        CFBundleDisplayName: Room Inventory
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSRequiresIPhoneOS: true
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSCameraUsageDescription: Photograph belongings, serial labels and receipts for your local inventory.
+        ProProductID: com.alvit.roominventory.pro
+        ITSAppUsesNonExemptEncryption: false
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.alvit.roominventory.backup
+            UTTypeDescription: Room Inventory Backup
+            UTTypeConformsTo: [public.json, public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [roominventory]
+              public.mime-type: application/vnd.alvit.roominventory+json
+  RoomInventoryTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AppTests
+      - path: UITests/Support/RecoveryPhotosFixture.swift
+      - path: App/RoomInventory.storekit
+        buildPhase: resources
+    dependencies:
+      - target: RoomInventory
+      - package: InventoryCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alvit.roominventory.tests
+        GENERATE_INFOPLIST_FILE: YES
+  RoomInventoryUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: RoomInventory
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alvit.roominventory.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  RoomInventory:
+    build:
+      targets:
+        RoomInventory: all
+    run:
+      config: Debug
+      storeKitConfiguration: App/RoomInventory.storekit
+    test:
+      config: Debug
+      testPlans:
+        - path: RoomInventory.xctestplan
+          defaultPlan: true
+      targets:
+        - RoomInventoryTests
+        - RoomInventoryUITests
+    archive:
+      config: Release

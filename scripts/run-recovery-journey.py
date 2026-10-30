@@ -557,13 +557,22 @@ class RecoveryRun:
         return value
 
     def observe_derived_service(self, target, event, *, index=None, value=None, preserve_primary=False):
+        self.observe_scan_service(target, "derived_service", event, index=index, value=value,
+                                  preserve_primary=preserve_primary)
+
+    def observe_device_service(self, target, event, *, index=None, value=None, preserve_primary=False):
+        self.observe_scan_service(target, "device_service", event, index=index, value=value,
+                                  preserve_primary=preserve_primary)
+
+    def observe_scan_service(self, target, key, event, *, index=None, value=None, preserve_primary=False):
         """Fixed aggregates of returned service work; no clock or I/O queries.
 
         Missing/incomplete observations are not proof of no work. Only supplied
         completion clock values are sampled; counters never drive supervision.
         """
         try:
-            observation = target.get("derived_service")
+            require(key in ("derived_service", "device_service"), "Invalid service observation key")
+            observation = target.get(key)
             if observation is None:
                 observation = {
                     "quanta_started": 0, "quanta_completed": 0, "polls_returned": 0,
@@ -573,7 +582,7 @@ class RecoveryRun:
                     "terminal_barrier": {"reached": False, "completed": False},
                     "capture_incomplete": False, "saturated": False,
                 }
-                target["derived_service"] = observation
+                target[key] = observation
 
             def increment(fields, key, amount=1):
                 limit = 2**31 - 1
@@ -627,7 +636,7 @@ class RecoveryRun:
                 require(event == "init", "Invalid service observation")
         except BaseException as error:
             try:
-                target["derived_service"]["capture_incomplete"] = True
+                target[key]["capture_incomplete"] = True
             except BaseException as secondary:
                 if (not preserve_primary and not isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))
                         and isinstance(secondary, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
@@ -915,8 +924,8 @@ class RecoveryRun:
                 return
             service_busy = True
             try:
-                if not device_scan:
-                    self.observe_derived_service(record, "quantum_started")
+                observe = self.observe_device_service if device_scan else self.observe_derived_service
+                observe(record, "quantum_started")
                 # The outer loop checked this floor before each read batch.
                 # Repeat it here without recursively entering the resource guard.
                 free = self.disk_usage(self.output.parent).free
@@ -938,12 +947,10 @@ class RecoveryRun:
                     try:
                         data = os.read(key.fileobj.fileno(), 65536)
                     except BlockingIOError:
-                        if not device_scan:
-                            self.observe_derived_service(record, "would_block", index=index)
+                        observe(record, "would_block", index=index)
                         self.tick()
                         continue
-                    if not device_scan:
-                        self.observe_derived_service(record, "read_return", index=index, value=len(data))
+                    observe(record, "read_return", index=index, value=len(data))
                     self.tick()
                     if not data:
                         selector.unregister(key.fileobj)
@@ -958,8 +965,7 @@ class RecoveryRun:
                     drained = True
                 self.tick()
                 polled = process.poll()
-                if not device_scan:
-                    self.observe_derived_service(record, "poll_return")
+                observe(record, "poll_return")
                 self.observe_runtime("poll", record, polled)
                 self.tick()
                 if drained:
@@ -973,8 +979,7 @@ class RecoveryRun:
                 else:
                     service_checkpoints, service_last = 0, self.clock()
                 self.tick()
-                if not device_scan:
-                    self.observe_derived_service(record, "quantum_completed", value=service_last)
+                observe(record, "quantum_completed", value=device_last if device_scan else service_last)
                 if (device_scan or derived_identity is not None) and all(pipe_eof) and polled is not None:
                     require(type(polled) is int and polled in allowed_codes, "Command failed: " + name)
                     if device_scan:
@@ -1000,6 +1005,8 @@ class RecoveryRun:
         try:
             if not self.cleanup_mode:
                 self.observe_derived_service(record, "init")
+                if device_root is not None:
+                    self.observe_device_service(record, "init")
             self.arm(end - 4)
             for suffix in ("stdout", "stderr"):
                 streams.append((logs / (name + "." + suffix)).open("xb", buffering=0))
@@ -1105,6 +1112,11 @@ class RecoveryRun:
             except BaseException:
                 pass
             try:
+                if not self.cleanup_mode and device_root is not None:
+                    self.observe_device_service(record, "incomplete", preserve_primary=True)
+            except BaseException:
+                pass
+            try:
                 self.record_exception_origin(record, error, "command")
             except BaseException:
                 pass
@@ -1176,11 +1188,15 @@ class RecoveryRun:
                         "deadline_elapsed": self.diagnostic_elapsed(sampled=accounting_end),
                         "end_elapsed": None, "status": "STARTED"}
                     self.observe_derived_service(record, "barrier_reached")
+                    if device_root is not None:
+                        self.observe_device_service(record, "barrier_reached")
                     # Group absence does not make simulator/DerivedData roots
                     # quiescent. Always complete a fresh, uncached full guard.
                     self.guard(force=True)
                     self.tick()
                     self.observe_derived_service(record, "barrier_completed")
+                    if device_root is not None:
+                        self.observe_device_service(record, "barrier_completed")
                     record["post_command_accounting"]["end_elapsed"] = self.diagnostic_elapsed()
                     self.tick()
                     record["post_command_accounting"]["status"] = "COMPLETED"
@@ -1195,6 +1211,11 @@ class RecoveryRun:
                         pass
                     try:
                         self.observe_derived_service(record, "incomplete", preserve_primary=True)
+                    except BaseException:
+                        pass
+                    try:
+                        if device_root is not None:
+                            self.observe_device_service(record, "incomplete", preserve_primary=True)
                     except BaseException:
                         pass
                     try:

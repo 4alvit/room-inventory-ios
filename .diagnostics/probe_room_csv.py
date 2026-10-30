@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -21,7 +23,12 @@ MIB = 1024 * 1024
 FINAL_CAP = 8 * MIB - 64 * 1024
 WORK_SECONDS = 16 * 60
 FINALIZE_SECONDS = 40
+TEST_WINDOW_SECONDS = 480
+POST_TEST_RESERVE_SECONDS = 94
 ACTIVE_DEADLINE = None
+LOG_PREDICATE = ('subsystem == "com.apple.ShareSheet" OR '
+                 '(process == "RoomInventory" AND subsystem == "com.apple.foundation.NSItemProvider") OR '
+                 '(process == "sharingd" AND subsystem == "com.apple.PeopleSuggester")')
 
 
 class Tail:
@@ -36,31 +43,244 @@ class Tail:
             self.dropped += excess
 
 
-def stop(process):
-    # The session leader may have exited while descendants still own its pipe.
-    # start_new_session=True makes this group exclusive to our command.
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.poll()
-        return True
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        process.poll()
+def selected_log_event(event):
+    """Mirror the narrow native predicate using fields present in saved ndjson."""
+    path = event.get("processImagePath", "")
+    process = Path(path).name if isinstance(path, str) else ""
+    subsystem = event.get("subsystem")
+    return (subsystem == "com.apple.ShareSheet"
+            or (process == "RoomInventory" and subsystem == "com.apple.foundation.NSItemProvider")
+            or (process == "sharingd" and subsystem == "com.apple.PeopleSuggester"))
+
+
+class EventLog:
+    """Whole selected records only; unrelated traffic cannot evict evidence."""
+    def __init__(self, limit, record_limit=64 * 1024):
+        self.limit, self.record_limit = limit, record_limit
+        self.records, self.pending = deque(), bytearray()
+        self.size = self.dropped = self.dropped_events = 0
+        self.received_bytes = self.selected_events = self.filtered_events = 0
+        self.malformed_lines = self.non_event_lines = 0
+        self.oversized_lines = self.oversized_bytes = 0
+        self.incomplete_lines = self.incomplete_bytes = 0
+        self.skipping = False
+        self.lock = threading.RLock()
+
+    @property
+    def data(self):
+        with self.lock:
+            return b"".join(record for record, _ in self.records)
+
+    def add(self, data):
+        with self.lock:
+            self._add(data)
+
+    def _add(self, data):
+        self.received_bytes += len(data)
+        fragments = data.split(b"\n")
+        for index, fragment in enumerate(fragments):
+            complete = index < len(fragments) - 1
+            piece = fragment + (b"\n" if complete else b"")
+            if self.skipping:
+                self.oversized_bytes += len(piece)
+            else:
+                self.pending.extend(piece)
+                if len(self.pending) > self.record_limit:
+                    self.oversized_lines += 1
+                    self.oversized_bytes += len(self.pending)
+                    self.pending.clear()
+                    self.skipping = True
+            if complete:
+                if not self.skipping:
+                    self._record(bytes(self.pending))
+                self.pending.clear()
+                self.skipping = False
+
+    def _record(self, line):
         try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            return True
-        time.sleep(0.05)
+            event = json.loads(line)
+        except (ValueError, UnicodeError):
+            if line.lstrip().startswith(b"{"):
+                self.malformed_lines += 1
+            else:
+                self.non_event_lines += 1
+            return
+        if not isinstance(event, dict) or not isinstance(event.get("timestamp"), str) or not isinstance(event.get("eventMessage"), str):
+            self.malformed_lines += 1
+            return
+        if not selected_log_event(event):
+            self.filtered_events += 1
+            return
+        self.selected_events += 1
+        self.records.append((line, event["timestamp"]))
+        self.size += len(line)
+        while self.size > self.limit:
+            old, _ = self.records.popleft()
+            self.size -= len(old)
+            self.dropped += len(old)
+            self.dropped_events += 1
+
+    def finish(self):
+        with self.lock:
+            if self.pending or self.skipping:
+                self.incomplete_lines += 1
+                self.incomplete_bytes += len(self.pending)
+                self.pending.clear()
+                self.skipping = False
+
+    def snapshot(self):
+        with self.lock:
+            return self.data, self.metadata()
+
+    def metadata(self):
+        return {"predicate": LOG_PREDICATE, "received_bytes": self.received_bytes,
+                "retained_bytes": self.size, "dropped_bytes": self.dropped,
+                "selected_events": self.selected_events, "filtered_events": self.filtered_events,
+                "retained_events": len(self.records), "dropped_events": self.dropped_events,
+                "malformed_lines": self.malformed_lines, "non_event_lines": self.non_event_lines,
+                "oversized_lines": self.oversized_lines, "oversized_bytes": self.oversized_bytes,
+                "incomplete_lines": self.incomplete_lines, "incomplete_bytes": self.incomplete_bytes,
+                "first_retained_timestamp": self.records[0][1] if self.records else None,
+                "last_retained_timestamp": self.records[-1][1] if self.records else None,
+                "record_limit_bytes": self.record_limit}
+
+
+def collect_log(stream, log, eof, errors):
+    """Drain through EOF; the owning thread only waits its fixed join budget."""
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        while True:
+            data = stream.read1(65536)
+            if not data:
+                eof.set()
+                return
+            log.add(data)
+    except Exception as exc:
+        errors.append(str(exc)[:500])
+
+
+# Reused verbatim from pinned application 060c24a, scripts/run-recovery-journey.py.
+def kill_owned(process, deadline, *, state=None, clock=time.monotonic, sleep=time.sleep, killpg=os.killpg):
+    state = {} if state is None else state
+    state.setdefault("group_state", "unverified")
+    state.setdefault("leader_reaped", False)
+    state.setdefault("returncode", None)
+    state.setdefault("observation_errors", [])
+    start = clock()
+    end = min(deadline, start + 4, state.get("cleanup_deadline_monotonic", float("inf")))
+    state["cleanup_deadline_monotonic"] = end
+    report = {"pgid": process.pid, "signals": [], "errors": [], "success": False, "budget_exhausted": False}
+
+    def error(operation, exception):
+        item = {"operation": operation, "errno": getattr(exception, "errno", None), "error": type(exception).__name__}
+        report["errors"].append(item)
+        state["observation_errors"].append(item)
+
+    def note_known_reap():
+        code = getattr(process, "returncode", None)
+        if code is not None:
+            state["returncode"] = code
+            state["leader_reaped"] = True
+
+    def observe():
+        if clock() >= end:
+            report["budget_exhausted"] = True
+            return False
+        note_known_reap()
+        if not state["leader_reaped"]:
+            try:
+                state["returncode"] = process.wait(timeout=0)
+                state["leader_reaped"] = True
+            except subprocess.TimeoutExpired:
+                pass
+            except OSError as exception:
+                error("leader_reap", exception)
+        if clock() >= end:
+            report["budget_exhausted"] = True
+            return False
+        if state["group_state"] == "absent":
+            return state["leader_reaped"]
+        try:
+            killpg(process.pid, 0)
+            state["group_state"] = "present"
+        except OSError as exception:
+            if exception.errno == errno.ESRCH:
+                state["group_state"] = "absent"
+            else:
+                state["group_state"] = "unknown"
+                error("group_probe", exception)
+        return state["group_state"] == "absent" and state["leader_reaped"]
+
+    def send(sig):
+        # Reaping releases the leader PID; its numeric PGID is no longer a
+        # destructive-signal capability. Unknown observations stay failures.
+        note_known_reap()
+        if (clock() >= end or state["leader_reaped"]
+                or state["group_state"] != "present" or state["observation_errors"]):
+            return
+        try:
+            killpg(process.pid, sig)
+            report["signals"].append(sig.name)
+        except OSError as exception:
+            if exception.errno == errno.ESRCH:
+                state["group_state"] = "absent"
+            else:
+                state["group_state"] = "unknown"
+                error("group_signal_" + sig.name, exception)
+
+    done = observe()
+    for sig, phase_end in ((signal.SIGTERM, min(start + 2, max(start, end - 2))), (signal.SIGKILL, end)):
+        if done or clock() >= end:
+            break
+        send(sig)
+        done = observe()
+        while not done and clock() < phase_end:
+            sleep(min(.05, max(0, phase_end - clock())))
+            done = observe()
+    report.update({key: state[key] for key in ("group_state", "leader_reaped", "returncode")})
+    report["success"] = done and not state["observation_errors"]
+    report["budget_exhausted"] |= not done and clock() >= end
+    report["elapsed_seconds"] = clock() - start
+    return report
+
+
+def stop(process, evidence=None):
+    evidence = {} if evidence is None else evidence
+    state = {}
+    evidence.update(leader_cached_returncode_before=process.returncode,
+                    leader_wait_attempts=0, leader_wait_observations=[],
+                    leader_wait_observations_omitted=0)
+
+    class ObservedLeader:
+        pid = process.pid
+
+        @property
+        def returncode(self):
+            return process.returncode
+
+        def wait(self, timeout):
+            item = {"operation": "Popen.wait", "timeout": timeout,
+                    "at_monotonic": time.monotonic()}
+            evidence["leader_wait_attempts"] += 1
+            try:
+                item["returncode"] = process.wait(timeout=timeout)
+                return item["returncode"]
+            except Exception as exc:
+                item["error"] = error_record("leader_wait", exc)
+                raise
+            finally:
+                if len(evidence["leader_wait_observations"]) < 16:
+                    evidence["leader_wait_observations"].append(item)
+                else:
+                    evidence["leader_wait_observations_omitted"] += 1
+
     try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        return False
-    return True
+        result = kill_owned(ObservedLeader(), time.monotonic() + 4, state=state,
+                            clock=time.monotonic, sleep=time.sleep, killpg=os.killpg)
+        evidence.update(result)
+        return result["success"]
+    finally:
+        evidence.update(partial_state=state,
+                        leader_cached_returncode_after=process.returncode)
 
 
 def tree_size(path):
@@ -92,17 +312,36 @@ def error_record(phase, error):
             "message": str(error)[:512]}
 
 
-def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limit=None, stage=None):
+def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limit=None, stage=None,
+            full_window_reserve=None):
     result = {"stage": stage or str(args[0])[:128], "command": [str(a)[:512] for a in args[:32]],
               "cwd": str(cwd)[:1024], "pid": None, "pgid": None,
               "pgid_basis": "start_new_session=True; group ID equals child PID",
               "exit": None, "timed_out": False, "resource_limited": False,
-              "cleanup_ok": True, "primary_error": None, "cleanup_errors": [], "dropped_bytes": 0}
+              "cleanup_ok": True, "primary_error": None, "cleanup_errors": [], "cleanup_report": {}, "dropped_bytes": 0}
     tail = Tail(cap)
     process = selector = None
+    deadline = None
     phase = "budget"
     try:
-        if ACTIVE_DEADLINE is not None:
+        if full_window_reserve is not None:
+            # This admission is immediately before spawn, after all caller setup.
+            # Its command deadline includes process/selector startup and is never renewed.
+            phase = "admission"
+            now = time.monotonic()
+            remaining = None if ACTIVE_DEADLINE is None else ACTIVE_DEADLINE - now
+            admitted = (remaining is not None and timeout > 0 and full_window_reserve >= 0
+                        and remaining >= timeout + full_window_reserve)
+            result["admission"] = {"admitted": admitted, "checked_at_monotonic": now,
+                                   "work_deadline_monotonic": ACTIVE_DEADLINE,
+                                   "remaining_seconds": remaining, "command_seconds": timeout,
+                                   "post_test_reserve_seconds": full_window_reserve,
+                                   "required_seconds": timeout + full_window_reserve}
+            if not admitted:
+                raise RuntimeError("Insufficient original work budget for full test window and post-test reserve")
+            deadline = now + timeout
+            result["admission"]["command_deadline_monotonic"] = deadline
+        elif ACTIVE_DEADLINE is not None:
             timeout = min(timeout, ACTIVE_DEADLINE - time.monotonic())
         if timeout <= 0:
             result["timed_out"] = True
@@ -114,8 +353,11 @@ def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limi
         phase = "selector_setup"
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + timeout
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         next_size_check = time.monotonic()
+        if full_window_reserve is not None and next_size_check >= deadline:
+            result["timed_out"] = True
         while selector.get_map():
             phase = "storage_limit"
             if directory_limit and time.monotonic() >= next_size_check:
@@ -157,8 +399,8 @@ def command(args, cwd, timeout=30, cap=256 * 1024, on_chunk=None, directory_limi
         try:
             if process is not None:
                 try:
-                    if not stop(process):
-                        result["cleanup_errors"].append(error_record("stop", TimeoutError("Owned process did not stop within its cleanup bound")))
+                    if not stop(process, result["cleanup_report"]):
+                        result["cleanup_errors"].append(error_record("stop", RuntimeError("Owned process cleanup was not verified; see cleanup_report")))
                 except Exception as exc:
                     result["cleanup_errors"].append(error_record("stop", exc))
         finally:
@@ -262,8 +504,8 @@ def main():
               "work_budget_seconds": WORK_SECONDS, "finalize_budget_seconds": FINALIZE_SECONDS}
     logger = None
     log_thread = None
-    log_tail = Tail(5 * MIB)
-    log_stop = threading.Event()
+    log_tail = EventLog(5 * MIB)
+    log_eof = threading.Event()
     log_errors = []
     logger_closed = False
     def archive_log():
@@ -274,34 +516,43 @@ def main():
         alive = logger.poll() is None
         cleanup_errors = []
         cleanup_ok = False
+        cleanup_report = {}
         try:
-            cleanup_ok = stop(logger)
+            cleanup_ok = stop(logger, cleanup_report)
         except Exception as exc:
             cleanup_errors.append(error_record("logger_stop", exc))
         finally:
-            log_stop.set()
             if log_thread:
                 try:
                     log_thread.join(timeout=3)
                 except Exception as exc:
                     cleanup_errors.append(error_record("logger_join", exc))
+            # Latch once before taking the snapshot. A reader that finishes
+            # later must not make an earlier partial snapshot look complete.
+            reader_stopped = log_thread is not None and not log_thread.is_alive()
+            reader_reached_eof = reader_stopped and log_eof.is_set()
             # Closing a buffered pipe while its reader is still blocked can
             # itself block. Retain an explicit failure instead of waiting.
-            if log_thread is None or not log_thread.is_alive():
+            if log_thread is None or reader_stopped:
                 try:
                     logger.stdout.close()
                 except Exception as exc:
                     cleanup_errors.append(error_record("logger_stdout_close", exc))
-        payload = bytes(log_tail.data)
+        if log_thread is None or reader_stopped:
+            log_tail.finish()
+        payload, filter_metadata = log_tail.snapshot()
         (output / "share-system-tail.ndjson").write_bytes(payload)
-        report["system_log"] = {"exit": logger.returncode, "dropped_bytes": log_tail.dropped,
+        report["system_log"] = {"exit": logger.returncode, "dropped_bytes": filter_metadata["dropped_bytes"],
                                 "bytes": len(payload), "parsed_events": event_count(payload),
-                                "reader_stopped": log_thread is not None and not log_thread.is_alive(),
-                                "collector_errors": log_errors, "cleanup_errors": cleanup_errors,
+                                "reader_stopped": reader_stopped,
+                                "reader_reached_eof": reader_reached_eof,
+                                "collector_errors": list(log_errors), "cleanup_errors": cleanup_errors,
+                                "cleanup_report": cleanup_report,
                                 "pid": logger.pid, "pgid": logger.pid,
                                 "cleanup_ok": cleanup_ok and not cleanup_errors,
                                 "alive_until_test_end": alive,
-                                "scope": "test pass, filtered processes/messages; tail on cap"}
+                                "scope": "test pass; exact subsystem/process predicate; whole selected record tail",
+                                "filter": filter_metadata}
     try:
         if (checked(["git", "rev-parse", "HEAD"], source, stage="precheck.source_head") != HEAD
                 or checked(["git", "rev-parse", "HEAD^{tree}"], source, stage="precheck.source_tree") != TREE):
@@ -333,22 +584,11 @@ def main():
         if device.get("state") != "Booted":
             checked(["xcrun", "simctl", "boot", udid], source, 30, stage="prepare.boot")
         checked(["xcrun", "simctl", "bootstatus", udid, "-b"], source, 120, stage="prepare.bootstatus")
-        predicate = ('process == "RoomInventory" OR process CONTAINS[c] "sharing" OR '
-                     'process CONTAINS[c] "share" OR eventMessage CONTAINS "UIActivity" OR '
-                     'eventMessage CONTAINS "com.alvit.roominventory"')
         logger = subprocess.Popen(["xcrun", "simctl", "spawn", udid, "log", "stream", "--style", "ndjson",
-                                   "--level", "debug", "--predicate", predicate], stdout=subprocess.PIPE,
+                                   "--level", "debug", "--predicate", LOG_PREDICATE], stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, start_new_session=True)
-        def collect():
-            try:
-                while not log_stop.is_set():
-                    data = logger.stdout.read1(65536)
-                    if not data:
-                        break
-                    log_tail.add(data)
-            except Exception as exc:
-                log_errors.append(str(exc)[:500])
-        log_thread = threading.Thread(target=collect, daemon=True)
+        log_thread = threading.Thread(target=collect_log,
+                                      args=(logger.stdout, log_tail, log_eof, log_errors), daemon=True)
         log_thread.start()
         pending = bytearray()
         starts = []
@@ -368,16 +608,20 @@ def main():
                                 report["outcomes"][case] = outcome
             if len(pending) > 65536:
                 pending.clear()
-        report["test_started_epoch"] = time.time()
+        report["test_command_requested_epoch"] = time.time()
         report["status"] = "INCOMPLETE_OBSERVATION"
         test, data = command(common + ["-resultBundlePath", str(xcresult), "-only-testing:RoomInventoryUITests/LocalizationUITests",
-                                      "test-without-building"], source, 360, 768 * 1024, observe,
-                             directory_limit=(xcresult, 192 * MIB), stage="test")
+                                      "test-without-building"], source, TEST_WINDOW_SECONDS, 768 * 1024, observe,
+                             directory_limit=(xcresult, 192 * MIB), stage="test",
+                             full_window_reserve=POST_TEST_RESERVE_SECONDS)
         report["test_finished_epoch"] = time.time()
         report["commands"]["test"] = test
         report["case_start_sequence"] = starts
         (output / "test-tail.log").write_bytes(data)
         archive_log()
+        if not test.get("admission", {}).get("admitted", False):
+            report["status"] = "PREFLIGHT_FAILED_INSUFFICIENT_TEST_BUDGET"
+            raise RuntimeError("Tests not launched: full test window and reserve did not fit original work deadline")
         if test["primary_error"] is not None or not test["cleanup_ok"]:
             raise RuntimeError("Test command failed during execution or cleanup; see retained command details")
         summary_result, summary_data = command(["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(xcresult), "--compact"], source, 30, 128 * 1024, stage="summary")
@@ -437,8 +681,11 @@ def main():
                         "png": (output / "share.png").is_file(),
                         "accessibility": (output / "share-ax.txt").is_file(),
                         "system_log": bool(log.get("parsed_events") and log.get("reader_stopped")
+                                           and log.get("reader_reached_eof")
                                            and log.get("alive_until_test_end") and log.get("dropped_bytes") == 0
-                                           and not log.get("collector_errors") and log.get("cleanup_ok")),
+                                           and not log.get("collector_errors") and log.get("cleanup_ok")
+                                           and not any(log.get("filter", {}).get(key, 0) for key in
+                                                       ("malformed_lines", "oversized_lines", "incomplete_lines"))),
                         "source_unchanged": report["source_unchanged_after"]}
         completeness["overall"] = all(completeness.values())
         report["evidence_complete"] = completeness

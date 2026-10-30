@@ -36,12 +36,16 @@ class ProbeContracts(unittest.TestCase):
         self.assertEqual(probe.event_count(b'Filtering the log data\n{"eventMessage":"no timestamp"}'), 0)
         self.assertEqual(probe.event_count(b'header\n{"timestamp":"now","eventMessage":"hello"}\n'), 1)
 
-    def test_exited_leader_does_not_bypass_owned_group_cleanup(self):
-        process = mock.Mock(pid=12345)
-        process.poll.return_value = 0
-        with mock.patch.object(probe.os, "killpg", side_effect=[None, ProcessLookupError]) as kill:
-            probe.stop(process)
-        self.assertEqual(kill.call_args_list, [mock.call(12345, probe.signal.SIGTERM), mock.call(12345, 0)])
+    def test_exited_leader_still_requires_group_absence_without_signals(self):
+        process = mock.Mock(pid=12345, returncode=0)
+        evidence = {}
+        with mock.patch.object(probe.os, "killpg", side_effect=ProcessLookupError(errno.ESRCH, "absent")) as kill:
+            self.assertTrue(probe.stop(process, evidence))
+        self.assertEqual(kill.call_args_list, [mock.call(12345, 0)])
+        self.assertTrue(evidence["leader_reaped"])
+        self.assertEqual(evidence["group_state"], "absent")
+        self.assertEqual(evidence["leader_cached_returncode_before"], 0)
+        process.wait.assert_not_called()
 
     def test_tail_is_bounded_and_accounts_for_all_omitted_bytes(self):
         tail = probe.Tail(5)

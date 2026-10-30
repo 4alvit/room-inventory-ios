@@ -58,47 +58,106 @@ final class LocalizationUITests: XCTestCase {
         XCTAssertEqual(headers.count, 0, "A system share header must not preexist the CSV action")
         XCTAssertEqual(closeButtons.count, 0, "A system share Close must not preexist the CSV action")
         tap(app.buttons["Таблица предметов · CSV"])
-        // A container is not itself an action. Prove the exact CSV's real system
-        // surface with its interactive Close, then exercise dismissal within
-        // the same finite 15-second share phase.
-        let shareDeadline = ProcessInfo.processInfo.systemUptime + 15
+        // One wall-clock budget starts after the CSV action returns. Snapshot
+        // and live hit-testing time still count; diagnostics never renew it.
+        let phase = CSVSharePhaseTiming(start: ProcessInfo.processInfo.systemUptime)
+        var timing: [String: Any] = ["start_uptime": phase.start, "deadline_uptime": phase.deadline]
+        var readyPolls = 0
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            guard headers.count == 1, closeButtons.count == 1 else { return false }
-            let header = headers.element(boundBy: 0)
-            let close = closeButtons.element(boundBy: 0)
-            let captions = header.descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Inventory-localized.csv"))
-            let caption = captions.firstMatch
-            guard caption.exists else { return false }
-            return header.exists && close.exists && close.isEnabled && close.isHittable
-                && !header.frame.isEmpty && app.frame.contains(header.frame)
-                && header.frame.contains(close.frame) && !caption.frame.isEmpty
-                && header.frame.contains(caption.frame)
+            readyPolls += 1
+            guard phase.permitsAction(at: ProcessInfo.processInfo.systemUptime),
+                  self.csvShareIsReady(app: app, headers: headers, closeButtons: closeButtons) else { return false }
+            return phase.permitsAction(at: ProcessInfo.processInfo.systemUptime)
         }, object: nil)
-        let sharePresented = XCTWaiter.wait(for: [ready], timeout: max(0, shareDeadline - ProcessInfo.processInfo.systemUptime)) == .completed
-        if !sharePresented { keepShareFailureEvidence(app: app) }
+        let readyResult = XCTWaiter.wait(for: [ready],
+            timeout: max(0, phase.remaining(at: ProcessInfo.processInfo.systemUptime)))
+        let readyFinished = ProcessInfo.processInfo.systemUptime
+        timing["ready_finished_uptime"] = readyFinished
+        timing["ready_waiter_result"] = String(describing: readyResult)
+        timing["ready_poll_count"] = readyPolls
+        let sharePresented = readyResult == .completed && phase.permitsAction(at: readyFinished)
+        if !sharePresented {
+            emitSharePhaseTiming(timing, result: "readiness_failed")
+            keepShareFailureEvidence(app: app)
+        }
         XCTAssertTrue(sharePresented, "Expected the exact CSV in one visible system share header with one interactive Close")
         guard sharePresented else { return }
-        keepEvidence("ru-csv-share", app: app)
-        let beforeCloseRemaining = shareDeadline - ProcessInfo.processInfo.systemUptime
-        if beforeCloseRemaining <= 0 { keepShareFailureEvidence(app: app) }
-        XCTAssertGreaterThan(beforeCloseRemaining, 0, "CSV share phase expired before Close")
-        guard beforeCloseRemaining > 0 else { return }
+
+        // No screenshot/debugDescription between readiness and the real Close.
+        let beforeClose = ProcessInfo.processInfo.systemUptime
+        timing["before_close_uptime"] = beforeClose
+        guard phase.permitsAction(at: beforeClose) else {
+            emitSharePhaseTiming(timing, result: "expired_before_close")
+            keepShareFailureEvidence(app: app)
+            XCTFail("CSV share phase expired before Close")
+            return
+        }
         closeButtons.element(boundBy: 0).tap()
+        let afterClose = ProcessInfo.processInfo.systemUptime
+        timing["after_close_uptime"] = afterClose
+        var returnPolls = 0
         let returned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            guard headers.count == 0, closeButtons.count == 0 else { return false }
-            let export = app.buttons["inventory.exportMenu"]
-            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "RU Test Home"))
-            return export.exists && export.isEnabled && export.isHittable
-                && home.count == 1 && home.element(boundBy: 0).isHittable
+            returnPolls += 1
+            guard phase.permitsAction(at: ProcessInfo.processInfo.systemUptime),
+                  self.inventoryHasReturned(app: app, headers: headers, closeButtons: closeButtons) else { return false }
+            return phase.remaining(at: ProcessInfo.processInfo.systemUptime) >= 0
         }, object: nil)
-        let remaining = shareDeadline - ProcessInfo.processInfo.systemUptime
-        let dismissed = remaining > 0
-            && XCTWaiter.wait(for: [returned], timeout: remaining) == .completed
-            && ProcessInfo.processInfo.systemUptime <= shareDeadline
+        let returnStarted = ProcessInfo.processInfo.systemUptime
+        let remaining = phase.remaining(at: returnStarted)
+        let returnResult: XCTWaiter.Result? = remaining > 0
+            ? XCTWaiter.wait(for: [returned], timeout: remaining) : nil
+        let returnFinished = ProcessInfo.processInfo.systemUptime
+        let dismissed = phase.acceptsReturn(waitStartedAt: returnStarted,
+            waiterCompleted: returnResult == .completed, finishedAt: returnFinished)
+        timing["return_started_uptime"] = returnStarted
+        timing["return_remaining_seconds"] = remaining
+        timing["return_waiter_result"] = returnResult.map { String(describing: $0) } ?? "not_started"
+        timing["return_finished_uptime"] = returnFinished
+        timing["return_poll_count"] = returnPolls
+        emitSharePhaseTiming(timing, result: dismissed ? "returned_in_time" : "return_failed")
         if !dismissed { keepShareFailureEvidence(app: app) }
         XCTAssertTrue(dismissed, "Real CSV Close must dismiss the sheet and return to the saved inventory within the same share phase")
+        guard dismissed else { return }
+        // This is evidence of the returned inventory, not of an open share sheet.
+        keepEvidence("ru-csv-returned", app: app)
         app.terminate()
+    }
+
+    // Keep XCTest's original matching rules and firstMatch ordering. Fresh
+    // snapshots turn repeated attributes of those exact matches into local reads.
+    private func csvShareIsReady(app: XCUIApplication, headers: XCUIElementQuery,
+                                 closeButtons: XCUIElementQuery) -> Bool {
+        guard headers.count == 1, closeButtons.count == 1 else { return false }
+        let headerElement = headers.element(boundBy: 0)
+        let closeElement = closeButtons.element(boundBy: 0)
+        let captionElement = headerElement.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Inventory-localized.csv")).firstMatch
+        guard let header = try? headerElement.snapshot(),
+              let close = try? closeElement.snapshot(),
+              let caption = try? captionElement.snapshot() else { return false }
+        let appFrame = app.frame
+        return close.isEnabled && !header.frame.isEmpty && appFrame.contains(header.frame)
+            && header.frame.contains(close.frame) && !caption.frame.isEmpty
+            && header.frame.contains(caption.frame) && closeElement.isHittable
+    }
+
+    private func inventoryHasReturned(app: XCUIApplication, headers: XCUIElementQuery,
+                                      closeButtons: XCUIElementQuery) -> Bool {
+        guard headers.count == 0, closeButtons.count == 0 else { return false }
+        let export = app.buttons["inventory.exportMenu"]
+        let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "RU Test Home"))
+        guard let exportSnapshot = try? export.snapshot(), exportSnapshot.isEnabled,
+              home.count == 1 else { return false }
+        return export.isHittable && home.element(boundBy: 0).isHittable
+    }
+
+    private func emitSharePhaseTiming(_ timing: [String: Any], result: String) {
+        var record = timing
+        record["category"] = "share-phase-timing"
+        record["result"] = result
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+              data.count <= 4_096, let text = String(data: data, encoding: .utf8) else { return }
+        print("ROOM_LOCALIZATION_DIAGNOSTIC " + text)
     }
 
     private func application(languages: String) -> XCUIApplication {

@@ -54,10 +54,13 @@ final class RoomInventoryUITests: XCTestCase {
         tap(field)
         field.typeText("Unsaved synthetic home")
         tap(app.buttons["entry.cancel"])
-        tap(app.buttons["Keep editing"])
+        let confirmation = app.alerts["Discard unsaved changes?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 10))
+        XCTAssertTrue(confirmation.buttons["Discard changes"].exists)
+        tap(confirmation.buttons["Keep editing"])
         XCTAssertEqual(field.value as? String, "Unsaved synthetic home")
         tap(app.buttons["entry.cancel"])
-        tap(app.buttons["Discard changes"])
+        tap(confirmation.buttons["Discard changes"])
         XCTAssertTrue(app.buttons["inventory.addFirstHome"].waitForExistence(timeout: 5))
         XCTAssertFalse(record("Unsaved synthetic home", in: app).exists)
 
@@ -68,7 +71,7 @@ final class RoomInventoryUITests: XCTestCase {
         tap(field)
         field.typeText(" changed")
         tap(app.buttons["entry.cancel"])
-        tap(app.buttons["Discard changes"])
+        tap(confirmation.buttons["Discard changes"])
         XCTAssertTrue(record(homeName, in: app).waitForExistence(timeout: 5))
         XCTAssertFalse(record(homeName + " changed", in: app).exists)
     }

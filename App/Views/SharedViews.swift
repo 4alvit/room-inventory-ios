@@ -55,7 +55,7 @@ struct NameEntrySheet: View {
                 }
             }
             .interactiveDismissDisabled(saving || name != initialName)
-            .confirmationDialog(UIL10n.text("Discard unsaved changes?"), isPresented: $discarding, titleVisibility: .visible) {
+            .alert(UIL10n.text("Discard unsaved changes?"), isPresented: $discarding) {
                 Button(UIL10n.text("Discard changes"), role: .destructive) { dismiss() }
                 Button(UIL10n.text("Keep editing"), role: .cancel) {}
             }

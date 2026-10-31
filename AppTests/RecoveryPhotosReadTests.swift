@@ -72,6 +72,33 @@ final class RecoveryPhotosReadTests: XCTestCase {
         }
     }
 
+    func testObservedEnglishAuthorizationPeriodKeepsRunnerAndFullAccessChecks() {
+        let name = "RoomInventoryUITests-Runner"
+        let usage = "Access is necessary for automated testing."
+        let title = "“\(name)” would like full access to your Photo Library."
+        let buttons = ["Select Photos…", "Allow Full Access", "Don’t Allow"]
+        XCTAssertTrue(RecoveryPhotosFixture.permitsAuthorizationPrompt(
+            texts: [title, usage], buttons: buttons, runnerName: name, usage: usage, alertCount: 1))
+        XCTAssertTrue(RecoveryPhotosFixture.permitsAuthorizationPrompt(
+            texts: [title.replacingOccurrences(of: ".", with: ""), usage], buttons: buttons,
+            runnerName: name, usage: usage, alertCount: 1))
+        for (texts, controls) in [
+            ([title.replacingOccurrences(of: name, with: "Other App"), usage], buttons),
+            ([title.replacingOccurrences(of: "full", with: "limited"), usage], buttons),
+            ([title, "Unrelated purpose"], buttons),
+            ([title + ".", usage], buttons),
+            ([title + " Extra", usage], buttons),
+            ([title + "\nUnrelated request", usage], buttons),
+            ([title, usage], ["Select Photos…", "Don’t Allow"]),
+            ([title, usage], ["Allow", "Don’t Allow"]),
+            (["«\(name)» запрашивает полный доступ к вашим фото.", usage], buttons),
+            ([title, usage], ["Разрешить полный доступ", "Не разрешать"])
+        ] {
+            XCTAssertFalse(RecoveryPhotosFixture.permitsAuthorizationPrompt(
+                texts: texts, buttons: controls, runnerName: name, usage: usage, alertCount: 1))
+        }
+    }
+
     func testBoundedChunksFinishOnceAndLateCallbacksCannotChangeBytes() throws {
         let start = ContinuousClock().now
         let read = PhotoFixtureRead(limit: 3, deadline: start.advanced(by: .seconds(20)))

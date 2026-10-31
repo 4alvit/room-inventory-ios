@@ -182,7 +182,7 @@ final class RecoveryPhotosFixture {
               buttons.filter({ $0 == "Allow Full Access" }).count == 1,
               buttons.contains("Don’t Allow") || buttons.contains("Don't Allow") else { return false }
         let name = NSRegularExpression.escapedPattern(for: runnerName)
-        let title = "^[“\"]" + name + "[”\"] Would Like (?:(?:Full )?Access to|to Access) (?:Your )?(?:Photos|Photo Library)$"
+        let title = "^[“\"]" + name + "[”\"] Would Like (?:(?:Full )?Access to|to Access) (?:Your )?(?:Photos|Photo Library)\\.?$"
         return texts.filter({ $0.range(of: title, options: [.regularExpression, .caseInsensitive]) != nil }).count == 1
     }
 

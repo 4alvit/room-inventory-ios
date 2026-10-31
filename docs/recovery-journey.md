@@ -201,6 +201,10 @@ read/write access through PhotoKit. That asynchronous request returns before UI
 interaction. Only one system alert naming the exact runner, declaring the actual
 usage message and offering the enabled/hittable Allow Full Access control is
 accepted. The callback and final status must both report full authorization.
+The English title accepts one optional terminal period, as observed in the
+Xcode 26.3 recovery run. This does not broaden runner identity, usage text or
+full-access/deny button checks; unrelated, limited and unrecognized localized
+prompts still fail closed. The title correction alone is not journey acceptance.
 If the request completes authorized without any prompt being observed or tapped,
 the full callback and fresh status are accepted with both prompt flags false and
 empty prompt fields. This proves authorization without claiming UI interaction.

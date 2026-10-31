@@ -9,7 +9,7 @@ first execution needs a separately approved source commit and CI cohort.
 The existing callable `ci.yml` adds one `recovery` job after `ios`. The job uses
 the standard `macos-15` runner class, read-only repository permissions
 and the same pinned checkout, Python and artifact actions. All four existing Mac
-jobs require an actual `arm64` host and Xcode 16.4 build 16F6; they do not fall
+jobs require an actual `arm64` host and Xcode 26.3 build 17C529; they do not fall
 back to another runner or toolchain. Recovery retains its 24 GiB admission floor. The PR preview now
 needs both `ios` and `recovery`. A failed recovery job therefore fails the existing
 required reusable validation; the generated Quality gate is unchanged.
@@ -39,6 +39,29 @@ same validation through `release-pipeline.yml`; its release build may run in
 parallel with checks, while publication remains behind its existing gates. Manual
 stable promotion retains its separate checked-RC path. Release contracts, CodeQL,
 action pins and publication permissions are not weakened.
+
+## Toolchain qualification
+
+The 2026-10-31 Core run on Xcode 16.4 reported an expired **StoreKit Testing in
+Xcode** certificate (`NSOSStatusErrorDomain -67818`), followed by
+`failedToVerifyCertificateChain` during the catalog-failure test's purchase setup.
+The app correctly refused an unverified transaction. This is separate from the
+catalog-failure and refund assertions, which kept their original expectations.
+
+The four Mac jobs now select Xcode 26.3 build 17C529 from the same `macos-15`
+ARM64 runner class. Its availability is recorded in the
+[hosted image inventory](https://github.com/actions/runner-images/blob/macos-15-arm64/20261028.0489/images/macos/macos-15-arm64-Readme.md).
+[Apple's release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_3-release-notes)
+list macOS 15.6 or newer and the iOS 26.2 SDK. Recovery still selects an installed
+Simulator runtime matching the selected SDK; an older SDK/runtime combination
+is not silently substituted. The app's minimum deployment target is unchanged.
+
+This is a supported toolchain update to test the certificate failure, not proof
+that this Xcode version fixes it. A fresh exact-source run must pass the existing
+native purchase, refund, pending approval, UI, recovery, and packaging checks.
+Source-contract tests establish only coherent configuration and guard behavior.
+Neither receipt verification nor timing/assertion requirements are relaxed;
+changing the clock or trusting an unverified transaction is not a recovery step.
 
 ## Source and platform identity
 

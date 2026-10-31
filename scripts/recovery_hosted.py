@@ -37,7 +37,7 @@ PROFILE_PATH = "scripts/recovery-hosted-profile.json"
 POLICY = {
     "schema_version": 1, "repository": "4alvit/room-inventory-ios", "job_id": "recovery",
     "runner_label": "macos-15", "image_os": "macos15", "workflow_path": ".github/workflows/ci.yml",
-    "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 16.4\nBuild version 16F6",
+    "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 26.3\nBuild version 17C529",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
     "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,

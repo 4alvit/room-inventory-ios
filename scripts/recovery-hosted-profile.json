@@ -27,5 +27,5 @@
   "output_cap_bytes": 1073741824,
   "runner_arch": "ARM64",
   "process_arch": "arm64",
-  "xcode_version": "Xcode 16.4\nBuild version 16F6"
+  "xcode_version": "Xcode 26.3\nBuild version 17C529"
 }

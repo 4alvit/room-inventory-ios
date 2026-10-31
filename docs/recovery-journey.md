@@ -219,7 +219,9 @@ again. A per-change system confirmation must carry the exact removal count in
 its complete first-line deletion title. For the exact owned
 `com.alvit.roominventory.uitests.xctrunner` / `RoomInventoryUITests-Runner` pair,
 the title may name that runner or the fixed `com.apple.XCTRunner` carrier observed
-on the admitted iOS 18.5 Simulator. The carrier label alone is not identity proof:
+on the previously admitted iOS 18.5 Simulator. The Xcode 26.3 / iOS 26.2
+qualification must satisfy the same guards; this earlier observation does not
+qualify the new runtime. The carrier label alone is not identity proof:
 installation ACK, actual Simulator/runner binding, full authorization, unchanged
 fixture hash and exact removed asset IDs remain mandatory before the request.
 Foreign, duplicate, embedded or count-mismatched titles fail. The one SpringBoard

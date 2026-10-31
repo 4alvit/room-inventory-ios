@@ -34,7 +34,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         checkout = self.job["steps"][0]
         self.assertEqual(checkout["with"], {"persist-credentials": "false", "ref": "${{ github.sha }}"})
         self.assertEqual(self.job["env"], {
-            "DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
+            "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
             "RECOVERY_TESTED_COMMIT": "${{ needs.ios.outputs.tested-commit }}",
             "RECOVERY_TESTED_TREE": "${{ needs.ios.outputs.tested-tree }}",
         })
@@ -70,10 +70,10 @@ class RecoveryWorkflowTests(unittest.TestCase):
         ordinary = (self.ci["jobs"]["ios"], codeql["jobs"]["swift"], release["jobs"]["package"])
         self.assertEqual(self.profile["runner_arch"], "ARM64")
         self.assertEqual(self.profile["process_arch"], "arm64")
-        self.assertEqual(self.profile["xcode_version"], "Xcode 16.4\nBuild version 16F6")
+        self.assertEqual(self.profile["xcode_version"], "Xcode 26.3\nBuild version 17C529")
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
-            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_16.4.app/Contents/Developer")
+            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.3.app/Contents/Developer")
         guards = []
         for job in ordinary:
             steps = job["steps"]

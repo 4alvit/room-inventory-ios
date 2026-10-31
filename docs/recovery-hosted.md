@@ -246,3 +246,47 @@ paths, earlier admission records, local grants and historical acceptance packets
 are not inputs. A completed hosted acceptance requires the exact reviewed source,
 successful native scenario and cleanup, a complete retained packet and successful
 upload, followed by independent artifact and visual review.
+
+## Native inventory failure diagnostics
+
+If the one `simctl list --json` inventory command fails, the adapter may read
+already recorded native logs once. This can expose CoreSimulator service/IPC
+errors that Python selector progress cannot explain. It does not retry the
+inventory, attach to a PID, sample or suspend a process, reset a simulator,
+restart a service, install a runtime, or increase a deadline.
+
+The query is permitted only after the original command reports its owned group
+absent and its leader reaped, with no cleanup errors, and at least 14 seconds
+remaining in the original 120-second discovery envelope. Cancellation skips
+the query. The original inventory keeps its 90-second cap, including its
+four-second cleanup reserve. The optional log command gets ten seconds using
+the existing command owner (six seconds of work and four for cleanup); parsing
+is bounded by the original deadline and a 14-second diagnostic window. That
+same non-renewing subdeadline covers preparation and command cleanup; slow
+preparation skips the query if its full ten-second cap no longer fits. An
+unconfirmed cleanup, exhausted budget, low disk floor, or invalid wall-clock
+window makes the diagnostic unavailable. The original inventory failure is
+preserved even if the log query succeeds, fails, or is interrupted.
+
+The fixed `/usr/bin/log show` query selects only `simctl`, CoreSimulatorService,
+and CoreSimulator subsystem events between the inventory's wall-clock start
+and its completed cleanup. The output uses UTC JSON. A fresh empty `HOME`
+prevents an inherited `.logrc` from changing the log source. No elevation or
+new access is requested. Log access on a hosted image may be unavailable;
+empty results do not prove an absence of native errors.
+
+Raw stdout/stderr are bounded in memory and never written to published files.
+The existing command receipt records byte counts and cleanup state. The
+`inventory_native_log` field in `preflight/adapter-result.json` contains only
+fixed source categories, normalized timestamps, allowlisted vocabulary and
+error domains, bounded numeric codes, counters and completeness state. It
+does not contain raw messages, paths, arbitrary subsystem/category strings,
+environment values, or exception text. Input is limited to 4 MiB, depth 16,
+4,096 events and 128 retained signals within 64 KiB. Malformed, truncated or
+oversized responses remain unavailable.
+
+`OBSERVED` and `NO_MATCHING_SIGNALS` describe a complete bounded query response,
+not complete system logging or successful recovery. `native_cause` remains
+`UNKNOWN`; returned error vocabulary is evidence for review, not proof of
+causation. Native stack sampling is not included: a delayed PID-based sampler
+whose cleanup cannot be proved could otherwise inspect a reused PID.

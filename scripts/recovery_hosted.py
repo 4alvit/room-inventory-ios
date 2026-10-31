@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -463,6 +464,199 @@ class Discovery:
         return bytes(buffers[0])
 
 
+NATIVE_LOG_LIMIT = 4 * controller.MIB
+NATIVE_LOG_PREDICATE = ('process == "simctl" OR process == "com.apple.CoreSimulator.CoreSimulatorService" '
+                        'OR subsystem BEGINSWITH "com.apple.CoreSimulator"')
+NATIVE_LOG_TERMS = ("connection invalid", "connection interrupted", "timed out", "timeout", "refused",
+                    "unavailable", "failed", "error", "permission", "denied", "registration", "migration")
+NATIVE_LOG_DOMAINS = ("NSPOSIXErrorDomain", "NSCocoaErrorDomain", "NSMachErrorDomain",
+                      "NSOSStatusErrorDomain", "com.apple.CoreSimulator.SimError")
+
+
+class NativeLogUnavailable(Exception):
+    """Only source-owned reason codes are retained, never native error text."""
+
+
+def log_require(value, code):
+    if not value:
+        raise NativeLogUnavailable(code)
+
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def sanitize_native_log(raw, begin, finish, check):
+    """Parse a bounded complete response; no raw native string is returned."""
+    log_require(type(raw) is bytes and len(raw) <= NATIVE_LOG_LIMIT, "response_byte_cap")
+    depth, quoted, escaped = 0, False, False
+    for offset, char in enumerate(raw):
+        if offset % 65536 == 0:
+            check()
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == 92:
+                escaped = True
+            elif char == 34:
+                quoted = False
+        elif char == 34:
+            quoted = True
+        elif char in (91, 123):
+            depth += 1
+            log_require(depth <= 16, "response_depth_cap")
+        elif char in (93, 125):
+            depth -= 1
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            log_require(key not in result, "duplicate_json_key")
+            result[key] = value
+        return result
+    def constant(_):
+        raise NativeLogUnavailable("invalid_json_number")
+    def number(value):
+        result = float(value)
+        log_require(math.isfinite(result), "invalid_json_number")
+        return result
+    try:
+        events = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                            parse_constant=constant, parse_float=number)
+    except (ValueError, UnicodeError, RecursionError):
+        raise NativeLogUnavailable("invalid_json") from None
+    check()
+    log_require(isinstance(events, list) and len(events) <= 4096, "event_count_or_shape")
+    signals, outside = [], 0
+    for event in events:
+        check()
+        log_require(isinstance(event, dict), "invalid_event")
+        process, subsystem = event.get("processImagePath", ""), event.get("subsystem", "")
+        log_require(isinstance(process, str) and len(process) <= 4096
+                    and isinstance(subsystem, str) and len(subsystem) <= 256, "invalid_source")
+        name = process.rsplit("/", 1)[-1]
+        source = ("simctl" if name == "simctl" else "coresimulator_service"
+                  if name == "com.apple.CoreSimulator.CoreSimulatorService" else "coresimulator_subsystem"
+                  if subsystem.startswith("com.apple.CoreSimulator") else None)
+        if source is None:
+            continue
+        stamp, message = event.get("timestamp"), event.get("eventMessage")
+        log_require(isinstance(stamp, str) and len(stamp) <= 64
+                    and isinstance(message, str) and len(message) <= 256 * 1024, "invalid_event_fields")
+        try:
+            parsed = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            log_require(parsed.tzinfo is not None, "invalid_timestamp")
+            epoch = parsed.timestamp()
+        except (ValueError, OverflowError):
+            raise NativeLogUnavailable("invalid_timestamp") from None
+        if not begin <= epoch <= finish:
+            outside += 1
+            continue
+        terms = [term for term in NATIVE_LOG_TERMS if re.search(r"\b" + re.escape(term) + r"\b", message.lower())]
+        domains = [domain for domain in NATIVE_LOG_DOMAINS if domain in message]
+        codes = [int(value) for value in re.findall(r"\b(?:Code|code|errno)\s*[=:]\s*(-?\d{1,6})(?!\d)", message)[:8]]
+        if not (terms or domains or codes):
+            continue
+        log_require(len(signals) < 128, "signal_count_cap")
+        signals.append({"source": source, "timestamp": parsed.astimezone(dt.timezone.utc).isoformat(),
+                        "terms": terms, "error_domains": domains, "numeric_codes": codes})
+    result = {"returned_event_count": len(events), "outside_window_count": outside, "signals": signals}
+    log_require(len(json.dumps(result).encode()) <= 64 * 1024, "signal_byte_cap")
+    check()
+    return result
+
+
+def diagnose_inventory_failure(discovery, context, command_index, begin, wall_clock):
+    """One post-failure log read, only after the original owned group is absent."""
+    if "inventory_native_log" in context:
+        return
+    row = {"schema_version": 1, "status": "UNAVAILABLE", "complete": False, "native_cause": "UNKNOWN",
+           "raw_text_retained": False, "query_attempted": False,
+           "coverage": "returned_query_events_only", "reason": "preconditions_not_met"}
+    context["inventory_native_log"] = row
+    raw, parent_alarm = None, None
+    try:
+        log_require(len(discovery.records) == command_index + 1, "inventory_record_missing")
+        original = discovery.records[command_index]
+        log_require(original.get("name") == "simulator-inventory"
+                    and original.get("args") == ["xcrun", "simctl", "list", "--json"]
+                    and original.get("primary_error") is not None, "inventory_record_mismatch")
+        cleanup = original.get("cleanup", {})
+        log_require(cleanup.get("success") is True and cleanup.get("leader_reaped") is True
+                    and cleanup.get("group_state") == "absent" and not cleanup.get("errors")
+                    and not discovery.cleanup_errors, "inventory_cleanup_unconfirmed")
+        discovery.check()
+        parent_alarm = discovery.alarm
+        now = parent_alarm.clock()
+        log_require(parent_alarm.end - now >= 14, "insufficient_remaining_budget")
+        operation_end = now + 14
+        # Preparation, child work/cleanup and parsing share one non-renewing
+        # subdeadline. Discovery.command must not rearm the longer outer alarm.
+        discovery.alarm = Alarm(operation_end, parent_alarm.clock)
+        discovery.alarm.arm()
+        finish = wall_clock()
+        timing = original.get("timing", {})
+        elapsed = (timing.get("finish", float("nan")) - timing.get("start", float("nan")))
+        log_require(finite_number(begin) and finite_number(finish) and finite_number(elapsed)
+                    and 0 <= finish - begin <= 120 and 0 <= elapsed <= 90
+                    and abs((finish - begin) - elapsed) <= 2, "clock_window_unconfirmed")
+        date = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+0000")
+        # A fresh HOME prevents ~/.logrc from adding an archive/directory option.
+        home = discovery.output / "native-log-home"
+        home.mkdir(mode=0o700)
+        discovery.check()
+        log_require(operation_end - discovery.alarm.clock() >= 10, "insufficient_observation_budget")
+        row.update(window_start=dt.datetime.fromtimestamp(begin, dt.timezone.utc).isoformat(),
+                   window_end=dt.datetime.fromtimestamp(finish, dt.timezone.utc).isoformat())
+        args = ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + str(home),
+                "LANG=C", "LC_ALL=C", "/usr/bin/log", "show", "--style", "json", "--timezone", "UTC",
+                "--no-pager", "--info", "--debug", "--start", date(math.floor(begin)),
+                "--end", date(math.ceil(finish)), "--predicate", NATIVE_LOG_PREDICATE]
+        row["query_attempted"] = True
+        raw = discovery.command(args, "inventory-native-log", 10, retain_output=False)
+        discovery.alarm.arm(operation_end)
+        def check():
+            discovery.check()
+            log_require(discovery.alarm.clock() < operation_end, "observation_deadline")
+        summary = sanitize_native_log(raw, begin, finish, check)
+        row.update(summary, status="OBSERVED" if summary["signals"] else "NO_MATCHING_SIGNALS",
+                   complete=True, reason="complete_response")
+    except BaseException as error:
+        # Diagnostic errors cannot replace the original inventory failure.
+        # No further native work follows this path, including interruption.
+        row.update(status="UNAVAILABLE", complete=False,
+                   reason=str(error) if isinstance(error, NativeLogUnavailable) else
+                   "interrupted" if not isinstance(error, Exception) else "query_or_parse_unavailable")
+    finally:
+        raw = None
+        if parent_alarm is not None:
+            discovery.alarm = parent_alarm
+        try:
+            discovery.alarm.arm()  # Restore only the unchanged discovery end.
+        except BaseException:
+            pass
+
+
+def inventory_with_diagnostics(discovery, context, *, wall_clock=None):
+    wall_clock = wall_clock or time.time
+    try:
+        begin = wall_clock()
+    except Exception:
+        begin = None  # An unavailable diagnostic clock cannot prevent inventory.
+    command_index = len(discovery.records)
+    try:
+        return discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 90)
+    except Exception:
+        try:
+            diagnose_inventory_failure(discovery, context, command_index, begin, wall_clock)
+        except BaseException:
+            # Also preserve the primary error if collection is interrupted
+            # before its own guarded body or during its final alarm restore.
+            context["inventory_native_log"] = {"schema_version": 1, "status": "UNAVAILABLE",
+                                                "complete": False, "native_cause": "UNKNOWN",
+                                                "raw_text_retained": False, "reason": "diagnostic_interrupted"}
+        raise
+
+
 def version(value):
     require(isinstance(value, str) and re.fullmatch(r"\d+\.\d+(?:\.\d+)?", value), "Invalid SDK/runtime version", Failure)
     return tuple(int(p) for p in value.split(".")) + ((0,) if value.count(".") == 1 else ())
@@ -645,7 +839,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             xcode_version = discovery.command(["xcodebuild", "-version"], "xcode-version", 10).decode().strip()
             require(xcode_version == profile["xcode_version"], "Installed Xcode version/build differs", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
-            inventory = json.loads(discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 90))
+            inventory = json.loads(inventory_with_diagnostics(discovery, context))
             selection = select_runtime(inventory, sdk)
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)

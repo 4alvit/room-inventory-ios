@@ -22,6 +22,7 @@ final class RecoveryJourneyEvidence {
     private var issues: [String] = []
     private var outcome = "running"
     private var filesCaptureStages: [String] = []
+    private var photosCaptureStages: [String] = []
 
     init(journeyID: String, sourceID: String, targetID: String, expected: [String: String]) {
         self.journeyID = journeyID
@@ -56,10 +57,33 @@ final class RecoveryJourneyEvidence {
         }
     }
 
+    /// Preserve the observed Photos selector independently of Xcode's large result bundle.
+    /// This is diagnostic only and cannot authorize a tap or complete a checkpoint.
+    func capturePhotosSelection(_ stage: String, fixtureIsolated: Bool,
+                                target: XCUIElement, app: XCUIApplication, failure: Error? = nil) {
+        guard fixtureIsolated else { return }
+        do {
+            try writeFirstFilesTap(stage, localTitle: "Photo,", target: target, app: app, photos: true, failure: failure)
+        } catch {
+            let label = stage == "before" ? "before" : stage == "after" ? "after" : "invalid"
+            print("ROOM_PHOTOS_CAPTURE_V1 \(label) incomplete")
+        }
+    }
+
+    static func photosSelectionOutcome(stage: String, failure: Error?) -> String {
+        guard stage == "after" else { return "not_attempted" }
+        if let assertion = failure as? RecoveryJourneyFailure,
+           case .assertion("control interactive", "false", "true") = assertion {
+            return "control_not_interactive"
+        }
+        return failure == nil ? "returned" : "other_failure"
+    }
+
     private func writeFirstFilesTap(_ stage: String, localTitle: String,
-                                    target: XCUIElement, app: XCUIApplication) throws {
-        let expected = filesCaptureStages.isEmpty ? "before" : "after"
-        guard filesCaptureStages.count < 2, stage == expected,
+                                    target: XCUIElement, app: XCUIApplication, photos: Bool = false, failure: Error? = nil) throws {
+        let stages = photos ? photosCaptureStages : filesCaptureStages
+        let expected = stages.isEmpty ? "before" : "after"
+        guard stages.count < 2, stage == expected,
               Bundle.main.bundleIdentifier == "com.alvit.roominventory.uitests.xctrunner",
               let deviceID = ProcessInfo.processInfo.environment["RECOVERY_SIMULATOR_UDID"],
               UUID(uuidString: deviceID)?.uuidString == deviceID else {
@@ -67,7 +91,7 @@ final class RecoveryJourneyEvidence {
         }
         let root = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
                                                appropriateFor: nil, create: false)
-            .appendingPathComponent("RecoveryFilesFirstTap-" + journeyID, isDirectory: true)
+            .appendingPathComponent((photos ? "RecoveryPhotosSelection-" : "RecoveryFilesFirstTap-") + journeyID, isDirectory: true)
         if stage == "before" {
             guard !FileManager.default.fileExists(atPath: root.path) else {
                 throw RecoveryJourneyFailure.assertion("fresh Files capture directory", "exists", "absent")
@@ -78,9 +102,11 @@ final class RecoveryJourneyEvidence {
         guard !png.isEmpty, png.count <= 2 * 1_024 * 1_024 else {
             throw RecoveryJourneyFailure.assertion("Files PNG byte bound", String(png.count), "1...2097152")
         }
-        let query = app.descendants(matching: .any).matching(NSPredicate(
-            format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@",
-            localTitle, localTitle + ".", localTitle + ","))
+        let query = photos
+            ? app.images.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,"))
+            : app.descendants(matching: .any).matching(NSPredicate(
+                format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@",
+                localTitle, localTitle + ".", localTitle + ","))
         guard query.count <= 16, app.navigationBars.count <= 8 else {
             throw RecoveryJourneyFailure.assertion("Files AX element bound", "exceeded", "16 matches / 8 bars")
         }
@@ -97,6 +123,11 @@ final class RecoveryJourneyEvidence {
             "target_run_id": targetID, "simulator_udid": deviceID]
         var observation = identity
         observation["local_title"] = localTitle
+        if photos {
+            observation["capture_kind"] = "photos-selection"
+            observation["selection_outcome"] = Self.photosSelectionOutcome(stage: stage, failure: failure)
+            observation["observed_unix_milliseconds"] = Int64(Date().timeIntervalSince1970 * 1_000)
+        }
         observation["selected_target"] = describe(target)
         observation["matches"] = query.allElementsBoundByIndex.map(describe)
         observation["navigation_bars"] = app.navigationBars.allElementsBoundByIndex.map(describe)
@@ -132,7 +163,7 @@ final class RecoveryJourneyEvidence {
         defer { try? handle.close() }
         try handle.synchronize()
         try FileManager.default.moveItem(at: pending, to: root.appendingPathComponent(stage + ".json"))
-        filesCaptureStages.append(stage)
+        if photos { photosCaptureStages.append(stage) } else { filesCaptureStages.append(stage) }
     }
 
     @discardableResult

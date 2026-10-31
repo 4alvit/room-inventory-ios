@@ -679,6 +679,7 @@ class RecoveryRun:
                           stat.S_IFMT(info.st_mode), "unknown")
         observation = {
             "traversal": "partial", "category": category, "cap_bytes": cap,
+            "observed_unix_ns": time.time_ns(),
             "cap_metric": cap_metric,
             "logical_bytes": logical, "allocated_bytes": allocated, "entries": entries,
             "current_entry": {"relative_path": escaped[:1024], "path_encoding": "unicode_escape",

@@ -867,11 +867,14 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
         context["controller_exit_code"] = runner.record.get("exit_code", context.get("controller_exit_code"))
         context["primary_error"] = runner.record.get("primary_error") or context.get("primary_error")
         context["cleanup_errors"] = runner.record.get("cleanup_errors", context.get("cleanup_errors", []))
+        if runner.record.get("resource_cap_crossing") is not None:
+            context["resource_cap_crossing"] = runner.record["resource_cap_crossing"]
     if discovery:
         context.setdefault("cleanup_errors", []).extend(discovery.cleanup_errors)
     if context.get("primary_error") or context.get("cleanup_errors"):
         code = code or 1
     context["identity_audit"] = audit.snapshot()
+    failure_precedence = None
     if work is not None:
         try:
             with Alarm(min(outer_end, clock() + 180), clock) as alarm:
@@ -884,6 +887,9 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
                 controller.write_json(work / "preflight/adapter-result.json", context)
                 report = package_evidence(work, upload, context, retention_guard, collector=runner.collector if runner else None)
                 retention_guard()
+                failure_precedence = report.get("failure_precedence")
+                if failure_precedence:
+                    code = code or 1  # Diagnostic classification can never make a run pass.
                 if not report.get("complete") or report.get("status") != "COMPLETE":
                     code = code or 1
         except BaseException as error:
@@ -891,7 +897,9 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             primary = primary or {"type": type(error).__name__, "message": str(error)}
     if clock() >= outer_end:
         code = 124
-    return {"exit_code": code, "status": "COMPLETE" if code == 0 else "INCOMPLETE", "primary_error": context.get("primary_error") or primary,
+    return {"exit_code": code, "status": "COMPLETE" if code == 0 else "INCOMPLETE",
+            "primary_error": failure_precedence["primary_error"] if failure_precedence else context.get("primary_error") or primary,
+            "secondary_errors": failure_precedence["secondary_errors"] if failure_precedence else [],
             "upload_root": str(upload) if work is not None else None,
             "identity_audit": audit.snapshot()}
 

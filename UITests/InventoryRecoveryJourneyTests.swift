@@ -112,7 +112,17 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
         try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
         let photoLabel = photos.firstMatch.label
-        try tap(photos.firstMatch, app: app)
+        ledger.capturePhotosSelection("before", fixtureIsolated: bridge != nil,
+                                      target: photos.firstMatch, app: app)
+        do {
+            try tap(photos.firstMatch, app: app)
+        } catch {
+            ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
+                                          target: photos.firstMatch, app: app, failure: error)
+            throw error
+        }
+        ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
+                                      target: photos.firstMatch, app: app)
         // Some supported picker versions expose Add for single selection;
         // others immediately deliver the sole selected image.
         if app.buttons["Add"].exists && app.buttons["Add"].isHittable {

@@ -293,7 +293,17 @@ def capture_build_identity(controller, destination, guard):
 
 
 def capture_first_files_tap(work, context, collector, files):
-    """Preserve exactly two runner-owned observations, never an acceptance verdict."""
+    return capture_owned_tap(work, context, collector, files, photos=False)
+
+
+def capture_photos_selection(work, context, collector, files):
+    return capture_owned_tap(work, context, collector, files, photos=True)
+
+
+def capture_owned_tap(work, context, collector, files, *, photos):
+    """Preserve two exact runner-owned observations; neither kind proves acceptance."""
+    prefix = "RecoveryPhotosSelection-" if photos else "RecoveryFilesFirstTap-"
+    destination = "photos-selection" if photos else "files-first-tap"
     report = {"status": "MISSING_OR_INVALID", "complete": False, "acceptance_evidence": False}
     original_guard = getattr(collector, "guard", None)
     try:
@@ -313,7 +323,7 @@ def capture_first_files_tap(work, context, collector, files):
         require(all(binding.get(k) == v for k, v in {**expected, **{k: collector.config[k] for k in
                 ("source_commit", "source_tree_sha256", "config_sha256", "xctestrun_sha256")}}.items()),
                 "Files capture binding differs")
-        source = collector.runner / "Documents" / ("RecoveryFilesFirstTap-" + collector.ids["journey_run_id"])
+        source = collector.runner / "Documents" / (prefix + collector.ids["journey_run_id"])
         before = files.snapshot(source, 5 * MIB, 8)
         names = {stage + suffix for stage in ("before", "after") for suffix in (".png", "-ax.json", ".json")}
         require(set(before) == names | {""} and before[""]["kind"] == "directory"
@@ -329,7 +339,7 @@ def capture_first_files_tap(work, context, collector, files):
             return json.loads(raw, object_pairs_hook=pairs,
                               parse_constant=lambda _: require(False, "nonfinite Files capture number"))
 
-        payloads, titles = {}, []
+        payloads, titles, photo_observations = {}, [], []
         for stage in ("before", "after"):
             name = stage + ".json"
             raw, observed = files.read(source / name, 16_384)
@@ -357,12 +367,21 @@ def capture_first_files_tap(work, context, collector, files):
                 else:
                     ax = parse_capture(raw)
                     require(type(ax) is dict and all(type(ax.get(k)) is type(v) and ax[k] == v for k, v in identity.items())
-                            and ax.get("local_title") in ("On My iPhone", "On My iPad")
+                            and (ax.get("local_title") == "Photo," and ax.get("capture_kind") == "photos-selection"
+                                 if photos else ax.get("local_title") in ("On My iPhone", "On My iPad"))
                             and type(ax.get("hierarchy")) is str and ax["hierarchy"].strip()
                             and type(ax.get("selected_target")) is dict
                             and type(ax.get("matches")) is list and len(ax["matches"]) <= 16
                             and type(ax.get("navigation_bars")) is list and len(ax["navigation_bars"]) <= 8,
                             "Files AX structure or identity invalid")
+                    if photos:
+                        outcome = ax.get("selection_outcome")
+                        require(outcome in ({"not_attempted"} if stage == "before" else
+                                            {"returned", "control_not_interactive", "other_failure"})
+                                and type(ax.get("observed_unix_milliseconds")) is int
+                                and ax["observed_unix_milliseconds"] > 0,
+                                "Photos selection outcome or clock invalid")
+                        photo_observations.append(ax)
                     titles.append(ax["local_title"])
         require(titles[0] == titles[1], "Files location changed between stage labels")
         require(files.snapshot(source, 5 * MIB, 8) == before, "Files source changed during capture")
@@ -381,12 +400,26 @@ def capture_first_files_tap(work, context, collector, files):
         # Revalidate the original pins after reads and before publishing bytes.
         collector._containers()
         for name, raw in payloads.items():
-            collector._write("files-first-tap/" + name, raw)
-        retained = {"run/evidence/collection/files-first-tap/" + name:
+            collector._write(destination + "/" + name, raw)
+        retained = {"run/evidence/collection/" + destination + "/" + name:
                     {"bytes": len(raw), "sha256": digest(raw)} for name, raw in payloads.items()}
         report.update(status="CAPTURE_COMPLETE_NOT_ACCEPTANCE", complete=True,
-                      receipt="run/evidence/collection/files-first-tap/capture.json",
+                      receipt="run/evidence/collection/" + destination + "/capture.json",
                       receipt_sha256=digest(raw_receipt), retained_files=retained)
+        if photos:
+            before_ax, after_ax = photo_observations
+            # Only the precise assertion thrown by tap() is eligible. A passive
+            # Image is an observation, never permission to tap an ancestor.
+            target = after_ax["selected_target"]
+            if (after_ax["selection_outcome"] == "control_not_interactive"
+                    and target.get("exists") is True
+                    and (target.get("hittable") is False or target.get("enabled") is False)
+                    and before_ax["observed_unix_milliseconds"] <= after_ax["observed_unix_milliseconds"]):
+                report["native_failure"] = {"type": "RecoveryJourneyFailure",
+                    "message": "control interactive: observed false, expected true",
+                    "observed_unix_milliseconds": after_ax["observed_unix_milliseconds"],
+                    "receipt_mtime_ns": before["after.json"]["mtime_ns"]}
+
     except Exception as error:
         report["reason"] = type(error).__name__ + ": " + str(error)[:384]
     finally:
@@ -628,6 +661,39 @@ class CheckedReader:
             self.stream.close()
 
 
+def photos_failure_precedence(work, context, report):
+    """Classify a verified earlier assertion; never change controller exit/status.
+
+    Ordering uses the same host wall clock for the captured observation, receipt
+    metadata and cap event. Missing, reversed or distant clocks remain unknown.
+    The original controller record is immutable and retained as secondary evidence.
+    """
+    capture = report.get("photos_selection", {})
+    failure = capture.get("native_failure", {})
+    cap = context.get("resource_cap_crossing", {})
+    original = context.get("primary_error")
+    if not (capture.get("complete") is True and report.get("archive_members_verified") is True
+            and type(context.get("controller_exit_code")) is int and context["controller_exit_code"] != 0
+            and original == {"type": "RunFailure", "message": "Owned resource byte cap reached: "
+                             + str(work / "run/original.xcresult")}
+            and cap.get("category") == "original_xcresult" and cap.get("traversal") == "partial"
+            and type(cap.get("observed_unix_ns")) is int
+            and failure.get("type") == "RecoveryJourneyFailure"
+            and failure.get("message") == "control interactive: observed false, expected true"
+            and type(failure.get("observed_unix_milliseconds")) is int
+            and type(failure.get("receipt_mtime_ns")) is int):
+        return None
+    observed = failure["observed_unix_milliseconds"] * 1_000_000
+    written, stopped = failure["receipt_mtime_ns"], cap["observed_unix_ns"]
+    if not (0 < observed <= written < stopped and stopped - observed <= 300_000_000_000):
+        return None
+    return {"basis": "verified_owned_photos_capture_before_xcresult_cap",
+            "ordering": "host_wall_clock_and_receipt_mtime",
+            "primary_error": {key: failure[key] for key in ("type", "message")},
+            "secondary_errors": [original], "controller_exit_code_unchanged": True,
+            "capture_receipt": capture["receipt"], "capture_receipt_sha256": capture["receipt_sha256"]}
+
+
 def package_evidence(work_root, upload_root, context, guard, *, collector=None):
     files = Files(guard)
     work, upload = plain(work_root), plain(upload_root)
@@ -642,6 +708,7 @@ def package_evidence(work_root, upload_root, context, guard, *, collector=None):
     try:
         require(len(encoded(context)) <= 65536, "hosted context size limit")
         report["files_first_tap"] = capture_first_files_tap(work, context, collector, files)
+        report["photos_selection"] = capture_photos_selection(work, context, collector, files)
         try:
             validate_complete(work, context, files)
         except Exception as error:
@@ -733,13 +800,18 @@ def package_evidence(work_root, upload_root, context, guard, *, collector=None):
         report.update({"archive": {"path": archive.name, **archive_record}, "archive_members_verified": True})
     except Exception as error:
         failures.append("retention: " + type(error).__name__ + ": " + str(error))
-    capture = report.get("files_first_tap")
-    if capture and capture["complete"]:
-        retained = capture["retained_files"]
-        if not report.get("archive_members_verified") or not all(
-                all(selected.get(name, {}).get(key) == value for key, value in expected.items())
-                for name, expected in retained.items()):
-            capture.update(status="MISSING_OR_INVALID", complete=False, reason="Files capture not retained in verified archive")
+    for name in ("files_first_tap", "photos_selection"):
+        capture = report.get(name)
+        if capture and capture["complete"]:
+            retained = capture["retained_files"]
+            if not report.get("archive_members_verified") or not all(
+                    all(selected.get(path, {}).get(key) == value for key, value in expected.items())
+                    for path, expected in retained.items()):
+                capture.update(status="MISSING_OR_INVALID", complete=False,
+                               reason="Capture not retained in verified archive")
+    precedence = photos_failure_precedence(work, context, report)
+    if precedence is not None:
+        report["failure_precedence"] = precedence
     report.update({"complete": not failures, "status": "PARTIAL" if failures else "COMPLETE", "failures": failures,
                    "selected_source_roots": sorted(snapshots), "source_context": context})
     # The initial PARTIAL receipt remains honest if the bounded final write fails.

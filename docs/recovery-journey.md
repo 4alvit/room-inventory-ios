@@ -252,6 +252,17 @@ installation-only launch shares the existing XCTest/controller deadlines; it doe
 not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
+
+In run `41249372436` the strict Photos selector found one `Photo,` Image, but
+`control interactive: observed false, expected true` stopped the tap. The saved
+log identified `PXGGridLayout-Info`; it did not preserve enough AX/screenshot
+context to identify a legitimate actionable control. Later Xcode system-log
+collection crossed the unchanged result cap (206,925,824 allocated bytes in the
+partial traversal). The smaller standalone Photos observations described in
+[hosted retention](recovery-hosted.md) preserve that missing diagnostic context.
+They do not guess an ancestor, retry selection, relax the interaction assertion,
+increase the cap, or claim the native journey passed.
+
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only

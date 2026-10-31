@@ -9,6 +9,7 @@ import shutil
 import struct
 import tarfile
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 import uuid
@@ -143,6 +144,146 @@ class RecoveryRetentionTests(unittest.TestCase):
             raw = (root / name).read_bytes()
             entries.append({"name": name, "bytes": len(raw), "sha256": R.digest(raw)})
         (root / (stage + ".json")).write_bytes(R.encoded({**{k: v for k, v in document.items() if k != "files"}, "files": entries}))
+
+    def photos_capture_fixture(self, outcome="control_not_interactive"):
+        collector, old = self.files_capture_fixture()
+        root = old.with_name("RecoveryPhotosSelection-" + collector.ids["journey_run_id"])
+        old.rename(root)
+        for stage in ("before", "after"):
+            path = root / (stage + "-ax.json")
+            ax = json.loads(path.read_bytes())
+            ax.update(local_title="Photo,", capture_kind="photos-selection",
+                      selection_outcome="not_attempted" if stage == "before" else outcome,
+                      observed_unix_milliseconds=(time.time_ns() // 1_000_000) - 1000,
+                      selected_target={"exists": True, "hittable": False, "enabled": True},
+                      hierarchy="Application\n  Image PXGGridLayout-Info Photo, Synthetic receipt")
+            path.write_bytes(R.encoded(ax))
+            self.files_stage_receipt(root, json.loads((root / (stage + ".json")).read_bytes()))
+        return collector, root
+
+    def photos_cap_context(self):
+        self.context.update(controller_exit_code=1,
+                            primary_error={"type": "RunFailure", "message": "Owned resource byte cap reached: "
+                                           + str(self.work / "run/original.xcresult")},
+                            resource_cap_crossing={"category": "original_xcresult", "traversal": "partial",
+                                                   "observed_unix_ns": time.time_ns() + 1_000_000})
+
+    def test_photos_capture_survives_xcresult_cap_and_preserves_both_failures(self):
+        collector, root = self.photos_capture_fixture()
+        self.photos_cap_context()
+        original_context = copy.deepcopy(self.context)
+        original = {p.name: p.read_bytes() for p in root.iterdir()}
+        snapshot = R.Files.snapshot
+        def reject_original(files, path, limit, count):
+            if path == self.work / "run/original.xcresult":
+                raise R.RetentionError("file size/type limit")
+            return snapshot(files, path, limit, count)
+        with patch.object(R.Files, "snapshot", reject_original):
+            report = self.package(collector)
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["status"], "PARTIAL")
+        capture = report["photos_selection"]
+        self.assertTrue(capture["complete"], capture)
+        self.assertFalse(capture["acceptance_evidence"])
+        self.assertEqual(self.context, original_context)
+        precedence = report["failure_precedence"]
+        self.assertEqual(precedence["primary_error"], {"type": "RecoveryJourneyFailure",
+                         "message": "control interactive: observed false, expected true"})
+        self.assertEqual(precedence["secondary_errors"], [self.context["primary_error"]])
+        self.assertTrue(precedence["controller_exit_code_unchanged"])
+        with tarfile.open(self.upload / "evidence.tar") as archive:
+            for name, raw in original.items():
+                self.assertEqual(archive.extractfile("run/evidence/collection/photos-selection/" + name).read(), raw)
+            self.assertNotIn("run/original.xcresult", archive.getnames())
+        self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, original)
+
+    def test_photos_capture_rejects_unisolated_foreign_or_corrupt_evidence(self):
+        collector, root = self.photos_capture_fixture()
+        baseline = {p.name: p.read_bytes() for p in root.iterdir()}
+        for damage in ("unisolated", "run", "kind", "stage", "duplicate", "unknown_outcome", "clock_bool",
+                       "missing", "symlink", "png_over", "ax_over"):
+            with self.subTest(damage=damage):
+                for path in root.iterdir(): path.unlink()
+                for name, raw in baseline.items(): (root / name).write_bytes(raw)
+                collector.photos_isolated = damage != "unisolated"
+                ax = json.loads(baseline["after-ax.json"])
+                if damage == "run": ax["simulator_udid"] = "FOREIGN"
+                if damage == "kind": ax["capture_kind"] = "files-first-tap"
+                if damage == "stage": ax["selection_outcome"] = "not_attempted"
+                if damage == "unknown_outcome": ax["selection_outcome"] = "arbitrary native error"
+                if damage == "clock_bool": ax["observed_unix_milliseconds"] = True
+                (root / "after-ax.json").write_bytes(R.encoded(ax))
+                if damage == "duplicate":
+                    (root / "after-ax.json").write_bytes(b'{"stage":"after",' + baseline["after-ax.json"][1:])
+                if damage == "missing": (root / "after.png").unlink()
+                elif damage == "symlink":
+                    (root / "after.png").unlink()
+                    (root / "after.png").symlink_to(root / "before.png")
+                elif damage in ("png_over", "ax_over"):
+                    name, cap = ("after.png", 2 * R.MIB) if damage == "png_over" else ("after-ax.json", 256 * 1024)
+                    (root / name).write_bytes(b"x" * (cap + 1))
+                if damage != "missing":
+                    self.files_stage_receipt(root, json.loads(baseline["after.json"]))
+                report = R.capture_photos_selection(self.work, self.context, collector, R.Files(self.guard))
+                self.assertFalse(report["complete"], report)
+                self.assertNotIn("native_failure", report)
+                self.assertFalse((collector.root / "photos-selection").exists())
+
+    def test_photos_unknown_or_interactive_observation_does_not_claim_native_assertion(self):
+        collector, root = self.photos_capture_fixture()
+        baseline = {p.name: p.read_bytes() for p in root.iterdir()}
+        for outcome, target in (("returned", {"exists": True, "hittable": False, "enabled": True}),
+                                ("other_failure", {"exists": True, "hittable": False, "enabled": True}),
+                                ("control_not_interactive", {"exists": False}),
+                                ("control_not_interactive", {"exists": True, "hittable": True, "enabled": True})):
+            with self.subTest(outcome=outcome, target=target):
+                for name, raw in baseline.items(): (root / name).write_bytes(raw)
+                ax = json.loads(baseline["after-ax.json"])
+                ax.update(selection_outcome=outcome, selected_target=target)
+                (root / "after-ax.json").write_bytes(R.encoded(ax))
+                self.files_stage_receipt(root, json.loads(baseline["after.json"]))
+                report = R.capture_photos_selection(self.work, self.context, collector, R.Files(self.guard))
+                self.assertTrue(report["complete"], report)
+                self.assertNotIn("native_failure", report)
+                shutil.rmtree(collector.root / "photos-selection")
+
+    def test_photos_changed_before_archive_cannot_change_primary_failure(self):
+        collector, _ = self.photos_capture_fixture()
+        self.photos_cap_context()
+        copied = collector.root / "photos-selection"
+        changed = []
+        def mutate():
+            if not changed and (copied / "capture.json").exists():
+                changed.append(True)
+                with (copied / "before.png").open("ab") as stream: stream.write(b"changed")
+        self.guard_hook = mutate
+        report = self.package(collector)
+        self.assertTrue(changed)
+        self.assertFalse(report["photos_selection"]["complete"])
+        self.assertNotIn("failure_precedence", report)
+
+    def test_photos_failure_precedence_rejects_missing_reversed_or_unrelated_events(self):
+        collector, _ = self.photos_capture_fixture()
+        self.photos_cap_context()
+        capture = R.capture_photos_selection(self.work, self.context, collector, R.Files(self.guard))
+        report = {"photos_selection": capture, "archive_members_verified": True}
+        self.assertIsNotNone(R.photos_failure_precedence(self.work, self.context, report))
+        for damage in ("no_archive", "no_capture", "success", "unknown_error", "other_cap", "missing_time",
+                       "bool_time", "reversed_clock", "distant_clock", "future_receipt", "bool_exit"):
+            with self.subTest(damage=damage):
+                context, value = copy.deepcopy(self.context), copy.deepcopy(report)
+                if damage == "no_archive": value["archive_members_verified"] = False
+                if damage == "no_capture": value["photos_selection"]["complete"] = False
+                if damage == "success": context["controller_exit_code"] = 0
+                if damage == "bool_exit": context["controller_exit_code"] = True
+                if damage == "unknown_error": context["primary_error"] = {"type": "DeadlineFailure", "message": "timeout"}
+                if damage == "other_cap": context["resource_cap_crossing"]["category"] = "derived_data"
+                if damage == "missing_time": context["resource_cap_crossing"].pop("observed_unix_ns")
+                if damage == "bool_time": context["resource_cap_crossing"]["observed_unix_ns"] = True
+                if damage == "reversed_clock": context["resource_cap_crossing"]["observed_unix_ns"] = 1
+                if damage == "distant_clock": context["resource_cap_crossing"]["observed_unix_ns"] += 400_000_000_000
+                if damage == "future_receipt": value["photos_selection"]["native_failure"]["receipt_mtime_ns"] += 400_000_000_000
+                self.assertIsNone(R.photos_failure_precedence(self.work, context, value))
 
     def test_files_capture_survives_oversized_original_without_acceptance(self):
         collector, root = self.files_capture_fixture()

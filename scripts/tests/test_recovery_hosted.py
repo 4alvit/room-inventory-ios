@@ -527,6 +527,32 @@ class IntegrationTests(HostedCase):
             self.assertEqual(captured.call_count, 1)
 
 
+class PhotosFailureSummaryTests(HostedCase):
+    def test_verified_native_failure_is_primary_without_hiding_controller_cap_or_changing_exit(self):
+        cap = {"type": "RunFailure", "message": "owned result cap"}
+        native = {"type": "RecoveryJourneyFailure", "message": "control interactive: observed false, expected true"}
+        self.fake_execution(code=1, primary=cap, complete=False)
+        self.runner.record["resource_cap_crossing"] = {"category": "original_xcresult", "observed_unix_ns": 123}
+        self.package.return_value["failure_precedence"] = {"primary_error": native, "secondary_errors": [cap]}
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 1)
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertEqual(result["primary_error"], native)
+        self.assertEqual(result["secondary_errors"], [cap])
+        self.assertEqual(self.runner.record["primary_error"], cap)
+        context = self.package.call_args.args[2]
+        self.assertEqual(context["resource_cap_crossing"], self.runner.record["resource_cap_crossing"])
+        self.assertEqual(context["primary_error"], cap)
+
+    def test_unverified_or_missing_capture_leaves_existing_failure_unchanged(self):
+        cap = {"type": "RunFailure", "message": "owned result cap"}
+        self.fake_execution(code=1, primary=cap, complete=False)
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 1)
+        self.assertEqual(result["primary_error"], cap)
+        self.assertEqual(result["secondary_errors"], [])
+
+
 class CommandTests(HostedCase):
     def discovery(self):
         output = self.temp / "preflight"

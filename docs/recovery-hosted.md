@@ -251,6 +251,33 @@ the unique journey Files folder. Missing data and uncertain origin remain marked
 as incomplete. Embedded failure screenshots can remain inside the raw xcresult
 when full attachment extraction did not run. No role is assigned from equal ZIP
 hashes or timestamps, and no partial capture is promoted to a passing collection.
+
+The Photos selection boundary also publishes two bounded diagnostic observations
+(`before` and `after`) from the owned test runner, independently of xcresult.
+`run/evidence/collection/photos-selection/` contains their PNG, structured AX and
+receipts. Each PNG is at most 2 MiB, AX at most 256 KiB and receipt at most 16 KiB;
+the exact six-file source directory is limited to 5 MiB. The existing collection,
+packet, time and disk limits remain unchanged. The source commit, tree,
+configuration, simulator, three run IDs and pinned container metadata must all
+match; symlinks, extra files, mutation and missing/invalid receipts fail capture.
+Capture is attempted only after the owned Photos fixture isolation handshake.
+No personal library or unrelated device is selected. These files are diagnostics,
+never acceptance evidence and never permission to tap a passive Image/ancestor.
+A missing capture does not change the existing acceptance rules.
+
+If the original result grows beyond 192 MiB while Xcode assembles system logs,
+the small capture can still be retained in a `PARTIAL` archive. Only after its
+bytes are verified in that archive may `failure_precedence` identify the exact
+structured `control interactive: observed false, expected true` assertion as the
+primary failure and retain the controller's xcresult-cap failure as secondary.
+The observed target must still exist and be disabled or non-hittable. Observation
+and receipt timestamps must precede the controller's recorded cap event on the
+same host wall clock, within five minutes; absent, reversed or distant times
+leave ordering unknown and do not change the summary. This is a diagnostic
+ordering check, not protection against a hostile or arbitrarily adjusted host
+clock. The original controller receipt, failed exit, and all resource limits are
+preserved. Raw log keyword matching and screenshots never select a primary error.
+
 If configuration or container pinning never completed, the packet records that
 limitation with the available source/configuration/log evidence.
 Rejection before the adapter claims its fresh working directory produces only

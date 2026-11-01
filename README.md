@@ -65,8 +65,9 @@ Hosted Core, app unit and ordinary UI tests use `macos-26`, Xcode 26.4.1
 build 17E202, iOS 26.2 and iPhone 16e, where the real StoreKit purchase tests
 have passed. Recovery and Simulator packaging use `xcode-27` with Xcode 27.1
 build 27A9275; Recovery selects iOS 27.0 and iPhone 17. These are explicit,
-required configurations of the same source commit and tree. Missing or
-incompatible pins fail CI; there is no automatic substitution. StoreKit purchase
+required configurations of the same reviewed source tree. For PR previews, the
+tested merge commit is bound to the reviewed head by exact tree equality. Missing
+or incompatible pins fail CI; there is no automatic substitution. StoreKit purchase
 tests on iOS 27.0 remain unqualified. Required Swift CodeQL analysis also stays
 on macOS 26 / Xcode 26.4.1 because CodeQL cannot trace builds using Xcode 27.
 See [toolchain qualification](docs/recovery-hosted.md#toolchain-qualification).

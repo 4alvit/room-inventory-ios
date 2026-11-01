@@ -96,8 +96,10 @@ qualified local StoreKit purchase. The matrix retains all real purchase, refund,
 pending-approval and restore tests on the working older runtime while exercising
 full Recovery and building the Simulator candidate with Xcode 27.1.
 
-Every required job still validates the same source commit and tree. Source
-provenance does not require identical compilers or runtimes, and no result is
+Every required job still validates the same reviewed source tree. For PR previews,
+CI tests the synthetic merge commit and builds the reviewed PR head only when
+their trees match exactly; provenance records both commit identities. It does not
+require identical compilers or runtimes, and no result is
 claimed as proof that StoreKit purchases pass on iOS 27.0. The shared test plan
 remains free of StoreKit configuration; Recovery's recursive rejection of such
 configuration is unchanged. The app's minimum deployment target remains iOS 17.
@@ -108,7 +110,7 @@ not establish hosted boot performance. The existing 90-second boot-status limit,
 all other deadlines, disk limits, cache preparation and cleanup requirements remain
 unchanged.
 
-Swift CodeQL remains a required check on the same source commit using the existing
+Swift CodeQL remains a required check on the tested source using the existing
 `macos-26` ARM64 runner and exact Xcode 26.4.1 build 17E202. GitHub's
 [CodeQL compatibility guidance](https://github.blog/changelog/2026-10-09-codeql-2-27-2-improves-c-go-rust-and-javascript-analysis/#macos-27-compatibility)
 says `manual` and `autobuild` cannot trace compiled-language builds on macOS 27 or

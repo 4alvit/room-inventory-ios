@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bound backup-file reads before restoration, reject non-regular inputs, and keep cancelling the file picker silent.
+- Align automatic Simulator selection with the active SDK and move hosted validation to Xcode 26.4.1 on macOS 26.
+- Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Build same-repository PR Simulator candidates on GitHub-hosted macOS, with verified tested-tree identity and payload provenance, without publishing a release.
 - Add an offline English and Russian privacy/support page from the main screen, available without Pro. It explains local data, deletion, sharing, backups and public support, with optional links to published preview documents.
 

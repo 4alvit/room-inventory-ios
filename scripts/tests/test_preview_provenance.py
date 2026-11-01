@@ -517,7 +517,7 @@ class PreviewWorkflowTests(unittest.TestCase):
                              {"required": "false", "type": "string", "default": ""})
         package = self.release["jobs"]["package"]
         self.assertEqual(package["env"], {
-            "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+            "DEVELOPER_DIR": "/Applications/Xcode_26.4.1.app/Contents/Developer",
             "PREVIEW_SOURCE_REF": "${{ inputs.source-ref }}",
             "PREVIEW_TESTED_COMMIT": "${{ inputs.tested-commit }}",
             "PREVIEW_TESTED_TREE": "${{ inputs.tested-tree }}",

@@ -298,7 +298,11 @@ struct InventoryExportMenu: View {
         .sheet(isPresented: $showingPro) { ProUpgradeView() }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
             do { pendingBackup = try result.get().first }
-            catch { store.errorMessage = error.localizedDescription }
+            catch {
+                if (error as? CocoaError)?.code != .userCancelled {
+                    store.errorMessage = error.localizedDescription
+                }
+            }
         }
         .alert(UIL10n.text("Replace the current inventory?"), isPresented: Binding(get: { pendingBackup != nil }, set: { if !$0 { pendingBackup = nil } })) {
             Button(UIL10n.text("Cancel"), role: .cancel) { pendingBackup = nil }

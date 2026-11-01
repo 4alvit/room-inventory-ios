@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Observation
 import InventoryCore
 
@@ -14,11 +15,39 @@ private actor InventoryDisk {
     }
     func data(for attachment: InventoryAttachment) throws -> Data { try repository.data(for: attachment) }
     func restore(url: URL) throws -> Inventory {
+        guard url.isFileURL else { throw InventoryError.unsafePath }
+        try Task.checkCancellation()
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard size <= InventoryLimits.maxBackupBytes else { throw InventoryUIError.tooLarge }
-        return try repository.restoreBackup(Data(contentsOf: url, options: .mappedIfSafe))
+        // Inspect the opened file, not separate URL metadata. Providers may
+        // replace or grow a selected file between selection and restoration.
+        // Nonblocking open also lets us reject FIFOs without waiting for a writer.
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
+        guard descriptor >= 0 else { throw InventoryError.storage("reading an inventory file") }
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw InventoryError.unsafePath
+        }
+        let limit = InventoryLimits.maxBackupBytes
+        guard info.st_size >= 0, info.st_size <= limit else { throw InventoryUIError.tooLarge }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        while true {
+            try Task.checkCancellation()
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress!, $0.count)
+            }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw InventoryError.storage("reading an inventory file")
+            }
+            if count == 0 { break }
+            guard count <= limit - data.count else { throw InventoryUIError.tooLarge }
+            data.append(buffer, count: count)
+        }
+        try Task.checkCancellation()
+        return try repository.restoreBackup(data)
     }
 }
 

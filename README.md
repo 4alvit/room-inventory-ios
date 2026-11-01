@@ -37,20 +37,24 @@ or guarantee of coverage or payment.
 ## Build and test
 
 Use macOS with Xcode supporting Swift 6, an iOS 17+ Simulator runtime, and Python
-3.11+. The scripts install **XcodeGen 2.46.0** from its digest-verified official release
+3.12, matching CI. The locked binary dependencies are not available for every newer
+Python version. The scripts install **XcodeGen 2.46.0** from its digest-verified official release
 into ignored `.build/` storage. No Apple Developer membership is needed for Simulator
 builds. Install an iOS runtime from Xcode Settings → Components if none is available.
 
 ```bash
-python3 -m venv .build/venv
+python3.12 -m venv .build/venv
 source .build/venv/bin/activate
 python3 -m pip install --require-hashes --only-binary=:all: -r .github/requirements-workflow-contracts.txt
 bash scripts/ci.sh
 ```
 
 The full check runs source/release-tooling contracts, Core tests, a generic Simulator
-build, and app unit/UI tests on an available iPhone Simulator. Set `SIMULATOR_UDID`
-to select a specific available iPhone. It fails if the required runtime is absent.
+build, and app unit/UI tests on an available iPhone Simulator matching the active
+iOS Simulator SDK's major/minor version. Automatic selection prefers the newest
+available runtime patch and a booted iPhone within that runtime. Set
+`SIMULATOR_UDID` to select a specific available iPhone on iOS 17 or newer, including
+a different runtime version. It fails if the required runtime is absent.
 `bash scripts/ci.sh --static` runs only tooling checks; `--build-only` runs Core
 tests and generic compilation, explicitly excluding app tests. Neither is full
 release acceptance. Hosted CodeQL for Swift, Python and workflows is a separate

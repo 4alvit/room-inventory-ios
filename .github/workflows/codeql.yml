@@ -6,10 +6,10 @@ permissions:
 jobs:
   swift:
     name: Swift security analysis
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 40
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
     permissions:
       actions: read
       contents: read
@@ -22,10 +22,10 @@ jobs:
         run: |
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = arm64
-          test "$ImageOS" = macos15
+          test "$ImageOS" = macos26
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
-          test "$xcode_version" = $'Xcode 26.3\nBuild version 17C529'
+          test "$xcode_version" = $'Xcode 26.4.1\nBuild version 17E202'
       - name: Initialize Swift analysis
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:

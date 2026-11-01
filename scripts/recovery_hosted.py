@@ -36,8 +36,8 @@ require, Failure, Deadline = controller.require, controller.ConfigurationFailure
 PROFILE_PATH = "scripts/recovery-hosted-profile.json"
 POLICY = {
     "schema_version": 1, "repository": "4alvit/room-inventory-ios", "job_id": "recovery",
-    "runner_label": "macos-15", "image_os": "macos15", "workflow_path": ".github/workflows/ci.yml",
-    "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 26.3\nBuild version 17C529",
+    "runner_label": "macos-26", "image_os": "macos26", "workflow_path": ".github/workflows/ci.yml",
+    "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 26.4.1\nBuild version 17E202",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
     "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,
@@ -365,10 +365,21 @@ class Discovery:
             self.observe("pipe_setup", completed=True)
             while get_map() or poll() is None:
                 tick("loop_head")
+                # Open pipes do not establish that the direct child is alive:
+                # native services can inherit them. Observe the child each
+                # quantum, and surface a failed exit without waiting for EOF.
+                # A successful exit still needs both EOFs and owned cleanup.
+                child_status = poll()
+                if child_status not in (None, 0):
+                    record["exit_code"] = child_status
                 self.observe("select")
                 now = self.alarm.clock()
                 self.alarm.last_sample = ("select_timeout", now)
-                ready = selector.select(min(.1, max(0, end - 4 - now)))
+                require(now < end - 4, "Discovery command deadline reached", Deadline)
+                # Preserve already-buffered diagnostics on a failed exit,
+                # without waiting on streams held by inherited descendants.
+                timeout = 0 if child_status not in (None, 0) else min(.1, max(0, end - 4 - now))
+                ready = selector.select(timeout)
                 self.count(observation, "select_returns")
                 self.observe("select", completed=True)
                 for key, _ in ready:
@@ -390,6 +401,8 @@ class Discovery:
                         require(len(buffers[key.data]) + len(data) <= 4 * controller.MIB, "Discovery stream cap reached")
                         buffers[key.data].extend(data)
                         self.count(pipe_observation, "retained_bytes", len(data))
+                require(child_status is None or child_status == 0,
+                        "Discovery command failed: " + name)
             tick("final")
             self.observe("wait")
             record["exit_code"] = process.wait(timeout=0)

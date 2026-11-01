@@ -382,10 +382,16 @@ the existing post-cleanup receipt path. A serialization failure follows existing
 receipt-failure handling and preserves the first primary and sticky cleanup
 errors. A snapshot may remain only in memory if receipt time is exhausted.
 Admission failures before the existing command record are still unobserved.
-External-call/clock trace parity in fakes does not imply zero scheduling cost.
-Discovery's one-pass list, short-circuit poll, 120-second envelope,
-90/86/4-second inventory allowance, other caps, signal and cleanup ordering
-remain bounded as described below.
+Discovery polls its direct child in every selector iteration, including while
+inherited pipes remain open. A failed exit triggers one nonblocking read of each
+ready pipe before failure, retaining available diagnostics without waiting for
+EOF. The receipt records an observed nonzero exit even if later stream or cleanup
+checks fail. A zero exit is recorded only after both EOFs and a final deadline check;
+the command also requires
+confirmed owned-group cleanup before the command succeeds. The one-pass list,
+120-second discovery envelope, 90/86/4-second inventory allowance, other caps
+and signal ownership rules remain unchanged. Injected tests compare the existing
+non-poll operations and clock boundaries; this does not imply zero scheduling cost.
 
 One outer controller owns the complete attempt and every subprocess process group.
 Use monotonic absolute deadlines; no phase may renew the outer budget. The total

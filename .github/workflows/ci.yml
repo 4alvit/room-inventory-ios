@@ -6,10 +6,10 @@ permissions:
 jobs:
   ios:
     name: Core and iOS tests
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
     outputs:
       version: ${{ steps.preview-version.outputs.version }}
       tested-commit: ${{ steps.preview-version.outputs.commit }}
@@ -30,10 +30,10 @@ jobs:
         run: |
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = arm64
-          test "$ImageOS" = macos15
+          test "$ImageOS" = macos26
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
-          test "$xcode_version" = $'Xcode 26.3\nBuild version 17C529'
+          test "$xcode_version" = $'Xcode 26.4.1\nBuild version 17E202'
           swift --version
           xcrun simctl list runtimes
       - name: Run source contracts, Core tests, Simulator build and app tests
@@ -69,12 +69,12 @@ jobs:
   recovery:
     name: Recovery journey
     needs: ios
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     permissions:
       contents: read
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
       RECOVERY_TESTED_COMMIT: ${{ needs.ios.outputs.tested-commit }}
       RECOVERY_TESTED_TREE: ${{ needs.ios.outputs.tested-tree }}
     steps:
@@ -89,7 +89,7 @@ jobs:
           python-version: '3.12'
       - name: Run one bounded hosted recovery journey
         timeout-minutes: 36
-        run: python3 scripts/recovery_hosted.py --profile-sha256 b5fd058b38e98a3a07d498d1c08f5d61696e496dbd023344c0e267ece48d597d
+        run: python3 scripts/recovery_hosted.py --profile-sha256 98d45dfcab42a2b8945e45ef1ddd27356bb7718268ef1927db4fb8c3aa26e55a
       - name: Preserve compact recovery evidence
         if: ${{ always() }}
         timeout-minutes: 5

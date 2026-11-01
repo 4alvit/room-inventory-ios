@@ -53,7 +53,7 @@ class HostedCase(unittest.TestCase):
         self.xcodegen.write_text("injected fixture, never executed")
         self.xcodegen.chmod(0o755)
         self.env = {"GITHUB_ACTIONS": "true", "CI": "true", "RUNNER_ENVIRONMENT": "github-hosted",
-                    "RUNNER_OS": "macOS", "ImageOS": "macos15", "ImageVersion": "20261020.1",
+                    "RUNNER_OS": "macOS", "ImageOS": "macos26", "ImageVersion": "20261020.1",
                     "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "4alvit/room-inventory-ios",
                     "GITHUB_JOB": "recovery", "RUNNER_ARCH": "ARM64", "GITHUB_SHA": "a" * 40,
                     "GITHUB_WORKFLOW_SHA": "c" * 40, "RECOVERY_TESTED_COMMIT": "a" * 40,
@@ -100,7 +100,7 @@ class HostedCase(unittest.TestCase):
     def fake_execution(self, *, code=0, primary=None, cleanup=None, complete=True):
         self.calls = []
         values = {"source-head": ("a" * 40 + "\n" + "b" * 40 + "\n").encode(), "source-status": b"",
-                  "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 26.3\nBuild version 17C529",
+                  "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 26.4.1\nBuild version 17E202",
                   "sdk-version": b"26.2\n", "simulator-inventory": json.dumps(self.inventory()).encode(),
                   "install-xcodegen": str(self.xcodegen).encode()}
         self.command_values = values
@@ -122,11 +122,13 @@ class HostedCase(unittest.TestCase):
 
 class ContextTests(HostedCase):
     def test_old_toolchain_profile_cannot_be_admitted_with_its_own_hash(self):
-        old_profile = {**hosted.POLICY, "xcode_version": "Xcode 16.4\nBuild version 16F6"}
-        raw = json.dumps(old_profile).encode()
-        (self.root / hosted.PROFILE_PATH).write_bytes(raw)
-        with self.assertRaises(hosted.Failure):
-            hosted.load_profile(self.root, hosted.controller.sha(raw))
+        for version in ("Xcode 16.4\nBuild version 16F6", "Xcode 26.3\nBuild version 17C529"):
+            with self.subTest(version=version):
+                old_profile = {**hosted.POLICY, "xcode_version": version}
+                raw = json.dumps(old_profile).encode()
+                (self.root / hosted.PROFILE_PATH).write_bytes(raw)
+                with self.assertRaises(hosted.Failure):
+                    hosted.load_profile(self.root, hosted.controller.sha(raw))
         self.popen.assert_not_called()
 
     def test_local_rejected_without_commands_or_output(self):
@@ -137,7 +139,7 @@ class ContextTests(HostedCase):
         self.popen.assert_not_called()
 
     def test_self_hosted_and_wrong_class_rejected(self):
-        for key, value in (("RUNNER_ENVIRONMENT", "self-hosted"), ("ImageOS", "macos14"), ("GITHUB_JOB", "ios"),
+        for key, value in (("RUNNER_ENVIRONMENT", "self-hosted"), ("ImageOS", "macos15"), ("GITHUB_JOB", "ios"),
                            ("GITHUB_SERVER_URL", "https://enterprise.invalid"), ("RUNNER_ARCH", "X64")):
             with self.subTest(key=key), self.assertRaises(hosted.Failure):
                 hosted.validate_host({**self.env, key: value}, hosted.POLICY, self.root)
@@ -146,7 +148,7 @@ class ContextTests(HostedCase):
         value = hosted.validate_host(self.env, hosted.POLICY, self.root, machine="arm64")
         self.assertEqual(value["runner_arch"], "ARM64")
         self.assertEqual(value["process_arch"], "arm64")
-        self.assertEqual(value["image_os"], "macos15")
+        self.assertEqual(value["image_os"], "macos26")
 
     def test_other_or_inconsistent_architecture_rejected_before_commands(self):
         for arch, machine in (("X64", "x86_64"), ("ARM64", "x86_64"), ("X64", "arm64"), ("", "arm64")):
@@ -271,10 +273,10 @@ class IntegrationTests(HostedCase):
         self.assert_toolchain_rejected_before_inventory(b"Xcode 16.4\nBuild version 16F6")
 
     def test_different_xcode_build_never_starts_inventory_or_controller(self):
-        self.assert_toolchain_rejected_before_inventory(b"Xcode 26.3\nBuild version 17C528")
+        self.assert_toolchain_rejected_before_inventory(b"Xcode 26.4.1\nBuild version 17E201")
 
     def test_malformed_xcode_output_never_starts_inventory_or_controller(self):
-        self.assert_toolchain_rejected_before_inventory(b"Xcode 26.3")
+        self.assert_toolchain_rejected_before_inventory(b"Xcode 26.4.1")
 
     def test_inventory_and_installer_request_fixed_caps_once(self):
         self.fake_execution()

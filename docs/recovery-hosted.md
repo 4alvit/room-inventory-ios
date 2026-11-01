@@ -7,9 +7,9 @@ first execution needs a separately approved source commit and CI cohort.
 ## Where the job runs
 
 The existing callable `ci.yml` adds one `recovery` job after `ios`. The job uses
-the standard `macos-15` runner class, read-only repository permissions
+the standard `macos-26` runner class, read-only repository permissions
 and the same pinned checkout, Python and artifact actions. All four existing Mac
-jobs require an actual `arm64` host and Xcode 26.3 build 17C529; they do not fall
+jobs require an actual `arm64` host and Xcode 26.4.1 build 17E202; they do not fall
 back to another runner or toolchain. Recovery retains its 24 GiB admission floor. The PR preview now
 needs both `ios` and `recovery`. A failed recovery job therefore fails the existing
 required reusable validation; the generated Quality gate is unchanged.
@@ -48,17 +48,22 @@ Xcode** certificate (`NSOSStatusErrorDomain -67818`), followed by
 The app correctly refused an unverified transaction. This is separate from the
 catalog-failure and refund assertions, which kept their original expectations.
 
-The four Mac jobs now select Xcode 26.3 build 17C529 from the same `macos-15`
-ARM64 runner class. Its availability is recorded in the
-[hosted image inventory](https://github.com/actions/runner-images/blob/macos-15-arm64/20261028.0489/images/macos/macos-15-arm64-Readme.md).
-[Apple's release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_3-release-notes)
-list macOS 15.6 or newer and the iOS 26.2 SDK. Recovery still selects an installed
-Simulator runtime matching the selected SDK; an older SDK/runtime combination
-is not silently substituted. The app's minimum deployment target is unchanged.
+The subsequent Xcode 26.3 cohort passed Core and iOS tests, but recovery discovery
+still timed out while querying the simulator inventory. The four Mac jobs now
+select Xcode 26.4.1 build 17E202 on the `macos-26` ARM64 runner class. The
+[versioned hosted image inventory](https://github.com/actions/runner-images/blob/102f6553849daabcbd37e321e2e224dbab45c469/images/macos/macos-26-arm64-Readme.md)
+includes that toolchain, the iOS 26.4 SDK, and the iOS 26.4.1 Simulator runtime.
+[Apple's Xcode 26.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes)
+document a fix for `simdiskimaged` repeatedly terminating under memory pressure,
+which could hang `simctl` (172343027), and restored automatic runtime cache
+creation (170836966). The selected update contains those fixes. The retained
+timeout alone does not prove that either Apple defect caused the earlier run.
 
-This is a supported toolchain update to test the certificate failure, not proof
-that this Xcode version fixes it. A fresh exact-source run must pass the existing
-native purchase, refund, pending approval, UI, recovery, and packaging checks.
+Recovery still selects an installed Simulator runtime matching the selected
+SDK's major/minor version; an older SDK/runtime combination is not silently
+substituted. The app's minimum deployment target is unchanged. A fresh
+exact-source run must pass the existing native purchase, refund, pending
+approval, UI, recovery, and packaging checks before qualification is established.
 Source-contract tests establish only coherent configuration and guard behavior.
 Neither receipt verification nor timing/assertion requirements are relaxed;
 changing the clock or trusting an unverified transaction is not a recovery step.
@@ -127,7 +132,7 @@ upload at 5 minutes and the whole job at 45 minutes, leaving room for checkout a
 Python setup. Each boundary fails rather than beginning an unbounded retry.
 
 The single full `xcrun simctl list --json` inventory command has a nominal
-60-second cap: at most 56 seconds of work and the existing four seconds reserved
+90-second cap: at most 86 seconds of work and the existing four seconds reserved
 for cleanup. This is a bounded allowance adjustment, not evidence that an earlier
 stall has been explained or fixed. Runtime and device compatibility validation
 still uses that complete response. No additional query or retry is performed.

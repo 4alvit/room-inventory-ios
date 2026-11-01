@@ -34,7 +34,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         checkout = self.job["steps"][0]
         self.assertEqual(checkout["with"], {"persist-credentials": "false", "ref": "${{ github.sha }}"})
         self.assertEqual(self.job["env"], {
-            "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+            "DEVELOPER_DIR": "/Applications/Xcode_26.4.1.app/Contents/Developer",
             "RECOVERY_TESTED_COMMIT": "${{ needs.ios.outputs.tested-commit }}",
             "RECOVERY_TESTED_TREE": "${{ needs.ios.outputs.tested-tree }}",
         })
@@ -53,7 +53,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.profile["workflow_path"], ".github/workflows/ci.yml")
         self.assertEqual(self.profile["job_id"], "recovery")
         self.assertEqual(self.profile["runner_label"], self.job["runs-on"])
-        self.assertEqual(self.job["runs-on"], "macos-15")
+        self.assertEqual(self.job["runs-on"], "macos-26")
         self.assertEqual(self.profile["job_timeout_minutes"], int(self.job["timeout-minutes"]))
         stages = sum(self.profile[key] for key in ("discovery_seconds", "recovery_seconds", "retention_seconds"))
         self.assertLess(stages, 36 * 60)
@@ -70,10 +70,10 @@ class RecoveryWorkflowTests(unittest.TestCase):
         ordinary = (self.ci["jobs"]["ios"], codeql["jobs"]["swift"], release["jobs"]["package"])
         self.assertEqual(self.profile["runner_arch"], "ARM64")
         self.assertEqual(self.profile["process_arch"], "arm64")
-        self.assertEqual(self.profile["xcode_version"], "Xcode 26.3\nBuild version 17C529")
+        self.assertEqual(self.profile["xcode_version"], "Xcode 26.4.1\nBuild version 17E202")
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
-            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.3.app/Contents/Developer")
+            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.4.1.app/Contents/Developer")
         guards = []
         for job in ordinary:
             steps = job["steps"]

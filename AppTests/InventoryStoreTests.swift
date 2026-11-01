@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 import InventoryCore
 @testable import RoomInventory
 
@@ -110,6 +111,56 @@ final class InventoryStoreTests: XCTestCase {
         XCTAssertEqual(store.inventory, before)
         XCTAssertEqual(try store.repository?.load(), before)
         XCTAssertNotNil(store.errorMessage)
+    }
+
+    func testRestoreReadsBackupAcrossMultipleChunks() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try InventoryRepository(rootURL: directory.appendingPathComponent("source"))
+        let original = Data(repeating: 0x5A, count: 160 * 1_024)
+        let attachment = try source.importAttachment(data: original, originalName: "original.png", mediaType: "image/png", kind: .photo)
+        let inventory = Inventory(homes: [InventoryHome(name: "Restored home", rooms: [
+            InventoryRoom(name: "Room", items: [InventoryItem(name: "Item", attachments: [attachment])])
+        ])])
+        let backup = directory.appendingPathComponent("valid.roominventory")
+        try source.exportBackup(inventory).write(to: backup)
+        let store = InventoryStore(rootURL: directory.appendingPathComponent("target"))
+        await store.load()
+        await store.restore(url: backup)
+        XCTAssertEqual(store.inventory, inventory)
+        XCTAssertEqual(try store.repository?.load(), inventory)
+        XCTAssertEqual(try store.repository?.data(for: attachment), original)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertFalse(store.isBusy)
+    }
+
+    func testRestoreRejectsOversizedAndNonRegularFilesWithoutReplacingInventory() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InventoryStore(rootURL: directory.appendingPathComponent("target"))
+        await store.load()
+        await store.addHome(name: "Keep this home")
+        let before = store.inventory
+
+        let oversized = directory.appendingPathComponent("oversized.roominventory")
+        XCTAssertTrue(FileManager.default.createFile(atPath: oversized.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: UInt64(InventoryLimits.maxBackupBytes + 1))
+        try handle.close()
+        let folder = directory.appendingPathComponent("folder.roominventory", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fifo = directory.appendingPathComponent("pipe.roominventory")
+        XCTAssertEqual(mkfifo(fifo.path, S_IRUSR | S_IWUSR), 0)
+
+        for input in [oversized, folder, fifo] {
+            store.errorMessage = nil
+            await store.restore(url: input)
+            XCTAssertEqual(store.inventory, before, input.lastPathComponent)
+            XCTAssertEqual(try store.repository?.load(), before, input.lastPathComponent)
+            XCTAssertNotNil(store.errorMessage, input.lastPathComponent)
+            XCTAssertNil(store.notice, input.lastPathComponent)
+            XCTAssertFalse(store.isBusy, input.lastPathComponent)
+        }
     }
 
     func testStorageFailureDoesNotPublishAnUnsavedAddition() async throws {

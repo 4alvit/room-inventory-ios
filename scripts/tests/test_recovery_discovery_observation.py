@@ -1,7 +1,8 @@
 """Six paired/fault groups; all subprocess/selector/signal/filesystem work is fake.
 
 Frozen Alarm/Discovery class source below is the exact 3876cda baseline, for
-operation/clock parity without executing git or depending on local artifacts.
+non-poll operation/clock parity. Polling is now deliberately fair while streams
+remain open; failed exits no longer wait for inherited pipes to close.
 """
 from contextlib import ExitStack
 from copy import deepcopy
@@ -105,9 +106,11 @@ class World:
     def poll(self):
         self.poll_calls += 1
         self.log("poll")
-        if self.mode == "final_tick":
+        if self.mode == "slow_live_poll" or self.mode == "final_tick" and not self.maps:
             self.now += 56
-        return None if self.mode == "running_poll" else 0
+        if self.mode == "failed_open_pipe":
+            return 7
+        return None if self.mode in ("running_poll", "timeout") else 0
 
     def wait(self, timeout):
         self.log("wait", timeout)
@@ -175,12 +178,15 @@ class DiscoveryObservationTests(unittest.TestCase):
                 w.run()
             worlds.append(w)
         old, new = worlds
-        self.assertEqual(old.events, new.events)
+        # The supervisor adds a poll in every open-stream quantum. All other
+        # external operations, deadlines and cleanup boundaries remain equal.
+        self.assertEqual([e for e in old.events if e[0] != "poll"],
+                         [e for e in new.events if e[0] != "poll"])
         self.assertEqual(type(old.primary), type(new.primary))
         self.assertEqual(str(old.primary), str(new.primary))
         self.assertEqual(old.stop_calls, new.stop_calls)
         VALIDATION_CASES.append({"mode": mode, "setup": None if setup is None else setup.__name__,
-            "external_trace_equal": True, "baseline_external_calls": len(old.events),
+            "non_poll_external_trace_equal": True, "baseline_external_calls": len(old.events),
             "candidate_external_calls": len(new.events),
             "clock_calls_each": sum(event[0] == "clock" for event in new.events),
             "trace_sha256": hashlib.sha256(json.dumps(new.events, sort_keys=True).encode()).hexdigest(),
@@ -224,13 +230,40 @@ class DiscoveryObservationTests(unittest.TestCase):
                 _, w = self.pair(mode)
                 obs = self.observation(w)
                 self.assertIsInstance(w.primary, H.Deadline)
-                self.assertEqual(obs["last_poll_result"], None)
-                self.assertEqual(obs["poll_seen"], mode == "running_poll")
+                self.assertEqual(obs["last_poll_result"], 0 if mode == "exit_open_pipe" else None)
+                self.assertTrue(obs["poll_seen"])
                 self.assertEqual(obs["poll_returns"], w.poll_calls)
                 if mode != "running_poll":
-                    self.assertEqual(w.poll_calls, 0)  # Open map short-circuits poll even if child would return zero.
+                    self.assertGreater(w.poll_calls, 0)  # Open streams no longer starve the child poll.
                     self.assertFalse(obs["stdout"]["eof"])
                     self.assertEqual(obs["stdout"]["read_returns"], 0)
+
+    def test_failed_exit_retains_ready_diagnostics_without_waiting_for_inherited_streams(self):
+        with World(mode="failed_open_pipe") as w:
+            w.reads[11] = [BlockingIOError()]
+            w.reads[12] = [b"simulator service unavailable"]
+            w.run()
+            self.assertIsInstance(w.primary, H.controller.RunFailure)
+            self.assertIn("Discovery command failed", str(w.primary))
+            self.assertEqual(w.record["exit_code"], 7)
+            self.assertEqual(w.select_calls, 1)
+            self.assertIn(["select", 0], w.events)
+            self.assertEqual(w.poll_calls, 1)
+            self.assertFalse(self.observation(w)["stdout"]["eof"])
+            self.assertEqual(self.observation(w)["last_poll_result"], 7)
+            self.assertEqual(w.record["stderr_sha256"], hashlib.sha256(b"simulator service unavailable").hexdigest())
+            self.assertEqual(w.stop_calls, 1)
+            self.assertEqual(w.close_calls, ["selector", 11, 12])
+
+    def test_late_poll_cannot_start_a_stream_read(self):
+        with World(mode="slow_live_poll") as w:
+            w.run()
+            self.assertIsInstance(w.primary, H.Deadline)
+            self.assertEqual(w.select_calls, 0)
+            self.assertEqual(w.poll_calls, 1)
+            self.assertEqual(w.stop_calls, 1)
+            self.assertIsNone(w.record["exit_code"])
+            self.assertEqual(w.record["timing"]["command_deadline"], 160)
 
     def test_3_delayed_disk_spawn_and_final_tick_keep_original_bounds(self):
         for mode, stage, substage, source, spawned in (

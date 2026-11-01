@@ -357,6 +357,14 @@ their actual ordered export operations. Missing, duplicate, stale, ambiguous or
 out-of-order evidence fails the attempt. The bridge writes only runner coordination
 files and never writes application data or supplies entitlements.
 
+Files can update a saved backup's metadata when the user opens it in the restore
+picker. Raw snapshots retain its change time (`ctime`), but comparisons of saved
+Files copies across observations require unchanged path, device/inode identity,
+byte count, hash, modification time and birth time instead of unchanged `ctime`.
+Generated app exports still require all recorded metadata to match. Every read
+also retains its exact before/after stability check, including `ctime`, so a file
+changing during collection still fails.
+
 ### Storage admission and abort policy
 
 Admission requires **at least 24 GiB free** on both the output and simulator-device

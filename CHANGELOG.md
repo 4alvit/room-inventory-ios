@@ -37,6 +37,7 @@ acceptance and App Review remain separate requirements.
 - Recognize Files folder titles exposed as action-menu buttons without activating the title menu.
 - Select the actual Restore backup button when the system alert exposes a duplicate accessibility wrapper.
 - Avoid starting app-level inventory and purchase stores inside hosted unit tests.
+- Accept Files metadata-only change times after opening a saved backup while preserving content, identity and collection-stability checks.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
 - Keep real StoreKit and ordinary UI tests on Xcode 26.4.1 / iOS 26.2 / iPhone 16e, while requiring Recovery on Xcode 27.1 / iOS 27.0 / iPhone 17 and building previews with Xcode 27.1; retain supported Swift CodeQL analysis on Xcode 26.4.1.

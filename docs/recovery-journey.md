@@ -618,6 +618,14 @@ No service invokes guard, collection/bridge callbacks, nested commands or flush.
 An identity and reentry check protects the command-local hook; it is cleared
 before all cleanup and cannot carry into a later command.
 
+The private completed-child handoff may interrupt only the command loop's outer
+guard, which catches and validates that exact per-command signal. Collector
+callbacks retain cooperative pipe draining, child polling, ownership checks and
+the same deadline, but their guarded resource walks must finish normally. A
+callback is never interrupted by this internal handoff or replayed after partial
+work. An actual callback error still fails the command. After a handoff, normal
+wait, owned-process cleanup and the fresh full accounting barrier remain required.
+
 Child exit never skips or accepts an incomplete walk. For operational commands,
 the terminal pipe condition and allowed wait result must still pass a tick under
 the original command work deadline (`end - 4`). The hook is disabled before

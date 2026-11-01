@@ -914,6 +914,7 @@ class RecoveryRun:
         derived_deferred = _DerivedScanDeferred()
         derived_root, derived_identity = self.derived, self._owned_derived_identity
         pipe_eof = [False, False]
+        allow_scan_handoff = False
 
         def require_device_owner(*, active_scan=True):
             # Python object/ledger identity only; never infer kernel group absence.
@@ -1028,11 +1029,13 @@ class RecoveryRun:
                     if device_scan:
                         require_device_owner()
                         self.tick()  # The allowed exit AND EOF must be observed in time.
-                        raise device_deferred
-                    if derived_identity is not None:
+                        if allow_scan_handoff:
+                            raise device_deferred
+                    elif derived_identity is not None:
                         require_derived_owner()
                         self.tick()
-                        raise derived_deferred
+                        if allow_scan_handoff:
+                            raise derived_deferred
             finally:
                 service_busy = False
 
@@ -1086,6 +1089,7 @@ class RecoveryRun:
                    self.observe_runtime("poll", record, process.poll()) is None):
                 scan_handoff = None
                 try:
+                    allow_scan_handoff = True
                     self.guard()
                 except _DeviceScanDeferred as deferred:
                     # Only this command's sentinel may cross the walker boundary.
@@ -1105,6 +1109,11 @@ class RecoveryRun:
                     record["derived_scan_handoff"] = {
                         "state": "incomplete", "reason": "allowed_exit_and_both_pipe_eof"}
                     scan_handoff = require_derived_owner
+                finally:
+                    # Collector callbacks perform their own guarded reads. Keep
+                    # servicing the child there, but finish those reads instead
+                    # of interrupting a callback that cannot safely be replayed.
+                    allow_scan_handoff = False
                 self.tick()
                 if on_poll:
                     on_poll()

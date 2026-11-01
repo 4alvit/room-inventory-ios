@@ -46,6 +46,8 @@ acceptance and App Review remain separate requirements.
 - Allow a several-minute first Simulator boot within the existing Recovery startup budget, preserving one attempt, complete resource accounting and required cleanup.
 - Give the single Recovery photo import bounded headroom inside the existing startup deadline, preserving exact fixture binding and full terminal accounting without retrying the seed.
 - Keep Recovery collector callbacks intact when the native child finishes during resource accounting, while preserving child supervision and the final complete resource check.
+- Account for disappearing children only inside the active, identity-bound XCTest result; keep unrelated output and finalized results strict.
+- Reuse one OCR state and geometry snapshot before the single switch activation, preserving the ten-second readiness deadline and explicit hittability check.
 - Keep real StoreKit and ordinary UI tests on Xcode 26.4.1 / iOS 26.2 / iPhone 16e, while requiring Recovery on Xcode 27.1 / iOS 27.0 / iPhone 17 and building previews with Xcode 27.1; retain supported Swift CodeQL analysis on Xcode 26.4.1.
 - Unsigned Release previews omit build-machine paths and code-coverage data; packaging rejects app payloads that retain them.
 - PDF fonts preserve exact Cyrillic text for copying and searching, including the letter к.

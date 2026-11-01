@@ -188,9 +188,13 @@ def owned_directory_identity(root):
 
 
 def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
-              cap_metric="max_logical_allocated", vanished_child_check=None):
+              cap_metric="max_logical_allocated", vanished_child_check=None,
+              vanished_path_check=None, entry_observer=None):
     """Bounded lstat traversal. Do not follow symlinks or require native size probes."""
     require(cap_metric in ("max_logical_allocated", "allocated"), "Unknown resource cap metric")
+    require(vanished_child_check is None or vanished_path_check is None,
+            "Conflicting vanished-child policies", ConfigurationFailure)
+    permits_vanished = vanished_child_check is not None or vanished_path_check is not None
     if vanished_child_check is not None:
         tick()
         vanished_child_check()
@@ -199,6 +203,12 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         require(vanished_child_check is None, "Required resource root disappeared", ResourceAccountingFailure)
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
     require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
+    if entry_observer is not None:
+        tick()
+        root_info = root.lstat()
+        tick()
+        entry_observer(root, root_info)
+        tick()
     pending, logical, allocated, entries = [root], 0, 0, 0
     attempted_entries, vanished_entries, vanished_directories = 0, 0, 0
     excluded = set(excluded)
@@ -238,13 +248,16 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         try:
             iterator = os.scandir(directory)
         except FileNotFoundError as error:
-            if (vanished_child_check is None or error.errno != errno.ENOENT
+            if (not permits_vanished or error.errno != errno.ENOENT
                     or directory == root or not directory.is_relative_to(root)):
                 raise
             # A previously charged owned directory can disappear while queued.
             # Only the scandir open is eligible; iteration/context errors stay strict.
             tick()  # Do not query identity after a late open return.
-            vanished_child_check()
+            if vanished_path_check is not None:
+                vanished_path_check(directory)
+            else:
+                vanished_child_check()
             tick()
             vanished_directories += 1
             continue  # Retain the directory's already observed allocated bytes.
@@ -254,22 +267,29 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                 path = Path(entry.path)
                 if path in excluded:
                     continue
-                if vanished_child_check is not None:
+                if permits_vanished:
                     # Bound encountered work even if every observed child vanishes.
                     attempted_entries += 1
                     require(attempted_entries <= max_entries, "Resource entry-count cap exceeded")
                 try:
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError as error:
-                    if vanished_child_check is None or error.errno != errno.ENOENT:
+                    if not permits_vanished or error.errno != errno.ENOENT:
                         raise
                     # Only this child-stat syscall is eligible here. Root, callback,
                     # iterator/context, metadata and cap failures stay strict.
                     tick()  # A late stat return cannot start another filesystem query.
-                    vanished_child_check()
+                    if vanished_path_check is not None:
+                        vanished_path_check(path)
+                    else:
+                        vanished_child_check()
                     tick()
                     vanished_entries += 1
                     continue
+                if entry_observer is not None:
+                    tick()
+                    entry_observer(path, info)
+                    tick()
                 entries += 1
                 require(entries <= max_entries, "Resource entry-count cap exceeded")
                 # Native products/device roots may contain links; account for the
@@ -288,6 +308,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         tick()  # Iterator closure is a returning boundary under the same deadline.
         vanished_child_check()
         tick()
+    if permits_vanished:
         result.update(attempted_entries=attempted_entries, vanished_entries=vanished_entries,
                       vanished_directories=vanished_directories)
     return result
@@ -452,6 +473,8 @@ class RecoveryRun:
         self.output = Path(grant["output_root"])
         self.derived = self.output / "DerivedData"
         self.device_root = None
+        self._owned_output_identity = None
+        self._owned_xcresult_identity = None
         self._owned_device_identity = None
         self._owned_derived_identity = None
         self.device_base = Path.home() / "Library/Developer/CoreSimulator/Devices"
@@ -745,9 +768,98 @@ class RecoveryRun:
         require(owned_directory_identity(root) == binding[3],
                 "Owned DerivedData root replaced", ResourceAccountingFailure)
 
+    def bind_output_resource_root(self):
+        require(self._owned_output_identity is None and self.owns_output
+                and self.output == Path(self.grant["output_root"]),
+                "Invalid owned output binding", ConfigurationFailure)
+        self.tick()
+        self._owned_output_identity = (self.output, owned_directory_identity(self.output))
+        self.tick()
+
+    def validate_xcresult_resource_roots(self, binding=None, observed=None):
+        """Checkpoint identities for a result created by the current UI producer.
+
+        The bundle cannot be created in advance of xcodebuild. Bind its first
+        observed directory identity, including an entry discovered mid-scan;
+        never adopt a replacement. These checks do not make ancestry atomic.
+        """
+        self.tick()
+        if binding is not None:
+            require(self._active_xcresult_producer is binding,
+                    "Stale xcresult traversal producer", ConfigurationFailure)
+            self.original_xcresult_budget()
+        output_binding = self._owned_output_identity
+        require(output_binding is not None and self.owns_output
+                and self.output is output_binding[0]
+                and self.output == Path(self.grant["output_root"]),
+                "Stale owned output binding", ConfigurationFailure)
+        require(owned_directory_identity(self.output) == output_binding[1],
+                "Owned output root replaced", ResourceAccountingFailure)
+        self.tick()
+        root = self.output / "original.xcresult"
+
+        def bind_or_check(info):
+            require(stat.S_ISDIR(info.st_mode), "Owned xcresult root is not an ordinary directory",
+                    ResourceAccountingFailure)
+            identity = (info.st_dev, info.st_ino)
+            require(all(type(n) is int and n >= 0 for n in identity),
+                    "Owned xcresult identity unavailable", ResourceAccountingFailure)
+            if self._owned_xcresult_identity is None:
+                require(binding is not None, "Cannot adopt a finalized xcresult", ConfigurationFailure)
+                self._owned_xcresult_identity = (root, identity)
+            require(self._owned_xcresult_identity == (root, identity),
+                    "Owned xcresult root replaced", ResourceAccountingFailure)
+
+        if observed is not None:
+            path, info = observed
+            require(path == root, "Unexpected xcresult identity observation", ConfigurationFailure)
+            bind_or_check(info)
+        self.tick()
+        try:
+            info = root.lstat()
+        except FileNotFoundError as error:
+            # A normal scan may precede xcodebuild's initial bundle creation.
+            # A bound root, or an observed child of it, can never disappear.
+            self.tick()
+            if error.errno != errno.ENOENT or self._owned_xcresult_identity is not None:
+                raise
+            return
+        self.tick()
+        bind_or_check(info)
+        self.tick()
+
+    def validate_vanished_xcresult_child(self, path, binding):
+        root = self.output / "original.xcresult"
+        self.tick()
+        require(path != root and path.is_relative_to(root),
+                "Disappeared resource is outside the active xcresult", ResourceAccountingFailure)
+        require(self._owned_xcresult_identity is not None,
+                "Unbound xcresult child disappeared", ResourceAccountingFailure)
+        self.validate_xcresult_resource_roots(binding)
+        self.tick()
+
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
         span = self.observe_runtime("scan_start", value=category)
         try:
+            require("vanished_path_check" not in kwargs and "entry_observer" not in kwargs,
+                    "Resource validation cannot be overridden", ConfigurationFailure)
+            result_category = category in ("output", "original_xcresult")
+            producer = self._active_xcresult_producer if result_category else None
+            check_result_roots = result_category and (producer is not None or self._owned_xcresult_identity is not None)
+            if check_result_roots:
+                require(root == (self.output if category == "output" else self.output / "original.xcresult"),
+                        "Unexpected xcresult traversal root", ConfigurationFailure)
+                self.validate_xcresult_resource_roots(producer)
+            if producer is not None:
+                require("vanished_child_check" not in kwargs,
+                        "Xcresult validation cannot be overridden", ConfigurationFailure)
+                kwargs["vanished_path_check"] = lambda path: self.validate_vanished_xcresult_child(path, producer)
+
+                def observe_result_entry(path, info):
+                    if path == self.output / "original.xcresult":
+                        self.validate_xcresult_resource_roots(producer, (path, info))
+
+                kwargs["entry_observer"] = observe_result_entry
             if category == "device":
                 require("vanished_child_check" not in kwargs, "Device validation cannot be overridden", ConfigurationFailure)
                 owned_binding = self._owned_device_identity
@@ -772,6 +884,8 @@ class RecoveryRun:
             try:
                 result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
                                    on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
+                if check_result_roots:
+                    self.validate_xcresult_resource_roots(producer)
             finally:
                 if derived_binding is not None:
                     self._derived_scan_context = None
@@ -1328,6 +1442,7 @@ class RecoveryRun:
         require(min(self.disk_usage(self.output.parent).free, self.disk_usage(self.device_base).free) >= ADMISSION_BYTES, "Admission requires 24 GiB free; no native work started", ConfigurationFailure)
         self.output.mkdir(mode=0o700)
         self.owns_output = True
+        self.bind_output_resource_root()
         self.flush()
         self.pin_sources()
         self.record["native_started"] = True

@@ -291,8 +291,12 @@ The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
 geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs and
-individual checks before the single activation. The original live readiness and
-exact post-activation state assertions remain required.
+individual checks before the single activation. Readiness uses that same
+snapshot for the unique switch, enabled state and value `0`, followed by one
+live hittability check. A single ten-second monotonic window covers readiness
+and geometry through admission of the tap; a late observation cannot authorize
+an action. This avoids four independent remote property resolutions consuming
+the entire window. The exact post-activation value `1` remains required.
 
 In CI run `40893851357`, attempt 1, the UI log first reported
 `OCR selection model: observed 0, expected 1` after the two generic element taps.
@@ -404,7 +408,18 @@ of logical and allocated bytes. Reaching a sampled cap also aborts: new device 8
 other attempt output 1 GiB, finalized original xcresult 192 MiB, verified
 xcresult copy 192 MiB, exported attachments 128 MiB and logs 64 MiB. While the
 exact owned UI-test producer is active, its original xcresult has a separate
-512 MiB working allowance within the same 1 GiB output cap. This allowance is
+512 MiB working allowance within the same 1 GiB output cap. While this exact
+producer is active, a child of its original result may disappear between
+directory enumeration and `lstat`, or before opening an already queued child
+directory. Only these two `ENOENT` boundaries are eligible, in both the total
+output and dedicated result scans. The output directory identity is bound at
+creation; the result identity is bound on its first ordinary-directory
+observation, including first appearance during an output scan. Root loss,
+replacement, unrelated output loss, observer/iterator errors and other I/O
+errors remain fatal. Attempted entries still consume the work cap, and queued
+directories retain their already observed allocation. Deadlines and byte caps
+are unchanged. This is a live sample, not an atomic filesystem snapshot.
+The child-disappearance policy and working allowance are
 revoked before terminal accounting; final original inventory, copying, readers
 and retention still require the 192 MiB bound. A failure does not authorize
 copying or reading an oversized final bundle. Each command

@@ -331,33 +331,80 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private func selectOCRField(_ id: String, app: XCUIApplication) throws {
         let toggle = app.switches["ocr.select.\(id)"]
         try reveal(toggle, app: app)
-        let ready = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true AND value == %@", "0"),
-            object: toggle)
-        try ledger.require("OCR \(id) starts unselected and interactive", XCTWaiter.wait(for: [ready], timeout: 10) == .completed)
+        let window = RecoveryOCRReadinessWindow()
+        typealias Node = (element: any XCUIElementSnapshot, form: (any XCUIElementSnapshot)?, inToolbar: Bool)
+        typealias Observation = (snapshot: any XCUIElementSnapshot, nodes: [Node], switches: [Node], navigation: [Node])
+        func observeForm() throws -> Observation {
+            let snapshot = try app.snapshot()
+            _ = try window.remaining()
+            var pending: [Node] = [(snapshot, nil, false)]
+            var nodes: [Node] = []
+            while let next = pending.popLast() {
+                _ = try window.remaining()
+                guard nodes.count < 10_000 else {
+                    throw RecoveryJourneyFailure.assertion("OCR geometry node bound", "exceeded", "10000 nodes")
+                }
+                let form = next.element.elementType == .collectionView ? next.element : next.form
+                let inToolbar = next.inToolbar || next.element.elementType == .toolbar
+                nodes.append((next.element, form, inToolbar))
+                pending.append(contentsOf: next.element.children.reversed().map { ($0, form, inToolbar) })
+            }
+            let switches = nodes.filter { $0.element.elementType == .switch && $0.element.identifier == "ocr.select.\(id)" }
+            let navigation = nodes.filter { $0.element.elementType == .navigationBar }.filter {
+                [$0.element.identifier, $0.element.title, $0.element.label,
+                 $0.element.placeholderValue ?? "", $0.element.value as? String ?? ""].contains("Review recognized text")
+            }
+            return (snapshot, nodes, switches, navigation)
+        }
+        var observation: Observation?
+        var observationError: Error?
+        var observedState = "<no timely observation>"
+        // A live four-property predicate resolves the same switch repeatedly.
+        // Read state once from the snapshot also used for geometry, then make
+        // only the separate hit test that a snapshot cannot provide.
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            if observation != nil || observationError != nil { return true }
+            do {
+                observation = try window.probe(snapshot: observeForm, stateReady: { candidate in
+                    let targets = candidate.switches
+                    guard targets.count <= 1, candidate.navigation.count <= 1 else {
+                        throw RecoveryJourneyFailure.assertion("OCR \(id) unique form target",
+                            "switches=\(targets.count), navigation=\(candidate.navigation.count)", "one of each")
+                    }
+                    let target = targets.first
+                    let value = target?.element.value as? String
+                    let enabled = target?.element.isEnabled == true
+                    observedState = "switches=\(targets.count); enabled=\(enabled); value=\(value ?? "<missing>")"
+                    return target?.form != nil && candidate.navigation.count == 1 && enabled && value == "0"
+                }, hittable: {
+                    let hittable = toggle.isHittable
+                    observedState += "; hittable=\(hittable)"
+                    return hittable
+                })
+                return observation != nil
+            } catch {
+                // End the wait without another snapshot; retain this error in
+                // the diagnostic before any observation can authorize a tap.
+                observationError = error
+                return true
+            }
+        }, object: nil)
+        let readinessResult = XCTWaiter.wait(for: [ready], timeout: try window.remaining())
+        let timely = (try? window.remaining()) != nil
+        if readinessResult != .completed || !timely || observation == nil || observationError != nil {
+            throw RecoveryJourneyFailure.assertion("OCR \(id) readiness",
+                "\(observedState); wait=\(readinessResult); timely=\(timely); observation_error=\(observationError.map { String(describing: $0) } ?? "<none>")",
+                "one enabled, unselected, hittable switch within 10 seconds")
+        }
+        try ledger.require("OCR \(id) starts unselected and interactive", readinessResult == .completed && observation != nil)
+        guard let observation else {
+            throw RecoveryJourneyFailure.assertion("OCR \(id) readiness observation", "missing", "completed")
+        }
         // A SwiftUI labeled switch can expose the whole row as its frame.
         // This English-only journey activates the trailing switch itself, not
         // the center of that label/row. Never retry a toggle: a second tap can
         // undo a delayed first activation and hide a real interaction failure.
-        let snapshot = try app.snapshot()
-        typealias Node = (element: any XCUIElementSnapshot, form: (any XCUIElementSnapshot)?, inToolbar: Bool)
-        var pending: [Node] = [(snapshot, nil, false)]
-        var nodes: [Node] = []
-        while let next = pending.popLast() {
-            guard nodes.count < 10_000 else {
-                throw RecoveryJourneyFailure.assertion("OCR geometry node bound", "exceeded", "10000 nodes")
-            }
-            let form = next.element.elementType == .collectionView ? next.element : next.form
-            let inToolbar = next.inToolbar || next.element.elementType == .toolbar
-            nodes.append((next.element, form, inToolbar))
-            pending.append(contentsOf: next.element.children.reversed().map { ($0, form, inToolbar) })
-        }
-        let switches = nodes.filter { $0.element.elementType == .switch && $0.element.identifier == "ocr.select.\(id)" }
-        let navigationBars = nodes.filter { $0.element.elementType == .navigationBar }
-        let navigation = navigationBars.filter {
-            [$0.element.identifier, $0.element.title, $0.element.label,
-             $0.element.placeholderValue ?? "", $0.element.value as? String ?? ""].contains("Review recognized text")
-        }
+        let (snapshot, nodes, switches, navigation) = observation
         try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
             && switches.first?.form != nil && navigation.count == 1)
         guard let target = switches.first, let form = target.form, let navigation = navigation.first else {
@@ -396,6 +443,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) switch point is unobscured", checks.values.allSatisfy { $0 })
+        _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
         app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: point.x - snapshot.frame.minX, dy: point.y - snapshot.frame.minY)).tap()
         let selected = XCTNSPredicateExpectation(

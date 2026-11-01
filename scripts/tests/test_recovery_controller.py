@@ -894,6 +894,7 @@ class CommandFailureTests(ControllerCase):
         run.guard = lambda **_: original_guard(force=True)
         with self.fake_child(active=True) as child, injected_resource_tree({
                 run.xcresult: [("payload", resource_info())]}) as tree:
+            run.bind_output_resource_root()  # Bind the injected directory identity.
             tree.entries[run.xcresult / "payload"].stat.side_effect = lambda **_: resource_info(
                 256 * controller.MIB if run._active_xcresult_producer is not None else 10)
             child.selector.select.return_value = []
@@ -916,6 +917,7 @@ class CommandFailureTests(ControllerCase):
         run.guard = lambda **_: original_guard(force=True)
         with self.fake_child(active=True) as child, injected_resource_tree({
                 run.xcresult: [("payload", resource_info())]}) as tree:
+            run.bind_output_resource_root()  # Bind the injected directory identity.
             tree.entries[run.xcresult / "payload"].stat.side_effect = lambda **_: resource_info(
                 256 * controller.MIB if run.groups else 10)
             child.selector.select.return_value = []
@@ -949,6 +951,7 @@ class CommandFailureTests(ControllerCase):
                 original_guard = run.guard
                 run.guard = lambda **_: original_guard(force=True)
                 with self.fake_child(active=True) as child, injected_resource_tree({target: [("payload", resource_info())]}) as tree:
+                    run.bind_output_resource_root()  # Bind before enabling the producer.
                     def info(**_):
                         size = limit if run._active_xcresult_producer is not None else 0
                         return resource_info(size if metric == "logical" else 0,
@@ -1002,6 +1005,7 @@ class CommandFailureTests(ControllerCase):
                 original_guard = run.guard
                 run.guard = lambda **_: original_guard(force=True)
                 with self.fake_child(active=True) as child, injected_resource_tree({}):
+                    run.bind_output_resource_root()  # The later mutation remains the failure.
                     def invalidate():
                         entry = run.groups[-1]
                         if mutation == "phase": run.record["phase"] = "collect"

@@ -38,6 +38,7 @@ POLICY = {
     "schema_version": 1, "repository": "4alvit/room-inventory-ios", "job_id": "recovery",
     "runner_label": "macos-26", "image_os": "macos26", "workflow_path": ".github/workflows/ci.yml",
     "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 26.4.1\nBuild version 17E202",
+    "runtime_version": "26.2",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
     "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,
@@ -675,20 +676,28 @@ def version(value):
     return tuple(int(p) for p in value.split(".")) + ((0,) if value.count(".") == 1 else ())
 
 
-def select_runtime(inventory, sdk):
-    """Same SDK major/minor; newest installed patch, then newest iPhone generation.
+def select_runtime(inventory, sdk, *, runtime_line=None):
+    """Newest installed patch in the selected line, then newest iPhone generation.
 
-    Patch equality is intentionally not required. A compatible type must appear
-    in runtime support data, an available device, or a declared version range.
+    Default to the SDK major/minor unless an older/equal line is explicitly
+    pinned. Patch equality is intentionally not required. A compatible type must
+    appear in runtime support data, an available device, or a declared range.
     No device boot, runtime download, fallback runtime or retry is performed.
     """
     sdk_version = version(sdk)
+    selected_line = sdk_version[:2]
+    if runtime_line is not None:
+        require(isinstance(runtime_line, str) and re.fullmatch(r"\d+\.\d+", runtime_line),
+                "Explicit runtime line must be major.minor", Failure)
+        selected_line = version(runtime_line)[:2]
+        require(selected_line <= sdk_version[:2], "Pinned runtime line exceeds SDK version", Failure)
     require(isinstance(inventory.get("runtimes"), list) and isinstance(inventory.get("devicetypes"), list)
             and isinstance(inventory.get("devices"), dict), "Incomplete simulator inventory", Failure)
     runtimes = [r for r in inventory["runtimes"] if r.get("isAvailable") is True
                 and re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+", r.get("identifier", ""))
-                and version(r.get("version"))[:2] == sdk_version[:2]]
-    require(runtimes, "No installed available runtime matches SDK major/minor", Failure)
+                and version(r.get("version"))[:2] == selected_line]
+    require(runtimes, "No installed available runtime matches " +
+            ("pinned major/minor" if runtime_line is not None else "SDK major/minor"), Failure)
     runtime = max(runtimes, key=lambda r: (version(r["version"]), r["identifier"]))
     supported = {t.get("identifier") for t in runtime.get("supportedDeviceTypes", []) if isinstance(t, dict)}
     supported.update(d.get("deviceTypeIdentifier") for d in inventory["devices"].get(runtime["identifier"], [])
@@ -703,7 +712,9 @@ def select_runtime(inventory, sdk):
     require(types, "No evidenced compatible installed iPhone type", Failure)
     selected = max(types, key=lambda t: (int((re.search(r"iPhone-(\d+)", t["identifier"]) or ["", "0"])[1]), t["identifier"]))
     return {"runtime": runtime["identifier"], "runtime_version": runtime["version"], "sdk_version": sdk,
-            "device_type": selected["identifier"], "patch_policy": "same-major-minor-newest-installed-patch"}
+            "device_type": selected["identifier"], "patch_policy":
+            "pinned-major-minor-newest-installed-patch" if runtime_line is not None
+            else "same-major-minor-newest-installed-patch"}
 
 
 def parse_commit_identity(raw, audit):
@@ -853,7 +864,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             require(xcode_version == profile["xcode_version"], "Installed Xcode version/build differs", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
             inventory = json.loads(inventory_with_diagnostics(discovery, context))
-            selection = select_runtime(inventory, sdk)
+            selection = select_runtime(inventory, sdk, runtime_line=profile["runtime_version"])
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)
             installed = discovery.command([sys.executable, str(root / "scripts/install-xcodegen.py")], "install-xcodegen", 70).decode().strip()

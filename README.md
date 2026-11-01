@@ -55,6 +55,15 @@ iOS Simulator SDK's major/minor version. Automatic selection prefers the newest
 available runtime patch and a booted iPhone within that runtime. Set
 `SIMULATOR_UDID` to select a specific available iPhone on iOS 17 or newer, including
 a different runtime version. It fails if the required runtime is absent.
+Set `SIMULATOR_RUNTIME_VERSION=26.2` to require the newest installed patch on that
+major/minor line instead. A runtime pin must not be newer than the active SDK;
+when combined with `SIMULATOR_UDID`, that device must also match the pinned line.
+Hosted app tests and recovery explicitly use iOS 26.2 with Xcode 26.4.1 to avoid
+the observed StoreKit Test configuration failures on iOS 26.4.1. This is a
+declared test environment, not an automatic fallback; a missing runtime fails CI.
+See [toolchain qualification](docs/recovery-hosted.md#toolchain-qualification).
+App unit tests must pass before UI tests start. Both phases are required and retain
+separate result bundles; a failure in either phase fails the check.
 `bash scripts/ci.sh --static` runs only tooling checks; `--build-only` runs Core
 tests and generic compilation, explicitly excluding app tests. Neither is full
 release acceptance. Hosted CodeQL for Swift, Python and workflows is a separate

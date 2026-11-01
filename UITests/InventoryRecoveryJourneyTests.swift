@@ -410,8 +410,12 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 if !firstFilesTapCaptured {
                     firstFilesTapCaptured = true
                     ledger.captureFirstFilesTap("before", localTitle: localTitle, target: local, app: app)
+                    // Keep the diagnostic pair when tap readiness throws; the
+                    // nonthrowing capture preserves the original failure.
+                    defer {
+                        ledger.captureFirstFilesTap("after", localTitle: localTitle, target: local, app: app)
+                    }
                     try tap(local, app: app)
-                    ledger.captureFirstFilesTap("after", localTitle: localTitle, target: local, app: app)
                 } else {
                     try tap(local, app: app)
                 }

@@ -71,6 +71,9 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.profile["runner_arch"], "ARM64")
         self.assertEqual(self.profile["process_arch"], "arm64")
         self.assertEqual(self.profile["xcode_version"], "Xcode 26.4.1\nBuild version 17E202")
+        self.assertEqual(self.profile["runtime_version"], "26.2")
+        self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_RUNTIME_VERSION"],
+                         self.profile["runtime_version"])
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
             self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.4.1.app/Contents/Developer")

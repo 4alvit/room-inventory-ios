@@ -52,17 +52,34 @@ The subsequent Xcode 26.3 cohort passed Core and iOS tests, but recovery discove
 still timed out while querying the simulator inventory. The four Mac jobs now
 select Xcode 26.4.1 build 17E202 on the `macos-26` ARM64 runner class. The
 [versioned hosted image inventory](https://github.com/actions/runner-images/blob/102f6553849daabcbd37e321e2e224dbab45c469/images/macos/macos-26-arm64-Readme.md)
-includes that toolchain, the iOS 26.4 SDK, and the iOS 26.4.1 Simulator runtime.
+includes that toolchain, the iOS 26.4 SDK, and iOS 26.2 and 26.4.1 Simulator runtimes.
 [Apple's Xcode 26.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes)
 document a fix for `simdiskimaged` repeatedly terminating under memory pressure,
 which could hang `simctl` (172343027), and restored automatic runtime cache
 creation (170836966). The selected update contains those fixes. The retained
 timeout alone does not prove that either Apple defect caused the earlier run.
 
-Recovery still selects an installed Simulator runtime matching the selected
-SDK's major/minor version; an older SDK/runtime combination is not silently
-substituted. The app's minimum deployment target is unchanged. A fresh
-exact-source run must pass the existing native purchase, refund, pending
+The first Xcode 26.4.1 / iOS 26.4.1 cohort then failed native StoreKit tests with
+`SKInternalErrorDomain Code=3` while saving the test configuration, followed by
+failed configuration operations and missing products. This matches symptoms of
+the StoreKit Test regression acknowledged by Apple DTS as FB22237318 in the
+[Apple developer forum](https://developer.apple.com/forums/thread/826971).
+The forum's internal-cause explanation is a developer report, not proof of the
+cause of this run. Later replies also distinguish Xcode fixes from runtime fixes.
+
+Hosted app tests and recovery now explicitly select the installed iOS 26.2
+runtime line, where the previous cohort passed all eight native ProStore tests,
+while retaining Xcode 26.4.1's simulator-service fixes. Apple's
+[compatibility matrix](https://developer.apple.com/xcode/system-requirements)
+supports iOS 15 or later Simulator runtimes with Xcode 26.4.1. The app's minimum
+deployment target remains iOS 17. The app-test job declares
+`SIMULATOR_RUNTIME_VERSION=26.2`, and recovery binds `runtime_version: "26.2"`
+in its hashed profile. A missing or unavailable pinned runtime fails; neither
+job silently substitutes another runtime. Within that line, the newest installed
+patch is selected. The selected SDK and runtime versions are recorded separately.
+
+This configuration change does not qualify the combined toolchain by itself.
+A fresh exact-source run must pass the existing native purchase, refund, pending
 approval, UI, recovery, and packaging checks before qualification is established.
 Source-contract tests establish only coherent configuration and guard behavior.
 Neither receipt verification nor timing/assertion requirements are relaxed;
@@ -115,8 +132,10 @@ secret credential or a local execution permission.
 
 Discovery is one bounded pass over the selected Xcode, Simulator SDK and one
 installed simulator inventory. The chosen iPhone device type must exist in that
-inventory, and its available runtime must match the selected SDK's major/minor
-version. A differing runtime patch version is recorded explicitly. No runtime
+inventory, and its available runtime must match the profile's explicit major/minor
+line, which cannot be newer than the selected SDK. Without an explicit line, the
+selection helper requires the SDK's major/minor version. Runtime patch differences
+and intentional SDK/runtime differences are recorded explicitly. No runtime
 download, alternate runner, fallback Xcode or probe/retry loop is allowed. Actual
 Xcode version/build, SDK/runtime versions, runner image version and architecture
 are recorded; no Intel architecture is assumed. GitHub updates runner images, so

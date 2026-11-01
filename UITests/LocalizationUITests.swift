@@ -66,7 +66,7 @@ final class LocalizationUITests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             readyPolls += 1
             guard phase.permitsAction(at: ProcessInfo.processInfo.systemUptime),
-                  self.csvShareIsReady(app: app, headers: headers, closeButtons: closeButtons) else { return false }
+                  self.csvShareIsReady(app: app, closeButtons: closeButtons) else { return false }
             return phase.permitsAction(at: ProcessInfo.processInfo.systemUptime)
         }, object: nil)
         let readyResult = XCTWaiter.wait(for: [ready],
@@ -99,7 +99,7 @@ final class LocalizationUITests: XCTestCase {
         let returned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             returnPolls += 1
             guard phase.permitsAction(at: ProcessInfo.processInfo.systemUptime),
-                  self.inventoryHasReturned(app: app, headers: headers, closeButtons: closeButtons) else { return false }
+                  self.inventoryHasReturned(app: app) else { return false }
             return phase.remaining(at: ProcessInfo.processInfo.systemUptime) >= 0
         }, object: nil)
         let returnStarted = ProcessInfo.processInfo.systemUptime
@@ -123,32 +123,43 @@ final class LocalizationUITests: XCTestCase {
         app.terminate()
     }
 
-    // Keep XCTest's original matching rules and firstMatch ordering. Fresh
-    // snapshots turn repeated attributes of those exact matches into local reads.
-    private func csvShareIsReady(app: XCUIApplication, headers: XCUIElementQuery,
-                                 closeButtons: XCUIElementQuery) -> Bool {
-        guard headers.count == 1, closeButtons.count == 1 else { return false }
-        let headerElement = headers.element(boundBy: 0)
-        let closeElement = closeButtons.element(boundBy: 0)
-        let captionElement = headerElement.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "Inventory-localized.csv")).firstMatch
-        guard let header = try? headerElement.snapshot(),
-              let close = try? closeElement.snapshot(),
-              let caption = try? captionElement.snapshot() else { return false }
-        let appFrame = app.frame
-        return close.isEnabled && !header.frame.isEmpty && appFrame.contains(header.frame)
+    // One hierarchy observation per poll keeps native AX round trips from
+    // consuming the shared presentation/Close deadline. The matching rules,
+    // exact counts, geometry and final live hit test remain required.
+    private func csvShareIsReady(app: XCUIApplication, closeButtons: XCUIElementQuery) -> Bool {
+        guard let root = try? app.snapshot() else { return false }
+        let nodes = descendants(of: root)
+        let headers = nodes.filter { $0.elementType == .navigationBar && $0.identifier == "UIActivityContentView" }
+        let closes = nodes.filter { $0.elementType == .button && $0.identifier == "header.closeButton" }
+        guard headers.count == 1, closes.count == 1,
+              let header = headers.first, let close = closes.first,
+              let caption = descendants(of: header).first(where: { $0.label == "Inventory-localized.csv" }) else { return false }
+        return close.isEnabled && !header.frame.isEmpty && root.frame.contains(header.frame)
             && header.frame.contains(close.frame) && !caption.frame.isEmpty
-            && header.frame.contains(caption.frame) && closeElement.isHittable
+            && header.frame.contains(caption.frame) && closeButtons.element(boundBy: 0).isHittable
     }
 
-    private func inventoryHasReturned(app: XCUIApplication, headers: XCUIElementQuery,
-                                      closeButtons: XCUIElementQuery) -> Bool {
-        guard headers.count == 0, closeButtons.count == 0 else { return false }
+    private func inventoryHasReturned(app: XCUIApplication) -> Bool {
+        guard let root = try? app.snapshot() else { return false }
+        let nodes = descendants(of: root)
+        guard !nodes.contains(where: { $0.elementType == .navigationBar && $0.identifier == "UIActivityContentView" }),
+              !nodes.contains(where: { $0.elementType == .button && $0.identifier == "header.closeButton" }) else { return false }
+        let exports = nodes.filter { $0.elementType == .button && $0.identifier == "inventory.exportMenu" }
+        let homes = nodes.filter { $0.elementType == .button && $0.label.hasPrefix("RU Test Home") }
+        guard exports.count == 1, exports[0].isEnabled, homes.count == 1 else { return false }
         let export = app.buttons["inventory.exportMenu"]
         let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "RU Test Home"))
-        guard let exportSnapshot = try? export.snapshot(), exportSnapshot.isEnabled,
-              home.count == 1 else { return false }
         return export.isHittable && home.element(boundBy: 0).isHittable
+    }
+
+    private func descendants(of root: any XCUIElementSnapshot) -> [any XCUIElementSnapshot] {
+        var pending = Array(root.children.reversed())
+        var result: [any XCUIElementSnapshot] = []
+        while let node = pending.popLast() {
+            result.append(node)
+            pending.append(contentsOf: node.children.reversed())
+        }
+        return result
     }
 
     private func emitSharePhaseTiming(_ timing: [String: Any], result: String) {

@@ -1,4 +1,4 @@
-"""Automatic test destinations must stay on the active SDK's runtime line."""
+"""Test destinations must stay on the active SDK or explicitly pinned runtime line."""
 import contextlib
 import importlib.util
 import io
@@ -51,7 +51,7 @@ class SimulatorSelectionTests(unittest.TestCase):
         source = inventory(**{"27_0": [device()], "26_4": [device(SECOND)]})
         self.assertEqual(SELECT.select_simulator(source, "26.4", FIRST), FIRST)
         self.assertEqual(SELECT.select_simulator(source, None, FIRST), FIRST)
-        with patch.dict(os.environ, {"SIMULATOR_UDID": FIRST}), \
+        with patch.dict(os.environ, {"SIMULATOR_UDID": FIRST}, clear=True), \
                 patch.object(SELECT.subprocess, "check_output", return_value=json.dumps(source)) as command, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             SELECT.main()
@@ -60,6 +60,39 @@ class SimulatorSelectionTests(unittest.TestCase):
             ["xcrun", "simctl", "list", "devices", "available", "--json"],
             text=True, stdin=subprocess.DEVNULL, timeout=60,
         )
+
+    def test_explicit_older_runtime_uses_latest_patch_without_sdk_fallback(self):
+        source = inventory(**{"26_2": [device(state="Booted")], "26_2_1": [device(SECOND)],
+                              "26_4": [device(THIRD, state="Booted")]})
+        self.assertEqual(SELECT.select_simulator(source, "26.4", runtime_version="26.2"), SECOND)
+
+    def test_explicit_runtime_allows_matching_sdk_line(self):
+        source = inventory(**{"26_4": [device()]})
+        self.assertEqual(SELECT.select_simulator(source, "26.4.1", runtime_version="26.4"), FIRST)
+
+    def test_explicit_runtime_and_udid_must_agree(self):
+        source = inventory(**{"26_2": [device()], "26_2_1": [device(SECOND)], "26_4": [device(THIRD)]})
+        self.assertEqual(SELECT.select_simulator(source, "26.4", FIRST, "26.2"), FIRST)
+        for udid in (THIRD, "missing"):
+            with self.subTest(udid=udid), self.assertRaisesRegex(ValueError, "matching SIMULATOR_RUNTIME_VERSION 26.2"):
+                SELECT.select_simulator(source, "26.4", udid, "26.2")
+
+    def test_missing_pinned_runtime_fails_without_fallback(self):
+        source = inventory(**{"26_4": [device(state="Booted")], "26_1": [device(SECOND)]})
+        with self.assertRaisesRegex(ValueError, "matches SIMULATOR_RUNTIME_VERSION 26.2"):
+            SELECT.select_simulator(source, "26.4", runtime_version="26.2")
+
+    def test_explicit_runtime_requires_supported_major_minor_format(self):
+        source = inventory(**{"26_2": [device()]})
+        for runtime in ("", "26", "26.2.1", "26.2beta", " 26.2", "026.2", "26.02", "16.4"):
+            with self.subTest(runtime=runtime), self.assertRaisesRegex(ValueError, "major.minor"):
+                SELECT.select_simulator(source, "26.4", runtime_version=runtime)
+
+    def test_explicit_runtime_cannot_exceed_sdk_even_with_udid(self):
+        source = inventory(**{"26_5": [device()]})
+        for requested in (None, FIRST):
+            with self.subTest(requested=requested), self.assertRaisesRegex(ValueError, "newer than active SDK 26.4"):
+                SELECT.select_simulator(source, "26.4", requested, "26.5")
 
     def test_unavailable_non_iphone_old_and_malformed_candidates_are_rejected(self):
         cases = [
@@ -91,7 +124,7 @@ class SimulatorSelectionTests(unittest.TestCase):
 
     def test_native_queries_have_timeouts_and_use_the_active_sdk(self):
         source = inventory(**{"26_4": [device()]})
-        with patch.dict(os.environ, {"SIMULATOR_UDID": ""}), \
+        with patch.dict(os.environ, {}, clear=True), \
                 patch.object(SELECT.subprocess, "check_output", side_effect=["26.4\n", json.dumps(source)]) as command, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             SELECT.main()
@@ -103,10 +136,26 @@ class SimulatorSelectionTests(unittest.TestCase):
                  text=True, stdin=subprocess.DEVNULL, timeout=60),
         ])
 
+    def test_native_runtime_pin_queries_sdk_and_applies_with_or_without_udid(self):
+        source = inventory(**{"26_2": [device()], "26_4": [device(SECOND, state="Booted")]})
+        for requested in ("", FIRST):
+            with self.subTest(requested=requested), \
+                    patch.dict(os.environ, {"SIMULATOR_RUNTIME_VERSION": "26.2", "SIMULATOR_UDID": requested}, clear=True), \
+                    patch.object(SELECT.subprocess, "check_output", side_effect=["26.4\n", json.dumps(source)]) as command, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                SELECT.main()
+                self.assertEqual(output.getvalue(), FIRST + "\n")
+                self.assertEqual(command.call_args_list, [
+                    call(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"],
+                         text=True, stdin=subprocess.DEVNULL, timeout=30),
+                    call(["xcrun", "simctl", "list", "devices", "available", "--json"],
+                         text=True, stdin=subprocess.DEVNULL, timeout=60),
+                ])
+
     def test_native_failures_report_that_tests_did_not_run(self):
         for error in (subprocess.TimeoutExpired("xcrun", 30), subprocess.CalledProcessError(1, "xcrun"),
                       FileNotFoundError("xcrun")):
-            with self.subTest(error=error), patch.dict(os.environ, {"SIMULATOR_UDID": ""}), \
+            with self.subTest(error=error), patch.dict(os.environ, {}, clear=True), \
                     patch.object(SELECT.subprocess, "check_output", side_effect=error), \
                     self.assertRaisesRegex(SystemExit, "App tests have NOT run"):
                 SELECT.main()

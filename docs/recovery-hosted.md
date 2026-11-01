@@ -109,9 +109,9 @@ list slow initial Simulator launch as known issue 187708500. Local progress does
 not establish hosted boot performance. The single boot-status command allows up
 to 300 seconds, including its existing four-second process-cleanup reserve, so
 the former 86-second work limit does not preempt a several-minute first boot.
-This allowance remains clipped to the original 1,020-second startup deadline;
-the 1,800-second outer deadline, full test/collection reserves, other command
-caps, disk limits and mandatory terminal accounting/cleanup remain unchanged.
+This allowance remains clipped to the effective 660-second startup deadline;
+the 1,800-second outer deadline, disk limits and mandatory terminal accounting/cleanup remain unchanged.
+The current test and collection reserves are described below.
 This is a bounded cold-start allowance, not evidence that a particular silent
 boot failure was caused by first-boot initialization. A timeout still fails the
 attempt, and successful boot alone cannot qualify Recovery.
@@ -248,7 +248,7 @@ The single full `xcrun simctl list --json` inventory command has a nominal
 for cleanup. This is a bounded allowance adjustment, not evidence that an earlier
 stall has been explained or fixed. Runtime and device compatibility validation
 still uses that complete response. No additional query or retry is performed.
-All other command caps remain unchanged. In particular, the XcodeGen installer
+All other discovery command caps remain unchanged. In particular, the XcodeGen installer
 requests 70 seconds within the same absolute 120-second discovery window.
 
 For each command, its deadline is the earlier of start plus its requested cap
@@ -484,3 +484,13 @@ not complete system logging or successful recovery. `native_cause` remains
 `UNKNOWN`; returned error vocabulary is evidence for review, not proof of
 causation. Native stack sampling is not included: a delayed PID-based sampler
 whose cleanup cannot be proved could otherwise inspect a reused PID.
+
+The hosted Recovery journey allows 720 seconds for its single XCTest, with a
+780-second native maximum inside the 840-second controller test phase. Device
+preparation is clipped to 660 seconds from controller start to reserve the full
+test and 240-second collection phases plus the unchanged 60-second cleanup
+reserve within 1,800 seconds. Each installation/export acknowledgement has one
+60-second monotonic window covering request publication, waiting, evidence and
+validation; late reads and non-completed waiters fail without advancing a barrier.
+These bounds are calibrated against observed hosted latency, and do not replace
+full successful Recovery acceptance.

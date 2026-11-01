@@ -15,13 +15,13 @@ class DevicePhaseTests(unittest.TestCase):
         denials = stack.enter_context(fixtures.runtime_guard())
         self.addCleanup(lambda: self.assertEqual(denials, []))
 
-    def test_measured_prefix_and_remaining_command_accounting_fit_startup_budget(self):
+    def test_old_startup_workload_cannot_borrow_expanded_test_reserve(self):
         with fixtures.World() as w:
             run = w.run
             original = run.work_end, run.outer_end
             w.clock.now = run.start + 72.408448
             run.phase('device')
-            self.assertEqual(run.phase_end, run.start + 1020)
+            self.assertEqual(run.phase_end, run.start + 660)
             # Retained bootstatus accounting ended here, before the failed
             # install-app precommand guard. Subsequent costs are injected,
             # not a prediction about future filesystem or simulator latency.
@@ -43,31 +43,38 @@ class DevicePhaseTests(unittest.TestCase):
             run.guard = guard
             w.cleanup_action = lambda: setattr(w.clock, 'now', w.clock.now + 1)
             for name, cap in [('install-app', 30), ('install-runner', 30),
-                              ('seed-sole-photo', 30), ('app-container', 60),
-                              ('runner-container', 60)]:
+                              ('seed-sole-photo', 30), ('app-container', 60)]:
                 w.cleaned = False
                 # Total child work includes any pre-spawn/live guard time and
                 # stays one second inside the existing cap-minus-four limit.
                 w.process.wait.side_effect = lambda timeout, cap=cap: (
                     setattr(w.clock, 'now', w.clock.now + cap - 5) or 0)
+                if name == 'app-container':
+                    with self.assertRaises(C.DeadlineFailure):
+                        run.command(['fake-child'], name, cap=cap)
+                    record = run.record['commands'][-1]
+                    self.assertEqual(record['end_deadline_elapsed'], 660)
+                    self.assertIsNone(record['post_command_accounting'])
+                    self.assertTrue(w.cleaned)
+                    break
                 self.assertEqual(run.command(['fake-child'], name, cap=cap), b'')
                 record = run.record['commands'][-1]
                 self.assertLess(record['child_completed_elapsed'], record['end_deadline_elapsed'] - 4)
                 self.assertLess(record['cleanup_completed_elapsed'], record['end_deadline_elapsed'])
                 self.assertEqual(record['post_command_accounting']['status'], 'COMPLETED')
-                self.assertEqual(record['post_command_accounting']['deadline_elapsed'], 1020)
-            self.assertEqual(len(prechecks), 5)
-            self.assertEqual(len(barriers), 5)
-            self.assertFalse(costs)
-            self.assertAlmostEqual(w.clock.now - run.start, 895.363919)
-            self.assertGreater(run.phase_end - w.clock.now, 124)
+                self.assertEqual(record['post_command_accounting']['deadline_elapsed'], 660)
+            self.assertEqual(len(prechecks), 4)
+            self.assertEqual(len(barriers), 3)
+            self.assertEqual(costs, [20])
+            self.assertEqual(len(run.record['commands']), 4)
+            self.assertGreater(w.clock.now, run.phase_end)
             self.assertEqual((run.work_end, run.outer_end), original)
             self.assertEqual(C.PHASE_SECONDS['device'], 180)
 
-    def test_full_earlier_allowances_leave_original_device_budget_without_renewal(self):
+    def test_device_budget_cannot_renew_or_admit_a_late_build(self):
         with fixtures.World() as w:
             run = w.run
-            w.clock.now = run.start + 120 + 720
+            w.clock.now = run.start + 480
             run.phase('device')
             self.assertEqual(run.phase_end - w.clock.now, 180)
             deadline = run.phase_end
@@ -75,6 +82,13 @@ class DevicePhaseTests(unittest.TestCase):
             run.phase('device')
             self.assertEqual(run.phase_end, deadline)
             self.assertEqual(run.phase_end - w.clock.now, 170)
+        with fixtures.World() as w:
+            run = w.run
+            w.clock.now = run.start + 120 + 720
+            with self.assertRaises(C.DeadlineFailure):
+                run.phase('device')
+            self.assertEqual(run.phase_end, run.start + 660)
+            self.assertFalse(any(e[0] == 'spawn' for e in w.events))
 
     def test_startup_boundary_blocks_device_dispatch_and_preserves_all_later_reserves(self):
         for extra in (0, .001):
@@ -83,7 +97,7 @@ class DevicePhaseTests(unittest.TestCase):
                 original = run.work_end, run.outer_end
                 run.phase('device')
                 run.guard = lambda force=False: run.tick()
-                w.clock.now = run.start + 1020 + extra
+                w.clock.now = run.start + 660 + extra
                 with self.assertRaises(C.DeadlineFailure):
                     run.command(['never-spawn'], 'install-app', cap=30)
                 self.assertFalse(any(e[0] == 'spawn' for e in w.events))
@@ -96,7 +110,7 @@ class DevicePhaseTests(unittest.TestCase):
             run.phase('device')
             w.clock.now = run.phase_end
             run.phase('test')
-            self.assertEqual(run.phase_end - w.clock.now, 480)
+            self.assertEqual(run.phase_end - w.clock.now, 840)
             w.clock.now = run.phase_end
             run.phase('collect')
             self.assertEqual(run.phase_end - w.clock.now, 240)
@@ -108,6 +122,79 @@ class DevicePhaseTests(unittest.TestCase):
             with self.assertRaises(C.DeadlineFailure):
                 run.phase('collect')
             self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def test_expanded_test_work_still_requires_fresh_complete_terminal_accounting(self):
+        with fixtures.World(actual_guard=True, count=17) as w:
+            run = w.run
+            w.clock.now = run.start + 660
+            run.phase('test')
+            original = run.phase_end, run.work_end, run.outer_end
+            start = w.clock.now
+            w.process.wait.side_effect = lambda timeout: (
+                setattr(w.clock, 'now', start + 720) or 0)
+            w.cleanup_action = lambda: setattr(w.clock, 'now', w.clock.now + .25)
+            def inspect(info, active):
+                if w.cleaned:
+                    w.clock.now += 2
+                return info
+            w.stat_action = inspect
+            self.assertEqual(run.command(['fake-child'], 'ui-test', cap=840), b'')
+            record = run.record['commands'][0]
+            self.assertEqual(record['end_deadline_elapsed'], 1500)
+            self.assertEqual(record['child_completed_elapsed'], 1380)
+            self.assertEqual(record['post_command_accounting']['status'], 'COMPLETED')
+            self.assertEqual(record['post_command_accounting']['deadline_elapsed'], 1500)
+            self.assertEqual(w.barrier_walked, 17)
+            self.assertEqual(run.last_samples[-1]['device']['entries'], 17)
+            self.assertTrue(record['cleanup']['leader_reaped'])
+            self.assertEqual(record['cleanup']['group_state'], 'absent')
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+            self.assertEqual(run.work_end - run.phase_end, 240)
+            self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def test_expanded_test_rejects_late_child_or_incomplete_terminal_accounting(self):
+        for work, accounting in ((836, False), (830, True)):
+            with self.subTest(work=work), fixtures.World(actual_guard=True, count=17) as w:
+                run = w.run
+                w.clock.now = run.start + 660
+                run.phase('test')
+                original = run.phase_end, run.work_end, run.outer_end
+                start = w.clock.now
+                w.process.wait.side_effect = lambda timeout: (
+                    setattr(w.clock, 'now', start + work) or 0)
+                w.cleanup_action = lambda: setattr(w.clock, 'now', w.clock.now + .25)
+                def inspect(info, active):
+                    if w.cleaned:
+                        w.clock.now += 2
+                    return info
+                w.stat_action = inspect
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(['fake-child'], 'ui-test', cap=840)
+                record = run.record['commands'][0]
+                if accounting:
+                    self.assertEqual(record['post_command_accounting']['status'], 'FAILED')
+                    self.assertEqual(record['device_service']['terminal_barrier'],
+                                     {'reached': True, 'completed': False})
+                else:
+                    self.assertIsNone(record['post_command_accounting'])
+                self.assertTrue(w.cleaned)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+                self.assertEqual(run.work_end - run.phase_end, 240)
+                self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def test_expanded_test_does_not_admit_command_without_cleanup_time(self):
+        for remaining in (7, 4, 0):
+            with self.subTest(remaining=remaining), fixtures.World() as w:
+                run = w.run
+                w.clock.now = run.start + 660
+                run.phase('test')
+                deadline = run.phase_end
+                w.clock.now = deadline - remaining
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(['never-spawn'], 'ui-test', cap=840)
+                self.assertFalse(any(e[0] == 'spawn' for e in w.events))
+                self.assertEqual(run.record['commands'], [])
+                self.assertEqual(run.phase_end, deadline)
 
     def test_expanded_phase_never_extends_individual_child_work_cap(self):
         with fixtures.World() as w:

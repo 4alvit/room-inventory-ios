@@ -45,7 +45,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_actual_boot_request_allows_cold_start_and_requires_fresh_full_accounting(self):
         self.install_requests()
         request = self.boot_request
-        for elapsed, work, scan_step in ((200, 282, 2), (900, 110, .25)):
+        for elapsed, work, scan_step in ((200, 282, 2), (540, 110, .25)):
             with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
                 run = w.run
                 w.clock.now = run.start + elapsed
@@ -61,7 +61,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 w.stat_action = inspect
                 run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 300, 1020))
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 300, 660))
                 self.assertGreater(record["child_completed_elapsed"] - elapsed, 86)
                 self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
                 self.assertEqual(record["cleanup"]["group_state"], "absent")
@@ -69,7 +69,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertEqual(w.barrier_walked, 17)
                 self.assertEqual(run.last_samples[-1]["device"]["entries"], 17)
                 self.assertEqual(record["post_command_accounting"]["status"], "COMPLETED")
-                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 1020)
+                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 660)
                 if elapsed == 200:
                     # The complete post-command walk uses the unchanged phase
                     # deadline even after the child has used most of its cap.
@@ -82,7 +82,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_actual_boot_request_rejects_work_at_cap_and_clipped_startup_boundary(self):
         self.install_requests()
         request = self.boot_request
-        for elapsed, work in ((200, 296), (900, 116)):
+        for elapsed, work in ((200, 296), (540, 116)):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 w.clock.now = run.start + elapsed
@@ -93,7 +93,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 with self.assertRaises(C.DeadlineFailure):
                     run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 300, 1020))
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 300, 660))
                 self.assertIsNone(record["child_completed_elapsed"])
                 self.assertIsNone(record["post_command_accounting"])
                 self.assertTrue(w.cleaned)
@@ -103,7 +103,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_actual_boot_request_cannot_renew_startup_or_spawn_without_cleanup_time(self):
         self.install_requests()
         request = self.boot_request
-        for elapsed in (1013, 1016, 1020):
+        for elapsed in (653, 656, 660):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 run.phase("device")
@@ -114,7 +114,7 @@ class OperationAllowanceTests(base.ControllerCase):
                     run.phase("device")
                     run.command(*request.args, **request.kwargs)
                 self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
-                self.assertEqual(run.phase_end, run.start + 1020)
+                self.assertEqual(run.phase_end, run.start + 660)
                 self.assertFalse(any(e[0] == "spawn" for e in w.events))
 
     def test_photos_permission_targets_only_owned_runner_before_single_seed(self):
@@ -145,7 +145,7 @@ class OperationAllowanceTests(base.ControllerCase):
             self.assertEqual(record["end_deadline_elapsed"], 230)
             self.assertLess(record["child_completed_elapsed"], 226)
             self.assertEqual((run.work_end, run.outer_end), original)
-        for elapsed in (1016, 1020):
+        for elapsed in (656, 660):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 run.phase("device")
@@ -197,13 +197,13 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertAlmostEqual(record["end_deadline_elapsed"], start - run.start + 90)
                 self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
                 self.assertEqual(record["post_command_accounting"]["status"], "COMPLETED")
-                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 1020)
+                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 660)
                 self.assertTrue(any(c.kwargs == {"force": True} for c in run.guard.call_args_list))
                 self.assertEqual((run.work_end, run.outer_end), original)
 
     def test_actual_install_admission_rejects_child_boundary_and_startup_exhaustion(self):
         request = self.install_requests()[0]
-        for elapsed, work in ((217.613819, 86), (1012, 4), (1020, None)):
+        for elapsed, work in ((217.613819, 86), (652, 4), (660, None)):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 run.phase("device")
@@ -219,7 +219,7 @@ class OperationAllowanceTests(base.ControllerCase):
                     self.assertTrue(w.cleaned)
                     self.assertIsNone(run.record["commands"][0]["post_command_accounting"])
                 self.assertEqual(run.outer_end - run.work_end, 60)
-                self.assertEqual(run.phase_end, run.start + 1020)
+                self.assertEqual(run.phase_end, run.start + 660)
 
     def test_initial_cleanup_has_twenty_work_seconds_only_when_absolute_time_allows(self):
         request = self.cleanup_requests()[0]

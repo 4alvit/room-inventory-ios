@@ -37,6 +37,7 @@ acceptance and App Review remain separate requirements.
 - Recognize Files folder titles exposed as action-menu buttons without activating the title menu.
 - Select the actual Restore backup button when the system alert exposes a duplicate accessibility wrapper.
 - Scope Recovery field and purpose lookups to their native control types and stop querying a failed purpose selection after its wait has expired.
+- Calibrate Recovery test and acknowledgement budgets within the existing 30-minute attempt, preserving resource checks, late-result rejection and cleanup reserves.
 - Avoid starting app-level inventory and purchase stores inside hosted unit tests.
 - Accept Files metadata-only change times after opening a saved backup while preserving content, identity and collection-stability checks.
 - Give the active Recovery test's xcresult staging a 512 MiB allowance within the existing 1 GiB output cap, while retaining 192 MiB final-result limits; keep all explicit checkpoint evidence and let Xcode discard automatic system diagnostics only after success.

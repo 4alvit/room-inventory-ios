@@ -1555,10 +1555,10 @@ class XctestrunTests(ControllerCase):
                                             ("-parallel-testing-enabled", "NO"),
                                             ("-maximum-concurrent-test-simulator-destinations", "1"),
                                             ("-test-timeouts-enabled", "YES"),
-                                            ("-maximum-test-execution-time-allowance", "420")):
+                                            ("-maximum-test-execution-time-allowance", "780")):
                             self.assertEqual(args.count(flag), 1)
                             self.assertEqual(args[args.index(flag) + 1], value)
-                        self.assertEqual(options, {"cap": 480, "on_poll": run.collector.poll_bridge,
+                        self.assertEqual(options, {"cap": 840, "on_poll": run.collector.poll_bridge,
                                                    "xcresult_producer": True})
                         if failed:
                             raise failure

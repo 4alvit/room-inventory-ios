@@ -94,7 +94,10 @@ evidence; repair and review the cause before separately authorizing another run.
    `RoomInventoryUITests/InventoryRecoveryJourneyTests/testPhotosOCRExportRestoreIntoFreshNamespace`,
    an attempt-owned result bundle,
    `-parallel-testing-enabled NO`, `-maximum-concurrent-test-simulator-destinations 1`,
-   `-test-timeouts-enabled YES`, and `-maximum-test-execution-time-allowance 420`.
+   `-test-timeouts-enabled YES`, and `-maximum-test-execution-time-allowance 780`.
+   The selected test has an explicit 720-second execution allowance within the
+   controller's single 840-second test phase and command cap; launch, finalization
+   and accounting still consume that same absolute phase budget.
    Omit repetition and retry flags for this single invocation: Xcode 16.4 rejects
    `-test-iterations 1` before XCTest starts. Keep the
    effective xctestrun/selection proving no unit commerce tests were selected.
@@ -174,9 +177,10 @@ At test entry, the runner performs exactly one installation-only AUT launch with
 it and checks that it is not running. It performs no inventory or Photos action.
 Only then does it atomically publish one `installation-request.json` in its own
 fresh journey bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
-and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK uses the
-existing 20-second wait inside the unchanged XCTest allowance and controller test
-phase; no deadline is renewed.
+and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK shares
+one 60-second monotonic deadline starting before request publication with the
+wait and acknowledgement validation. Late observations cannot authorize success;
+the XCTest and controller deadlines remain active and are never renewed.
 
 The host's existing guarded callback searches only the owned Simulator's
 `data/Containers/Data/Application` directory, with at most 2,000 entries and
@@ -218,7 +222,7 @@ The app's privacy permissions and built payload are unchanged.
 
 The runner also checks the actual Simulator UUID, runner bundle, usage description
 and full read/write authorization. One 20-second monotonic deadline inside the
-unchanged XCTest/controller limits covers at most 64 local assets, at most eight
+current XCTest/controller limits covers at most 64 local assets, at most eight
 resources per asset, the unique named 1400×1800 PNG, and two network-disabled
 resource reads of at most 74,736 bytes each. Both reads must match the source
 fixture's SHA-256. After a stable inventory re-read, one PhotoKit change removes
@@ -349,8 +353,11 @@ disabled, covered or ambiguous action still fails the test.
 The test runner publishes six numbered requests in its own
 `Documents/RecoveryJourneyBridge/<journey UUID>` directory: before and after each
 of `source_zip`, `backup`, `target_zip`. Each request contains all three run IDs,
-its role, phase, sequence and a fresh nonce. It waits up to 20 seconds for a strict
-matching acknowledgement containing the exact request hash. All requests and
+its role, phase, sequence and a fresh nonce. Each barrier has one 60-second
+monotonic deadline starting before request publication, including the wait and
+validation of a strict matching acknowledgement containing the exact request hash.
+A late acknowledgement or interrupted wait fails; neither renews the deadline.
+All requests and
 acknowledgements are also kept as XCTest attachments.
 
 The collector checks unchanged containers, the initial empty export state and
@@ -489,10 +496,13 @@ non-poll operations and clock boundaries; this does not imply zero scheduling co
 One outer controller owns the complete attempt and every subprocess process group.
 Use monotonic absolute deadlines; no phase may renew the outer budget. The total
 ceiling is 1,800 seconds, reserving the last 60 seconds for cleanup. Phase caps are
-preflight/project generation 120s, build 720s, create/boot/seed 180s, UI execution
-480s, evidence collection/verification 240s; each is additionally capped by the
+preflight/project generation 120s, build 720s, nominal create/boot/seed 180s, UI execution
+840s, evidence collection/verification 240s; each is additionally capped by the
 remaining outer budget minus cleanup reserve. These caps are limits, not a promise
-that a cold build fits. Do not begin a phase without enough cleanup time left.
+that a cold build fits. The device phase's shared startup deadline is clipped to
+660 seconds from controller start, reserving the full 840-second test and
+240-second collection phases within the 1,740-second work budget. Do not begin a
+phase without enough cleanup time left.
 
 An absolute process alarm backs up cooperative deadline checks during filesystem
 and collection operations. Every command reserves four seconds of its allowance
@@ -625,13 +635,14 @@ Preflight, pre-Popen and live guards are unchanged. This moves only terminal
 accounting out of the child-work allowance; all resource caps, allocation metrics,
 free-space floors, entry limits and the full barrier remain. Owned-group absence
 does not prove simulator or DerivedData quiescence, so no root is cached or skipped.
-Accounting and subsequent device commands share the original startup allocation:
-120 seconds for preflight + 720 for build + 180 for device, ending at 1,020 seconds
-from controller start. Preflight and build retain their own phase caps; unused
-time from those phases remains available for device preparation and its full
-accounting. This is redistribution within the existing 1,740-second work budget,
-not an extension: device completion is also clipped before the full 480-second
-test and 240-second collection allowances. The 1,800-second outer deadline and
+Accounting and subsequent device commands share the original nominal startup
+allocation of 120 seconds for preflight + 720 for build + 180 for device, but its
+1,020-second sum is clipped to 660 seconds from controller start. This reserves
+the full 840-second test and 240-second collection allowances within the existing
+1,740-second work budget. Preflight and build retain their own phase caps; unused
+time remains available for device preparation and its full accounting only before
+that fixed 660-second boundary. A build that consumes its entire nominal allowance
+cannot then enter device preparation. The 1,800-second outer deadline and
 60-second cleanup reserve remain unchanged. Reentering the device phase cannot
 renew its absolute startup deadline. Every command remains clipped to this phase
 and its own finite cap; all resource walks, identity checks and cleanup requirements
@@ -643,7 +654,7 @@ without adding a retry or extending the overall attempt. Successful boot still
 requires a fresh complete terminal resource walk and does not replace UI acceptance.
 App and runner installation each allow 90 seconds, including the
 existing four-second process-cleanup allowance (86 seconds for child work and live
-accounting). Both remain single attempts inside the same 1,020-second startup pool.
+accounting). Both remain single attempts inside the effective 660-second startup pool.
 This finite hosted cold-start allowance does not predict installation latency or
 turn prior timed-out runs into accepted evidence.
 

@@ -27,7 +27,7 @@ import uuid
 
 GIB, MIB = 2**30, 2**20
 OUTER_SECONDS, CLEANUP_SECONDS = 1800, 60
-PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 480, "collect": 240}
+PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 840, "collect": 240}
 ADMISSION_BYTES, ABORT_BYTES = 24 * GIB, 8 * GIB
 DEVICE_CAP, DERIVED_CAP, OUTPUT_CAP = 8 * GIB, 4 * GIB, GIB
 XCRESULT_CAP, ATTACHMENT_CAP, LOG_CAP = 192 * MIB, 128 * MIB, 64 * MIB
@@ -846,8 +846,9 @@ class RecoveryRun:
     def phase(self, name):
         self.diagnostic_stage = "phase"
         if name == "device":
-            # Share only the original startup allocation; fast preflight/build
-            # leave time for device work and its mandatory full accounting.
+            # Share the original startup allocation, clipped to 660 seconds
+            # from run start so test, collection and cleanup retain their caps.
+            # Fast preflight/build leave time for mandatory device accounting.
             startup_end = self.start + sum(PHASE_SECONDS[p] for p in ("preflight", "build", "device"))
             later_work = PHASE_SECONDS["test"] + PHASE_SECONDS["collect"]
             self.phase_end = min(startup_end, self.work_end - later_work)
@@ -1401,12 +1402,15 @@ class RecoveryRun:
         self.xcresult = self.output / "original.xcresult"
         test_error = None
         try:
+            # The test's explicit 720s allowance stays below Xcode's 780s
+            # maximum and this phase/command's 840s cap. Native launch and
+            # finalization still share the same absolute phase deadline.
             self.command(["xcodebuild", "test-without-building", "-xctestrun", self.xctestrun,
                           "-destination", "platform=iOS Simulator,id=" + self.device_id,
                           "-resultBundlePath", self.xcresult, "-only-testing:" + CASE,
                           "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                           "-test-timeouts-enabled", "YES",
-                          "-maximum-test-execution-time-allowance", "420"], "ui-test", cap=480,
+                          "-maximum-test-execution-time-allowance", "780"], "ui-test", cap=840,
                          on_poll=self.collector.poll_bridge, xcresult_producer=True)
         except BaseException as error:
             test_error = error

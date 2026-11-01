@@ -75,14 +75,17 @@ final class RecoveryJourneyBridge {
             "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner"
         ]
         let requestData = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-        try Self.publish(requestData, at: requestURL, nonce: nonce)
-        Self.attach(requestData, name: "recovery-installation-request.json", test: test)
-        // This uses the existing finite ACK wait inside the unchanged XCTest
-        // execution allowance; no controller phase deadline is extended.
+        let window = RecoveryAcknowledgementWindow()
+        try window.perform { try Self.publish(requestData, at: requestURL, nonce: nonce) }
+        try window.perform { Self.attach(requestData, name: "recovery-installation-request.json", test: test) }
         try waitForAcknowledgement(request: request, requestData: requestData,
                                    requestURL: requestURL, acknowledgementURL: acknowledgementURL,
-                                   attachmentName: "recovery-installation-ack.json", test: test)
-        installationRequestSHA = SHA256.hash(data: requestData).map { String(format: "%02x", $0) }.joined()
+                                   attachmentName: "recovery-installation-ack.json", test: test, window: window)
+        let requestSHA = try window.perform {
+            SHA256.hash(data: requestData).map { String(format: "%02x", $0) }.joined()
+        }
+        _ = try window.remaining()
+        installationRequestSHA = requestSHA
         installationAcknowledged = true
     }
 
@@ -150,12 +153,14 @@ final class RecoveryJourneyBridge {
             "sequence": sequence, "role": role.rawValue, "phase": phase.rawValue, "nonce": nonce
         ]
         let requestData = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-        try Self.publish(requestData, at: requestURL, nonce: nonce)
-        Self.attach(requestData, name: "recovery-bridge-request-" + suffix, test: test)
+        let window = RecoveryAcknowledgementWindow()
+        try window.perform { try Self.publish(requestData, at: requestURL, nonce: nonce) }
+        try window.perform { Self.attach(requestData, name: "recovery-bridge-request-" + suffix, test: test) }
 
         try waitForAcknowledgement(request: request, requestData: requestData,
                                    requestURL: requestURL, acknowledgementURL: acknowledgementURL,
-                                   attachmentName: "recovery-bridge-ack-" + suffix, test: test)
+                                   attachmentName: "recovery-bridge-ack-" + suffix, test: test, window: window)
+        _ = try window.remaining()
         completedBarriers = sequence
     }
 
@@ -167,21 +172,22 @@ final class RecoveryJourneyBridge {
 
     private func waitForAcknowledgement(
         request: [String: Any], requestData: Data, requestURL: URL,
-        acknowledgementURL: URL, attachmentName: String, test: XCTestCase
+        acknowledgementURL: URL, attachmentName: String, test: XCTestCase,
+        window: RecoveryAcknowledgementWindow
     ) throws {
         // A condition wait, not an arbitrary sleep. The host publishes ACKs
         // atomically only after durable capture; malformed ACKs fail immediately.
         let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             // attributesOfItem uses lstat, so even a dangling symlink wakes the
             // wait and is rejected by the no-follow reader below.
-            do { return try Self.entryType(acknowledgementURL) != nil }
-            catch { return true }
+            window.observe {
+                do { return try Self.entryType(acknowledgementURL) != nil }
+                catch { return true }
+            }
         }, object: nil)
-        guard XCTWaiter.wait(for: [arrived], timeout: 20) == .completed else {
-            throw BridgeError.invalid("host acknowledgement timed out")
-        }
-        let acknowledgementData = try Self.readRegularFile(acknowledgementURL)
-        Self.attach(acknowledgementData, name: attachmentName, test: test)
+        try window.wait { XCTWaiter.wait(for: [arrived], timeout: $0) }
+        let acknowledgementData = try window.perform { try Self.readRegularFile(acknowledgementURL) }
+        try window.perform { Self.attach(acknowledgementData, name: attachmentName, test: test) }
         var expected = request
         expected["request_sha256"] = SHA256.hash(data: requestData).map { String(format: "%02x", $0) }.joined()
         expected["success"] = true
@@ -194,9 +200,11 @@ final class RecoveryJourneyBridge {
         guard canonicalData == expectedData else {
             throw BridgeError.invalid("host acknowledgement does not bind this request")
         }
-        guard try Self.readRegularFile(requestURL) == requestData else {
+        let currentRequest = try window.perform { try Self.readRegularFile(requestURL) }
+        guard currentRequest == requestData else {
             throw BridgeError.invalid("request changed during host capture")
         }
+        _ = try window.remaining()
     }
 
     private nonisolated static func entryType(_ url: URL) throws -> FileAttributeType? {

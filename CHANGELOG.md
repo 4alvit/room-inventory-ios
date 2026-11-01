@@ -30,6 +30,7 @@ acceptance and App Review remain separate requirements.
 - Stop before UI tests when app unit tests fail, preserving separate result bundles for both required phases.
 - Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
 - Capture Photos and Files diagnostics from one immutable application snapshot so a dismissed picker cannot fail the test during diagnostic reads.
+- Check actual toolbar buttons during Recovery OCR selection instead of treating transparent full-screen toolbar containers as obstructions.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
 - Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.

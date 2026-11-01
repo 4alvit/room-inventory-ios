@@ -321,24 +321,65 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // This English-only journey activates the trailing switch itself, not
         // the center of that label/row. Never retry a toggle: a second tap can
         // undo a delayed first activation and hide a real interaction failure.
-        let frame = toggle.frame
+        let snapshot = try app.snapshot()
+        typealias Node = (element: any XCUIElementSnapshot, form: (any XCUIElementSnapshot)?, inToolbar: Bool)
+        var pending: [Node] = [(snapshot, nil, false)]
+        var nodes: [Node] = []
+        while let next = pending.popLast() {
+            guard nodes.count < 10_000 else {
+                throw RecoveryJourneyFailure.assertion("OCR geometry node bound", "exceeded", "10000 nodes")
+            }
+            let form = next.element.elementType == .collectionView ? next.element : next.form
+            let inToolbar = next.inToolbar || next.element.elementType == .toolbar
+            nodes.append((next.element, form, inToolbar))
+            pending.append(contentsOf: next.element.children.reversed().map { ($0, form, inToolbar) })
+        }
+        let switches = nodes.filter { $0.element.elementType == .switch && $0.element.identifier == "ocr.select.\(id)" }
+        let navigationBars = nodes.filter { $0.element.elementType == .navigationBar }
+        let navigation = navigationBars.filter {
+            [$0.element.identifier, $0.element.title, $0.element.label,
+             $0.element.placeholderValue ?? "", $0.element.value as? String ?? ""].contains("Review recognized text")
+        }
+        try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
+            && switches.first?.form != nil && navigation.count == 1)
+        guard let target = switches.first, let form = target.form, let navigation = navigation.first else {
+            throw RecoveryJourneyFailure.assertion("OCR form geometry", "missing", "identified")
+        }
+        let frame = target.element.frame
         let point = CGPoint(x: frame.maxX - 20, y: frame.midY)
-        let navigation = app.navigationBars["Review recognized text"]
-        let form = app.collectionViews.containing(.switch, identifier: "ocr.select.\(id)").firstMatch
-        try ledger.require("OCR \(id) visible form is identifiable", form.exists && navigation.exists)
-        let viewport = form.frame.intersection(app.frame).insetBy(dx: 2, dy: 2)
-        let chrome = app.navigationBars.allElementsBoundByIndex + app.toolbars.allElementsBoundByIndex
-            + app.tabBars.allElementsBoundByIndex + app.keyboards.allElementsBoundByIndex
+        let viewport = form.frame.intersection(snapshot.frame).insetBy(dx: 2, dy: 2)
+        let chrome = nodes.filter {
+            [.navigationBar, .tabBar, .keyboard].contains($0.element.elementType)
+                || ($0.inToolbar && $0.element.elementType == .button)
+        }
+        let toolbars = nodes.filter { $0.element.elementType == .toolbar }
+        guard chrome.count <= 64, toolbars.count <= 16 else {
+            throw RecoveryJourneyFailure.assertion("OCR geometry chrome bound", "exceeded", "64 controls / 16 toolbars")
+        }
         // Hittable alone proves only that some point can receive input. The
         // actual trailing point must be in this OCR form, below its navigation
-        // bar, and outside every exposed keyboard/bar frame. An alert also
-        // blocks activation. Fail without a tap if any of these checks fail.
-        let covered = chrome.contains { $0.exists && !$0.frame.isEmpty && $0.frame.contains(point) }
-        try ledger.require("OCR \(id) switch point is unobscured", frame.width >= 40 && frame.height >= 20
-            && !viewport.isNull && !viewport.isEmpty && viewport.contains(point)
-            && point.y > navigation.frame.maxY && !covered && app.alerts.count == 0)
-        toggle.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5))
-            .withOffset(CGVector(dx: -20, dy: 0)).tap()
+        // bar, and outside keyboards, tab bars and toolbar buttons. SwiftUI can
+        // expose a transparent, full-screen Toolbar container with no controls;
+        // that semantic container's bounds do not describe a painted obstruction.
+        let covered = chrome.contains { !$0.element.frame.isEmpty && $0.element.frame.contains(point) }
+        let checks = ["switch_size": frame.width >= 40 && frame.height >= 20,
+                      "inside_form": !viewport.isNull && !viewport.isEmpty && viewport.contains(point),
+                      "below_navigation": point.y > navigation.element.frame.maxY,
+                      "outside_chrome": !covered,
+                      "no_alert": !nodes.contains { $0.element.elementType == .alert }]
+        func rectangle(_ frame: CGRect) -> [CGFloat] { [frame.minX, frame.minY, frame.width, frame.height] }
+        let geometry: [String: Any] = ["field": id, "basis": "single_application_snapshot",
+            "point": [point.x, point.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
+            "navigation": rectangle(navigation.element.frame), "checks": checks,
+            "chrome": chrome.map { ["type": $0.element.elementType.rawValue, "frame": rectangle($0.element.frame)] },
+            "toolbar_containers": toolbars.map { rectangle($0.element.frame) }]
+        if let data = try? JSONSerialization.data(withJSONObject: geometry, options: [.sortedKeys]),
+           data.count <= 16_384, let text = String(data: data, encoding: .utf8) {
+            print("ROOM_OCR_TAP_GEOMETRY " + text)
+        }
+        try ledger.require("OCR \(id) switch point is unobscured", checks.values.allSatisfy { $0 })
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - snapshot.frame.minX, dy: point.y - snapshot.frame.minY)).tap()
         let selected = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == true AND value == %@", "1"), object: toggle)
         try ledger.require("OCR \(id) selected after one activation", XCTWaiter.wait(for: [selected], timeout: 10) == .completed)

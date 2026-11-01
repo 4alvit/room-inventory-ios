@@ -271,8 +271,19 @@ English-only journey and waits at most ten seconds for its exact value to become
 `1`. It issues one tap, with no toggle retry. The later four-field observation,
 `Apply 2` check and selective-update artifact checks remain mandatory.
 Before activation, that exact point must lie inside the containing OCR Form's
-visible bounds, below its navigation bar and outside exposed navigation, toolbar,
-tab-bar and keyboard frames. An alert or unidentifiable form fails before tapping.
+visible bounds, below its navigation bar and outside exposed navigation, tab-bar
+and keyboard frames and toolbar button bounds. An alert or unidentifiable form
+fails before tapping.
+
+Toolbar obstruction checks use descendant button bounds. A local iOS 27.0 run
+on source `753be01` exposed an empty, transparent `Toolbar` spanning the underlying
+item screen while the OCR sheet and its model switch were visibly unobscured.
+The old whole-container check rejected the switch before tapping it. Navigation
+bars, tab bars and keyboards still use their full frames; alerts still block the
+action. One immutable application snapshot supplies the form, switch and chrome
+geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs and
+individual checks before the single activation. The original live readiness and
+exact post-activation state assertions remain required.
 
 In CI run `40893851357`, attempt 1, the UI log first reported
 `OCR selection model: observed 0, expected 1` after the two generic element taps.

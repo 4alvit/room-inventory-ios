@@ -6,12 +6,12 @@ permissions:
 jobs:
   ios:
     name: Core and iOS tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
-      SIMULATOR_RUNTIME_VERSION: '26.2'
-      SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-16e
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      SIMULATOR_RUNTIME_VERSION: '27.0'
+      SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-17
     outputs:
       version: ${{ steps.preview-version.outputs.version }}
       tested-commit: ${{ steps.preview-version.outputs.commit }}
@@ -32,10 +32,10 @@ jobs:
         run: |
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = arm64
-          test "$ImageOS" = macos26
+          test "$ImageOS" = macos27
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
-          test "$xcode_version" = $'Xcode 26.4.1\nBuild version 17E202'
+          test "$xcode_version" = $'Xcode 27.1\nBuild version 27A9275'
           swift --version
           xcrun simctl list runtimes
       - name: Run source contracts, Core tests, Simulator build and app tests
@@ -71,12 +71,12 @@ jobs:
   recovery:
     name: Recovery journey
     needs: ios
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     permissions:
       contents: read
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
       RECOVERY_TESTED_COMMIT: ${{ needs.ios.outputs.tested-commit }}
       RECOVERY_TESTED_TREE: ${{ needs.ios.outputs.tested-tree }}
     steps:
@@ -91,7 +91,7 @@ jobs:
           python-version: '3.12'
       - name: Run one bounded hosted recovery journey
         timeout-minutes: 36
-        run: python3 scripts/recovery_hosted.py --profile-sha256 0ee3b2ec1183c87c6671e6f5fdfd59a4f2423d568d2cf62dcdf4ec92ff424a99
+        run: python3 scripts/recovery_hosted.py --profile-sha256 49488a5d44145e3eb9bb42c598f905d4ba8bfa1efe9bb6627e5b1202eb0aabba
       - name: Preserve compact recovery evidence
         if: ${{ always() }}
         timeout-minutes: 5

@@ -55,17 +55,19 @@ iOS Simulator SDK's major/minor version. Automatic selection prefers the newest
 available runtime patch and a booted iPhone within that runtime. Set
 `SIMULATOR_UDID` to select a specific available iPhone on iOS 17 or newer, including
 a different runtime version. It fails if the required runtime is absent.
-Set `SIMULATOR_RUNTIME_VERSION=26.2` to require the newest installed patch on that
+Set `SIMULATOR_RUNTIME_VERSION=27.0` to require the newest installed patch on that
 major/minor line instead. A runtime pin must not be newer than the active SDK;
 when combined with `SIMULATOR_UDID`, that device must also match the pinned line.
-Set `SIMULATOR_DEVICE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-16e` to
+Set `SIMULATOR_DEVICE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-17` to
 require that exact iPhone model. An explicit `SIMULATOR_UDID` must match this
 model too; a missing or incompatible model fails without substitution.
-Hosted app tests and recovery explicitly use iOS 26.2 with Xcode 26.4.1 to avoid
-the observed StoreKit Test configuration failures on iOS 26.4.1. This is a
-declared test environment, not an automatic fallback; a missing runtime fails CI.
-Both jobs also pin iPhone 16e, matching the successful app-test run. This model
-alignment does not establish the cause of the earlier recovery boot timeout.
+Hosted app tests, recovery and Simulator packaging use the standard `xcode-27`
+runner with Xcode 27.1 build 27A9275. Both test jobs explicitly select iOS 27.0
+and iPhone 17, matching the local stack that progressed through native recovery.
+Missing or incompatible pins fail CI; there is no automatic substitution. A
+successful hosted run is still required to qualify this environment. Required
+Swift CodeQL analysis remains on macOS 26 / Xcode 26.4.1 because CodeQL cannot
+trace compiled-language builds on macOS 27 or Xcode 27.
 See [toolchain qualification](docs/recovery-hosted.md#toolchain-qualification).
 App unit tests must pass before UI tests start. Both phases are required and retain
 separate result bundles; a failure in either phase fails the check.

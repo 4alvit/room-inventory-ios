@@ -7,10 +7,13 @@ first execution needs a separately approved source commit and CI cohort.
 ## Where the job runs
 
 The existing callable `ci.yml` adds one `recovery` job after `ios`. The job uses
-the standard `macos-26` runner class, read-only repository permissions
-and the same pinned checkout, Python and artifact actions. All four existing Mac
-jobs require an actual `arm64` host and Xcode 26.4.1 build 17E202; they do not fall
-back to another runner or toolchain. Recovery retains its 24 GiB admission floor. The PR preview now
+the standard `xcode-27` runner class, read-only repository permissions
+and the same pinned checkout, Python and artifact actions. App tests, recovery
+and Simulator packaging require an actual `arm64` host and Xcode 27.1 build
+27A9275 on `ImageOS=macos27`; they do not fall back to another runner or toolchain.
+Required Swift CodeQL analysis retains its separately pinned macOS 26 / Xcode
+26.4.1 build 17E202 environment because of CodeQL's tracing requirements described
+below. Recovery retains its 24 GiB admission floor. The PR preview now
 needs both `ios` and `recovery`. A failed recovery job therefore fails the existing
 required reusable validation; the generated Quality gate is unchanged.
 
@@ -49,43 +52,54 @@ The app correctly refused an unverified transaction. This is separate from the
 catalog-failure and refund assertions, which kept their original expectations.
 
 The subsequent Xcode 26.3 cohort passed Core and iOS tests, but recovery discovery
-still timed out while querying the simulator inventory. The four Mac jobs now
-select Xcode 26.4.1 build 17E202 on the `macos-26` ARM64 runner class. The
-[versioned hosted image inventory](https://github.com/actions/runner-images/blob/102f6553849daabcbd37e321e2e224dbab45c469/images/macos/macos-26-arm64-Readme.md)
-includes that toolchain, the iOS 26.4 SDK, and iOS 26.2 and 26.4.1 Simulator runtimes.
-[Apple's Xcode 26.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes)
-document a fix for `simdiskimaged` repeatedly terminating under memory pressure,
-which could hang `simctl` (172343027), and restored automatic runtime cache
-creation (170836966). The selected update contains those fixes. The retained
-timeout alone does not prove that either Apple defect caused the earlier run.
+still timed out while querying the simulator inventory. Xcode 26.4.1 build 17E202
+was then selected because [Apple's Xcode 26.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes)
+document fixes for `simdiskimaged` hangs under memory pressure (172343027) and
+automatic runtime cache creation (170836966). Its iOS 26.4.1 runtime failed native
+StoreKit configuration operations with `SKInternalErrorDomain Code=3`, matching
+symptoms of FB22237318 acknowledged by Apple DTS in the
+[developer forum](https://developer.apple.com/forums/thread/826971). Explicitly
+selecting iOS 26.2 restored the native purchase tests. Aligning both jobs to iPhone
+16e and completing runtime-cache preparation did not resolve repeated fresh hosted
+Recovery boot-readiness failures. These observations do not identify the internal
+cause of the hangs or prove that the reported Apple defects caused them.
 
-The first Xcode 26.4.1 / iOS 26.4.1 cohort then failed native StoreKit tests with
-`SKInternalErrorDomain Code=3` while saving the test configuration, followed by
-failed configuration operations and missing products. This matches symptoms of
-the StoreKit Test regression acknowledged by Apple DTS as FB22237318 in the
-[Apple developer forum](https://developer.apple.com/forums/thread/826971).
-The forum's internal-cause explanation is a developer report, not proof of the
-cause of this run. Later replies also distinguish Xcode fixes from runtime fixes.
+The next qualification uses GitHub's standard `xcode-27` ARM64 runner, which became
+[generally available on October 15, 2026](https://github.blog/changelog/2026-10-15-xcode-27-runner-image-generally-available/).
+The repository's older preview badge is stale. The
+[versioned image inventory](https://github.com/actions/runner-images/blob/9329c776c4a38d3dcb31fc78b8180005041c07fb/images/macos/xcode-27-arm64-Readme.md)
+records image 20261026.0314.1, macOS 27.0.1 and Xcode 27.1 build 27A9275 at
+`/Applications/Xcode_27.1.app`. The adapter verifies `ImageOS=macos27`, actual
+ARM64 architecture and the exact Xcode version/build, and records the actual image
+version. GitHub may update an image behind the runner label; no other Xcode version
+is accepted automatically.
 
-Hosted app tests and recovery now explicitly select the installed iOS 26.2
-runtime line, where the previous cohort passed all eight native ProStore tests,
-while retaining Xcode 26.4.1's simulator-service fixes. Apple's
-[compatibility matrix](https://developer.apple.com/xcode/system-requirements)
-supports iOS 15 or later Simulator runtimes with Xcode 26.4.1. The app's minimum
-deployment target remains iOS 17. The app-test job declares
-`SIMULATOR_RUNTIME_VERSION=26.2`, and recovery binds `runtime_version: "26.2"`
-in its hashed profile. A missing or unavailable pinned runtime fails; neither
-job silently substitutes another runtime. Within that line, the newest installed
-patch is selected. The selected SDK and runtime versions are recorded separately.
+Hosted app tests and recovery explicitly select the installed iOS 27.0 runtime
+line and `com.apple.CoreSimulator.SimDeviceType.iPhone-17`. This matches the local
+Xcode build, runtime line and model that progressed through native Recovery,
+rather than repeating the failing hosted environment. It is an environment
+qualification, not a demonstrated fix for the old boot failure. The image's iOS
+27.1 runtime supports only iPhone Duo, so choosing the SDK's minor version would
+not preserve the intended model. The app-test job declares
+`SIMULATOR_RUNTIME_VERSION=27.0` and `SIMULATOR_DEVICE_TYPE`; recovery binds the
+same runtime and device pins in its hashed profile. Missing, unavailable or
+incompatible pins fail without substitution. Within the runtime line, the newest
+installed patch is selected; SDK and runtime versions are recorded separately.
+The app's minimum deployment target remains iOS 17.
 
-Both jobs also pin `com.apple.CoreSimulator.SimDeviceType.iPhone-16e`: app tests
-through `SIMULATOR_DEVICE_TYPE`, recovery through `device_type` in the hashed
-profile. This aligns recovery with the model used by the successful app-test
-run, instead of letting the two selectors choose different iPhones. The pinned
-model must be installed and compatible with the selected runtime; an unavailable
-model fails without substitution. The earlier recovery run used iPhone 17 Pro
-Max, but that difference does not establish why its boot-readiness check timed
-out. Timing limits and boot-readiness requirements are unchanged.
+[Apple's Xcode 27.1 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
+list slow initial Simulator launch as known issue 187708500. Local progress does
+not establish hosted boot performance. The existing 90-second boot-status limit,
+all other deadlines, disk limits, cache preparation and cleanup requirements remain
+unchanged.
+
+Swift CodeQL remains a required check on the same source commit using the existing
+`macos-26` ARM64 runner and exact Xcode 26.4.1 build 17E202. GitHub's
+[CodeQL compatibility guidance](https://github.blog/changelog/2026-10-09-codeql-2-27-2-improves-c-go-rust-and-javascript-analysis/#macos-27-compatibility)
+says `manual` and `autobuild` cannot trace compiled-language builds on macOS 27 or
+with Xcode 27. The workflow therefore retains the supported analysis toolchain,
+its strict identity checks and manual build; it does not skip or weaken security
+analysis. Cross-workflow contracts verify both explicit toolchain profiles.
 
 This configuration change does not qualify the combined toolchain by itself.
 A fresh exact-source run must pass the existing native purchase, refund, pending
@@ -312,10 +326,14 @@ No personal library or unrelated device is selected. These files are diagnostics
 never acceptance evidence and never permission to tap a passive Image/ancestor.
 A missing capture does not change the existing acceptance rules.
 
-Photos and first-Files-tap diagnostics derive selector matches and hierarchy from
-one immutable application snapshot, so a disappearing picker target is not
-queried again. Hierarchy JSON keeps every node and attribute but omits formatting
-whitespace so the existing 256 KiB capture limit is available for evidence.
+Photos and first-Files-tap diagnostics derive selector matches from one immutable
+application snapshot, so a disappearing picker target is not queried again.
+Photos also retains the hierarchy from that same snapshot. Its JSON keeps every
+node and attribute but omits formatting whitespace so the existing 256 KiB capture
+limit is available for evidence. Files' remote picker can be absent from the app
+snapshot; its hierarchy instead uses the stable app root's later `debugDescription`.
+The `hierarchy_observation` field explicitly distinguishes that later observation
+from the selector snapshot. Both remain diagnostic evidence within the same caps.
 Snapshot APIs do not expose hit testing: `hittable: null` is
 explicitly unknown, not false, and cannot establish a non-hittable failure.
 The real tap and readiness assertions still use live UI controls.

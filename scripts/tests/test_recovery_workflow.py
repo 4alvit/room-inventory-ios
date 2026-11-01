@@ -34,7 +34,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         checkout = self.job["steps"][0]
         self.assertEqual(checkout["with"], {"persist-credentials": "false", "ref": "${{ github.sha }}"})
         self.assertEqual(self.job["env"], {
-            "DEVELOPER_DIR": "/Applications/Xcode_26.4.1.app/Contents/Developer",
+            "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
             "RECOVERY_TESTED_COMMIT": "${{ needs.ios.outputs.tested-commit }}",
             "RECOVERY_TESTED_TREE": "${{ needs.ios.outputs.tested-tree }}",
         })
@@ -53,7 +53,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.profile["workflow_path"], ".github/workflows/ci.yml")
         self.assertEqual(self.profile["job_id"], "recovery")
         self.assertEqual(self.profile["runner_label"], self.job["runs-on"])
-        self.assertEqual(self.job["runs-on"], "macos-26")
+        self.assertEqual(self.job["runs-on"], "xcode-27")
         self.assertEqual(self.profile["job_timeout_minutes"], int(self.job["timeout-minutes"]))
         stages = sum(self.profile[key] for key in ("discovery_seconds", "recovery_seconds", "retention_seconds"))
         self.assertLess(stages, 36 * 60)
@@ -64,22 +64,23 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(set(self.profile["allowed_events"]),
                          {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"})
 
-    def test_all_four_mac_jobs_use_same_installed_arm_toolchain(self):
+    def test_native_jobs_share_toolchain_and_codeql_keeps_supported_tracing_toolchain(self):
         codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(), Loader=yaml.BaseLoader)
         release = yaml.load((ROOT / ".github/workflows/release-build.yml").read_text(), Loader=yaml.BaseLoader)
-        ordinary = (self.ci["jobs"]["ios"], codeql["jobs"]["swift"], release["jobs"]["package"])
+        ordinary = (self.ci["jobs"]["ios"], release["jobs"]["package"])
         self.assertEqual(self.profile["runner_arch"], "ARM64")
         self.assertEqual(self.profile["process_arch"], "arm64")
-        self.assertEqual(self.profile["xcode_version"], "Xcode 26.4.1\nBuild version 17E202")
-        self.assertEqual(self.profile["runtime_version"], "26.2")
+        self.assertEqual(self.profile["image_os"], "macos27")
+        self.assertEqual(self.profile["xcode_version"], "Xcode 27.1\nBuild version 27A9275")
+        self.assertEqual(self.profile["runtime_version"], "27.0")
         self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_RUNTIME_VERSION"],
                          self.profile["runtime_version"])
-        self.assertEqual(self.profile["device_type"], "com.apple.CoreSimulator.SimDeviceType.iPhone-16e")
+        self.assertEqual(self.profile["device_type"], "com.apple.CoreSimulator.SimDeviceType.iPhone-17")
         self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_DEVICE_TYPE"],
                          self.profile["device_type"])
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
-            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.4.1.app/Contents/Developer")
+            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_27.1.app/Contents/Developer")
         guards = []
         for job in ordinary:
             steps = job["steps"]
@@ -89,13 +90,31 @@ class RecoveryWorkflowTests(unittest.TestCase):
                 "Run source contracts, Core tests, Simulator build and app tests", "Build app for analysis", "Build committed preview assets"})
             self.assertLess(guard_index, build_index)
         common = guards[1]
-        self.assertEqual(guards[2], common)
         self.assertTrue(guards[0].startswith(common))
         self.assertIn('test "$RUNNER_ARCH" = ' + self.profile["runner_arch"], common)
         self.assertIn('test "$(uname -m)" = ' + self.profile["process_arch"], common)
         self.assertIn('test "$ImageOS" = ' + self.profile["image_os"], common)
         self.assertIn('xcode_version="$(xcodebuild -version)"', common)
         self.assertIn('test "$xcode_version" = $\'' + self.profile["xcode_version"].replace("\n", "\\n") + "'", common)
+
+        # CodeQL cannot trace compiled-language builds on macOS 27 or Xcode 27.
+        # Keep its required source analysis on an explicit supported toolchain.
+        analysis = codeql["jobs"]["swift"]
+        self.assertEqual(analysis["runs-on"], "macos-26")
+        self.assertEqual(analysis["env"]["DEVELOPER_DIR"],
+                         "/Applications/Xcode_26.4.1.app/Contents/Developer")
+        analysis_steps = analysis["steps"]
+        guard_index = next(i for i, step in enumerate(analysis_steps)
+                           if step.get("name") == "Verify installed ARM toolchain")
+        build_index = next(i for i, step in enumerate(analysis_steps)
+                           if step.get("name") == "Build app for analysis")
+        self.assertLess(guard_index, build_index)
+        analysis_guard = analysis_steps[guard_index]["run"]
+        self.assertEqual(analysis_guard, common.replace("macos27", "macos26").replace(
+            "Xcode 27.1\\nBuild version 27A9275", "Xcode 26.4.1\\nBuild version 17E202"))
+        initialization = next(step for step in analysis_steps
+                              if step.get("uses", "").startswith("github/codeql-action/init@"))
+        self.assertEqual(initialization["with"], {"languages": "swift", "build-mode": "manual"})
 
     def test_upload_keeps_only_compact_packet_even_on_failure(self):
         uploads = [step for step in self.job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")]

@@ -26,15 +26,16 @@ acceptance and App Review remain separate requirements.
 ### Fixed
 
 - Bound backup-file reads before restoration, reject non-regular inputs, and keep cancelling the file picker silent.
-- Align automatic Simulator selection with the active SDK, support explicit runtime pins, and use Xcode 26.4.1 with iOS 26.2 on hosted macOS 26 validation.
+- Align automatic Simulator selection with the active SDK and support explicit runtime pins.
 - Stop before UI tests when app unit tests fail, preserving separate result bundles for both required phases.
 - Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
 - Capture Photos and Files diagnostics from one immutable application snapshot so a dismissed picker cannot fail the test during diagnostic reads.
 - Check actual toolbar buttons during Recovery OCR selection instead of treating transparent full-screen toolbar containers as obstructions.
 - Select Recovery export actions by unique visible titles when native menus omit accessibility identifiers, and keep full snapshot diagnostics within their byte budget using compact JSON.
+- Recognize Files locations by their exact visible navigation titles and retain remote-picker diagnostics when application snapshots omit them.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
-- Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.
+- Pin hosted app tests, Recovery and Simulator packaging to the GA Xcode 27 runner with Xcode 27.1, iOS 27.0 and iPhone 17; retain the supported Xcode 26.4.1 toolchain for required Swift CodeQL analysis.
 - Unsigned Release previews omit build-machine paths and code-coverage data; packaging rejects app payloads that retain them.
 - PDF fonts preserve exact Cyrillic text for copying and searching, including the letter к.
 

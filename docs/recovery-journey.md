@@ -306,6 +306,22 @@ The same label semantics are used by the ordinary UI tests. The existing bounded
 scrolling, live readiness, one activation and subsequent Files or import-picker
 assertions remain required; no export service is invoked directly.
 
+### Files location titles
+
+The journey recognizes a Files location by its exact, unique, visible static-text
+title inside a navigation bar. The bar itself can expose the identifier
+`FullDocumentManagerViewControllerNavigationBar` instead of its displayed folder
+name. On local iOS 27.0 the save picker already opened at `On My iPhone`; matching
+the bar by that name failed and caused repeated taps on the noninteractive title.
+Folder creation, navigation, the exact run-folder name and the saved-file evidence
+remain mandatory.
+
+The first-Files-tap diagnostic keeps selector attributes from one immutable app
+snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy
+therefore uses the stable app root's later `debugDescription`, which includes the
+remote picker. `hierarchy_observation` explicitly distinguishes these observations;
+they are diagnostic evidence and do not authorize an action or prove acceptance.
+
 ### Live export origin barriers
 
 The test runner publishes six numbered requests in its own

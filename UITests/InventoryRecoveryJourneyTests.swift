@@ -440,7 +440,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingName.count) + baseName)
         let observedName = filename.value as? String ?? ""
         try ledger.require("unique export base name", actual: observedName, expected: baseName)
-        let observedFolder = app.navigationBars[folder].staticTexts[folder].label
+        let observedFolder = filesFolderTitles(folder, app: app).element(boundBy: 0).label
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
         try tap(app.buttons["Save"], app: app)
@@ -452,13 +452,13 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func enterFilesFolder(_ folder: String, create: Bool, app: XCUIApplication) throws {
-        if app.navigationBars[folder].exists {
+        if try filesFolderIsOpen(folder, app: app) {
             try ledger.require("existing target folder expected", !create)
             return
         }
         let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
         for _ in 0..<5 {
-            if app.navigationBars[localTitle].exists { break }
+            if try filesFolderIsOpen(localTitle, app: app) { break }
             let local = fileItem(localTitle, app: app)
             if local.exists && local.isHittable {
                 if !firstFilesTapCaptured {
@@ -480,7 +480,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             let back = app.navigationBars.buttons.matching(NSPredicate(format: "label == 'Back' OR label == 'Locations' OR label == 'Browse'")).firstMatch
             try tap(back, app: app)
         }
-        try ledger.require("local Files location selected", app.navigationBars[localTitle].exists)
+        try ledger.require("local Files location selected", filesFolderIsOpen(localTitle, app: app))
         if create {
             try ledger.require("run folder does not already exist", !fileItem(folder, app: app).exists)
             let more = app.buttons.matching(NSPredicate(format: "label == 'More' OR label == 'More Actions'")).firstMatch
@@ -495,8 +495,24 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             let createButton = app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")).firstMatch
             try tap(createButton, app: app)
         }
-        if !app.navigationBars[folder].exists { try tap(fileItem(folder, app: app), app: app, scroll: true) }
-        try ledger.require("run folder opened", app.navigationBars[folder].waitForExistence(timeout: 5))
+        if try !filesFolderIsOpen(folder, app: app) { try tap(fileItem(folder, app: app), app: app, scroll: true) }
+        try ledger.require("run folder title appeared", filesFolderTitles(folder, app: app).element(boundBy: 0).waitForExistence(timeout: 5))
+        try ledger.require("run folder opened", filesFolderIsOpen(folder, app: app))
+    }
+
+    private func filesFolderTitles(_ title: String, app: XCUIApplication) -> XCUIElementQuery {
+        // Files can give its navigation bar a controller identifier instead of
+        // the folder name. Its exact child title still identifies the location.
+        app.navigationBars.staticTexts.matching(NSPredicate(format: "label == %@", title))
+    }
+
+    private func filesFolderIsOpen(_ title: String, app: XCUIApplication) throws -> Bool {
+        let titles = filesFolderTitles(title, app: app)
+        let count = titles.count
+        guard count <= 1 else {
+            throw RecoveryJourneyFailure.assertion("unique Files folder title", String(count), "at most one: \(title)")
+        }
+        return count == 1 && titles.element(boundBy: 0).isHittable
     }
 
     private func fileItem(_ name: String, app: XCUIApplication) -> XCUIElement {

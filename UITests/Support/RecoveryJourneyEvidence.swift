@@ -149,10 +149,19 @@ final class RecoveryJourneyEvidence {
         observation["selected_target"] = describe(matches.first)
         observation["matches"] = matches.map { describe($0) }
         observation["navigation_bars"] = navigationBars.map { describe($0) }
-        // Preserve full ancestry from the same observation, including bar titles.
-        let hierarchy = try JSONSerialization.data(withJSONObject: applicationSnapshot.dictionaryRepresentation,
-                                                   options: [.sortedKeys])
-        observation["hierarchy"] = String(decoding: hierarchy, as: UTF8.self)
+        if photos {
+            // Preserve full ancestry from the same observation, including bar titles.
+            let hierarchy = try JSONSerialization.data(withJSONObject: applicationSnapshot.dictionaryRepresentation,
+                                                       options: [.sortedKeys])
+            observation["hierarchy"] = String(decoding: hierarchy, as: UTF8.self)
+            observation["hierarchy_observation"] = "same_application_snapshot"
+        } else {
+            // Files may live in a remote view omitted from app.snapshot(). The
+            // stable app root's debug tree includes it; this later observation
+            // must not be presented as atomic with the selector snapshot above.
+            observation["hierarchy"] = app.debugDescription
+            observation["hierarchy_observation"] = "later_application_debug_description_including_remote_ui"
+        }
         let ax = try JSONSerialization.data(withJSONObject: observation, options: [.sortedKeys])
         guard ax.count <= 256 * 1_024 else {
             throw RecoveryJourneyFailure.assertion("Files AX byte bound", String(ax.count), "262144")

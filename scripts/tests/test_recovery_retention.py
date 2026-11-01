@@ -66,7 +66,9 @@ class RecoveryRetentionTests(unittest.TestCase):
         self.write("run/source-pin.json", R.encoded(self.source))
         self.write("run/resource-samples.json", b'[{"free_bytes":123456789}]')
         self.write("run/generated.xctestrun.plist", plistlib.dumps({"fixture": "generated"}))
-        self.write("run/selected.xctestrun.plist", plistlib.dumps({"fixture": "selected"}))
+        self.selected = {"TestConfigurations": [{"TestTargets": [{"BlueprintName": "RoomInventoryUITests",
+                          "SystemAttachmentLifetime": "deleteOnSuccess", "UserAttachmentLifetime": "keepAlways"}]}]}
+        self.write("run/selected.xctestrun.plist", plistlib.dumps(self.selected))
         derived = self.work / "run/DerivedData"
         products = derived / "Build/Products/Debug-iphonesimulator"
         app, runner = products / "RoomInventory.app", products / "RoomInventoryUITests-Runner.app"
@@ -460,6 +462,26 @@ class RecoveryRetentionTests(unittest.TestCase):
         self.assertEqual(identity["products"]["app"]["executable_file"]["sha256"], R.digest(executable.read_bytes()))
         self.assertEqual(identity["products"]["tests"]["macho"][0]["platform"], 7)
         self.assertFalse(any(path.name == "RoomInventory" for path in (self.work / "build-identity").rglob("*")))
+
+    def test_rebound_selected_configuration_cannot_drop_user_attachments_or_keep_success_system_logs(self):
+        for field, wrong in (("UserAttachmentLifetime", "deleteOnSuccess"),
+                             ("SystemAttachmentLifetime", "keepAlways")):
+            with self.subTest(field=field):
+                value = plistlib.loads(plistlib.dumps(self.selected))
+                value["TestConfigurations"][0]["TestTargets"][0][field] = wrong
+                raw = plistlib.dumps(value)
+                self.write("run/selected.xctestrun.plist", raw)
+                self.write("build-identity/selected.xctestrun.plist", raw)
+                identity_path = self.work / "build-identity/identity.json"
+                identity = json.loads(identity_path.read_bytes())
+                identity["configurations"]["selected"]["sha256"] = R.digest(raw)
+                identity_path.write_bytes(R.encoded(identity))
+                binding_path = self.work / "run/evidence/collection/source-binding.json"
+                binding = json.loads(binding_path.read_bytes())
+                binding["xctestrun_sha256"] = R.digest(raw)
+                binding_path.write_bytes(R.encoded(binding))
+                with self.assertRaisesRegex(R.RetentionError, "attachment policy differs"):
+                    R.validate_complete(self.work, self.context, R.Files(self.guard))
 
     def test_missing_required_file_produces_partial_packet(self):
         (self.work / "run/evidence/collection/artifacts/target_generated_zip.zip").unlink()

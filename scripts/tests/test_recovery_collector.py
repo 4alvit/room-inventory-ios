@@ -455,6 +455,20 @@ class RecoveryCollectorTests(unittest.TestCase):
             self.collector.collect(copy)
         self.assertFalse((self.collector.root / "collection.json").exists())
 
+    def test_missing_user_accessibility_capture_still_fails_collection(self):
+        self.omit_capture = "14-ax"
+        copy = self.collector.capture_xcresult(self.original)
+        with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous UI attachment"):
+            self.collector.collect(copy)
+        self.assertFalse((self.collector.root / "collection.json").exists())
+
+    def test_missing_user_ledger_still_fails_collection(self):
+        self.omit_capture = "recovery-journey-evidence.json"
+        copy = self.collector.capture_xcresult(self.original)
+        with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous UI attachment"):
+            self.collector.collect(copy)
+        self.assertFalse((self.collector.root / "collection.json").exists())
+
     def test_skipped_or_wrong_test_never_collects_attachments(self):
         self.summary["skippedTests"] = 1
         copy = self.collector.capture_xcresult(self.original)

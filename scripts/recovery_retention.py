@@ -57,6 +57,19 @@ def require(value, message):
         raise RetentionError(message)
 
 
+def require_attachment_policy(raw):
+    value = plistlib.loads(raw)
+    configs = value.get("TestConfigurations") if isinstance(value, dict) else None
+    require(isinstance(configs, list) and len(configs) == 1 and isinstance(configs[0], dict),
+            "invalid selected attachment policy")
+    targets = configs[0].get("TestTargets")
+    require(isinstance(targets, list) and len(targets) == 1 and isinstance(targets[0], dict)
+            and targets[0].get("BlueprintName") == "RoomInventoryUITests"
+            and targets[0].get("SystemAttachmentLifetime") == "deleteOnSuccess"
+            and targets[0].get("UserAttachmentLifetime") == "keepAlways",
+            "selected attachment policy differs")
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -283,6 +296,7 @@ def capture_build_identity(controller, destination, guard):
         raw, record = files.read(Path(controller.output) / (name + ".xctestrun.plist"), MIB)
         require(isinstance(plistlib.loads(raw), dict), "invalid retained xctestrun")
         if name == "selected":
+            require_attachment_policy(raw)
             actual, _ = files.read(Path(controller.xctestrun), MIB)
             require(actual == raw and digest(raw) == controller.xctestrun_sha, "selected xctestrun binding differs")
         retain(name + ".xctestrun.plist", raw)
@@ -570,6 +584,8 @@ def validate_complete(work, context, files):
         raw, _ = files.read(work / "run" / (name + ".xctestrun.plist"), MIB)
         copy, _ = files.read(work / "build-identity" / (name + ".xctestrun.plist"), MIB)
         require(raw == copy and digest(raw) == build["configurations"][name]["sha256"], "retained configuration changed")
+        if name == "selected":
+            require_attachment_policy(raw)
     binding = files.json(work / "run/evidence/collection/source-binding.json")
     require(binding.get("source_commit") == context["source_commit"] and
             binding.get("source_tree_sha256") == source["tree_listing_sha256"] and

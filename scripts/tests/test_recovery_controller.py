@@ -879,6 +879,169 @@ class CommandFailureTests(ControllerCase):
             yield SimpleNamespace(process=process, selector=selector, start=start, stop=stop,
                                   log_streams=log_streams, cleanup=cleanup)
 
+    def producer_run(self):
+        run = self.run_fixture()
+        run.record.update(phase="test", test_count=1)
+        run.xcresult = run.output / "original.xcresult"
+        run.xctestrun = run.output / "selected.xctestrun"
+        args = ["xcodebuild", "test-without-building", "-xctestrun", run.xctestrun,
+                "-only-testing:" + controller.CASE, "-resultBundlePath", run.xcresult]
+        return run, args
+
+    def test_active_result_budget_is_revoked_before_terminal_full_accounting(self):
+        run, args = self.producer_run()
+        original_guard = run.guard
+        run.guard = lambda **_: original_guard(force=True)
+        with self.fake_child(active=True) as child, injected_resource_tree({
+                run.xcresult: [("payload", resource_info())]}) as tree:
+            tree.entries[run.xcresult / "payload"].stat.side_effect = lambda **_: resource_info(
+                256 * controller.MIB if run._active_xcresult_producer is not None else 10)
+            child.selector.select.return_value = []
+            run.command(args, "ui-test", cap=30, xcresult_producer=True,
+                        on_poll=lambda: (setattr(child.selector.get_map, "return_value", {}),
+                                         setattr(child.process.poll, "return_value", 0)))
+        self.assertIsNone(run._active_xcresult_producer)
+        samples = [sample["original_xcresult"] for sample in run.last_samples]
+        self.assertTrue(any(s["logical_bytes"] == 256 * controller.MIB
+                            and s["cap_bytes"] == 512 * controller.MIB
+                            and s["lifecycle"] == "producing" for s in samples))
+        self.assertEqual(samples[-1]["cap_bytes"], 192 * controller.MIB)
+        self.assertEqual(samples[-1]["lifecycle"], "final")
+        self.assertEqual(run.record["commands"][0]["post_command_accounting"]["status"], "COMPLETED")
+        child.stop.assert_called_once()
+
+    def test_oversized_final_result_fails_terminal_accounting_after_producer_cleanup(self):
+        run, args = self.producer_run()
+        original_guard = run.guard
+        run.guard = lambda **_: original_guard(force=True)
+        with self.fake_child(active=True) as child, injected_resource_tree({
+                run.xcresult: [("payload", resource_info())]}) as tree:
+            tree.entries[run.xcresult / "payload"].stat.side_effect = lambda **_: resource_info(
+                256 * controller.MIB if run.groups else 10)
+            child.selector.select.return_value = []
+            with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                run.command(args, "ui-test", cap=30, xcresult_producer=True,
+                            on_poll=lambda: (setattr(child.selector.get_map, "return_value", {}),
+                                         setattr(child.process.poll, "return_value", 0)))
+            child.stop.assert_called_once()
+        self.assertIsNone(run._active_xcresult_producer)
+        self.assertEqual(run.record["resource_cap_crossing"]["cap_bytes"], controller.XCRESULT_CAP)
+        self.assertEqual(run.record["commands"][0]["post_command_accounting"]["status"], "FAILED")
+
+    def test_active_result_and_total_output_reached_caps_still_abort(self):
+        for category, metric in (("original_xcresult", "logical"), ("original_xcresult", "allocated"),
+                                 ("output", "logical"), ("verified_xcresult", "logical")):
+            with self.subTest(category=category, metric=metric), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                run = self.run_fixture(output=False)
+                run.output = Path(temp)
+                run.grant["output_root"] = temp
+                run.owns_output = True
+                run.derived = run.output / "DerivedData"
+                run.record.update(phase="test", test_count=1)
+                run.xcresult = run.output / "original.xcresult"
+                run.xctestrun = run.output / "selected.xctestrun"
+                args = ["xcodebuild", "test-without-building", "-xctestrun", run.xctestrun,
+                        "-only-testing:" + controller.CASE, "-resultBundlePath", run.xcresult]
+                target, limit = {"original_xcresult": (run.xcresult, controller.ACTIVE_XCRESULT_CAP),
+                                 "output": (run.output, controller.OUTPUT_CAP),
+                                 "verified_xcresult": (run.output / "evidence/collection/xcresult/verified.xcresult",
+                                                       controller.XCRESULT_CAP)}[category]
+                original_guard = run.guard
+                run.guard = lambda **_: original_guard(force=True)
+                with self.fake_child(active=True) as child, injected_resource_tree({target: [("payload", resource_info())]}) as tree:
+                    def info(**_):
+                        size = limit if run._active_xcresult_producer is not None else 0
+                        return resource_info(size if metric == "logical" else 0,
+                                             size // 512 if metric == "allocated" else 0)
+                    tree.entries[target / "payload"].stat.side_effect = info
+                    with self.assertRaisesRegex(controller.RunFailure, "byte cap"):
+                        run.command(args, "ui-test", cap=30, xcresult_producer=True)
+                    child.stop.assert_called_once()
+                self.assertIsNone(run._active_xcresult_producer)
+                self.assertEqual(run.record["resource_cap_crossing"]["category"], category)
+                self.assertEqual(run.record["resource_cap_crossing"]["cap_bytes"], limit)
+
+    def test_producer_allowance_rejects_wrong_command_phase_path_and_stale_owner(self):
+        for mutation in ("name", "phase", "path", "xctestrun", "case", "duplicate-path", "missing-value", "stale"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                run = self.run_fixture(output=False)
+                run.output = Path(temp)
+                run.grant["output_root"] = temp
+                run.owns_output = True
+                run.record.update(phase="test", test_count=1)
+                run.xcresult = run.output / "original.xcresult"
+                run.xctestrun = run.output / "selected.xctestrun"
+                args = ["xcodebuild", "test-without-building", "-xctestrun", run.xctestrun,
+                        "-only-testing:" + controller.CASE, "-resultBundlePath", run.xcresult]
+                name = "ui-test"
+                if mutation == "name": name = "build"
+                if mutation == "phase": run.record["phase"] = "build"
+                if mutation == "path": args[-1] = run.output / "other.xcresult"
+                if mutation == "xctestrun": args[3] = run.output / "other.xctestrun"
+                if mutation == "case": args[4] = "-only-testing:Other/test"
+                if mutation == "duplicate-path": args.extend(args[-2:])
+                if mutation == "missing-value": args.pop()
+                if mutation == "stale": run._active_xcresult_producer = object()
+                with self.assertRaises(controller.ConfigurationFailure):
+                    run.command(args, name, xcresult_producer=True)
+        self.popen.assert_not_called()
+
+    def test_active_result_allowance_rejects_stale_phase_count_deadline_and_group(self):
+        for mutation in ("phase", "count", "deadline", "reaped", "absent", "observation-error", "ledger"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                run = self.run_fixture(output=False)
+                run.output = Path(temp)
+                run.grant["output_root"] = temp
+                run.owns_output = True
+                run.derived = run.output / "DerivedData"
+                run.record.update(phase="test", test_count=1)
+                run.xcresult = run.output / "original.xcresult"
+                run.xctestrun = run.output / "selected.xctestrun"
+                args = ["xcodebuild", "test-without-building", "-xctestrun", run.xctestrun,
+                        "-only-testing:" + controller.CASE, "-resultBundlePath", run.xcresult]
+                original_guard = run.guard
+                run.guard = lambda **_: original_guard(force=True)
+                with self.fake_child(active=True) as child, injected_resource_tree({}):
+                    def invalidate():
+                        entry = run.groups[-1]
+                        if mutation == "phase": run.record["phase"] = "collect"
+                        if mutation == "count": run.record["test_count"] = 2
+                        if mutation == "deadline": run.command_deadline = None
+                        if mutation == "reaped": entry["state"]["leader_reaped"] = True
+                        if mutation == "absent": entry["state"]["group_state"] = "absent"
+                        if mutation == "observation-error": entry["state"]["observation_errors"] = ["unknown"]
+                        if mutation == "ledger": run.groups[-1] = dict(entry)
+                        run.guard(force=True)
+                    with self.assertRaisesRegex(controller.ConfigurationFailure, "Stale xcresult producer"):
+                        run.command(args, "ui-test", cap=30, xcresult_producer=True, on_poll=invalidate)
+                    child.stop.assert_called_once()
+                self.assertIsNone(run._active_xcresult_producer)
+
+    def test_producer_allowance_is_revoked_on_interrupt_deadline_and_spawn_failure(self):
+        for error in (KeyboardInterrupt("stop"), controller.DeadlineFailure("deadline"), OSError("spawn")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                run = self.run_fixture(output=False)
+                run.output = Path(temp)
+                run.grant["output_root"] = temp
+                run.owns_output = True
+                run.record.update(phase="test", test_count=1)
+                run.xcresult = run.output / "original.xcresult"
+                run.xctestrun = run.output / "selected.xctestrun"
+                args = ["xcodebuild", "test-without-building", "-xctestrun", run.xctestrun,
+                        "-only-testing:" + controller.CASE, "-resultBundlePath", run.xcresult]
+                run.guard = Mock()
+                with self.fake_child(active=True) as child:
+                    if isinstance(error, OSError): child.start.side_effect = error
+                    def interrupted():
+                        self.assertEqual(run.original_xcresult_budget()[0], controller.ACTIVE_XCRESULT_CAP)
+                        raise error
+                    with self.assertRaises(type(error)) as caught:
+                        run.command(args, "ui-test", cap=30, xcresult_producer=True, on_poll=interrupted)
+                    self.assertIs(caught.exception, error)
+                    if not isinstance(error, OSError): child.stop.assert_called_once()
+                self.assertIsNone(run._active_xcresult_producer)
+                self.assertEqual(run.original_xcresult_budget(), (controller.XCRESULT_CAP, "final"))
+
     def test_unknown_allocation_after_acquisition_preserves_failure_and_cleans_owned_group(self):
         run = self.run_fixture()
         info = resource_info(1)
@@ -1302,7 +1465,7 @@ class XctestrunTests(ControllerCase):
         self.assertNotIn("TestBundleDestinationRelativePath", target)
         self.assertEqual(target["TestHostBundleIdentifier"], controller.RUNNER_BUNDLE)
         self.assertEqual(target["UITargetAppBundleIdentifier"], controller.BUNDLE)
-        self.assertEqual(target["SystemAttachmentLifetime"], "keepAlways")
+        self.assertEqual(target["SystemAttachmentLifetime"], "deleteOnSuccess")
         self.assertEqual(target["UserAttachmentLifetime"], "keepAlways")
         self.assertEqual(target["EnvironmentVariables"]["GENERATED_VALUE"], "keep")
         self.assertEqual(target["EnvironmentVariables"]["RECOVERY_SIMULATOR_UDID"], "44444444-4444-4444-8444-444444444444")
@@ -1395,7 +1558,8 @@ class XctestrunTests(ControllerCase):
                                             ("-maximum-test-execution-time-allowance", "420")):
                             self.assertEqual(args.count(flag), 1)
                             self.assertEqual(args[args.index(flag) + 1], value)
-                        self.assertEqual(options, {"cap": 480, "on_poll": run.collector.poll_bridge})
+                        self.assertEqual(options, {"cap": 480, "on_poll": run.collector.poll_bridge,
+                                                   "xcresult_producer": True})
                         if failed:
                             raise failure
                     else:

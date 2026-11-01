@@ -31,6 +31,7 @@ PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 480, "co
 ADMISSION_BYTES, ABORT_BYTES = 24 * GIB, 8 * GIB
 DEVICE_CAP, DERIVED_CAP, OUTPUT_CAP = 8 * GIB, 4 * GIB, GIB
 XCRESULT_CAP, ATTACHMENT_CAP, LOG_CAP = 192 * MIB, 128 * MIB, 64 * MIB
+ACTIVE_XCRESULT_CAP = 512 * MIB
 CASE = "RoomInventoryUITests/InventoryRecoveryJourneyTests/testPhotosOCRExportRestoreIntoFreshNamespace"
 BUNDLE, RUNNER_BUNDLE = "com.alvit.roominventory", "com.alvit.roominventory.uitests.xctrunner"
 FIXTURE_SHA = "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181"
@@ -425,7 +426,7 @@ def configure_xctestrun(value, ids, *, device_id):
     target["ParallelizationEnabled"] = False
     target["TestLanguage"] = "en"
     target["TestRegion"] = "US"
-    target["SystemAttachmentLifetime"] = "keepAlways"
+    target["SystemAttachmentLifetime"] = "deleteOnSuccess"
     target["UserAttachmentLifetime"] = "keepAlways"
     configs[0]["TestTargets"] = selected
     return value
@@ -466,6 +467,7 @@ class RecoveryRun:
         self._derived_scan_context = None
         self._device_scan_service = None
         self._device_scan_context = None
+        self._active_xcresult_producer = None
         self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -789,6 +791,24 @@ class RecoveryRun:
         self.observe_runtime("scan_end", value=span)
         return result
 
+    def original_xcresult_budget(self):
+        binding = self._active_xcresult_producer
+        if binding is None:
+            return XCRESULT_CAP, "final"
+        entry, root = binding
+        require(self.owns_output and self.output == Path(self.grant["output_root"])
+                and self.record.get("phase") == "test" and self.record["test_count"] == 1
+                and self.command_deadline is not None
+                and root == self.output / "original.xcresult" and self.xcresult is root
+                and bool(self.groups) and self.groups[-1] is entry
+                and entry["record"]["name"] == "ui-test"
+                and entry["record"]["pid"] == entry["record"]["pgid"] == entry["process"].pid
+                and not entry["state"].get("leader_reaped")
+                and not entry["state"].get("observation_errors")
+                and entry["state"].get("group_state") != "absent",
+                "Stale xcresult producer binding", ConfigurationFailure)
+        return ACTIVE_XCRESULT_CAP, "producing"
+
     def guard(self, force=False):
         self.tick()
         # Cleanup still enforces time but must remain possible after disk abort.
@@ -797,6 +817,7 @@ class RecoveryRun:
         free = min(self.disk_usage(self.output.parent).free, self.disk_usage(self.device_base).free)
         require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
         if force or self.clock() - self.last_resource_check >= 2:
+            original_limit, original_lifecycle = self.original_xcresult_budget()
             sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
                       "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,)),
                       # DerivedData is a live disk budget, not a logical copy/input bound.
@@ -806,12 +827,14 @@ class RecoveryRun:
             if self.device_root:
                 sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
             for name, root, limit in [
-                ("original_xcresult", self.output / "original.xcresult", XCRESULT_CAP),
+                ("original_xcresult", self.output / "original.xcresult", original_limit),
                 ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP),
                 ("attachments", self.output / "evidence/collection/xcresult/attachments", ATTACHMENT_CAP),
                 ("logs", self.output / "logs", LOG_CAP),
             ]:
                 sample[name] = self.resource_size(name, root, limit)
+                if name == "original_xcresult":
+                    sample[name].update(cap_bytes=limit, lifecycle=original_lifecycle)
             self.last_samples.append(sample)
             require(len(self.last_samples) <= 2000, "Resource observation cap exceeded")
             write_json(self.output / "resource-samples.json", self.last_samples)
@@ -838,10 +861,28 @@ class RecoveryRun:
     def flush(self):
         write_json(self.output / "result.json", self.record)
 
-    def command(self, args, name, *, cap=60, on_poll=None, allowed_codes=(0,)):
+    def command(self, args, name, *, cap=60, on_poll=None, allowed_codes=(0,), xcresult_producer=False):
         """One owned process group, bounded pipe draining, sticky cleanup result."""
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
+        require(self._active_xcresult_producer is None and type(xcresult_producer) is bool,
+                "Stale or invalid xcresult producer", ConfigurationFailure)
+        if xcresult_producer:
+            text_args = [str(arg) for arg in args]
+            def option_is(flag, value):
+                return (text_args.count(flag) == 1
+                        and text_args.index(flag) + 1 < len(text_args)
+                        and text_args[text_args.index(flag) + 1] == str(value))
+            require(self.owns_output and self.output == Path(self.grant["output_root"])
+                    and self.record.get("phase") == "test" and self.record["test_count"] == 1
+                    and name == "ui-test" and allowed_codes == (0,)
+                    and text_args[:2] == ["xcodebuild", "test-without-building"]
+                    and option_is("-resultBundlePath", self.output / "original.xcresult")
+                    and getattr(self, "xctestrun", None) is not None
+                    and option_is("-xctestrun", self.xctestrun)
+                    and [arg for arg in text_args if arg.startswith("-only-testing:")] == ["-only-testing:" + CASE]
+                    and getattr(self, "xcresult", None) == self.output / "original.xcresult",
+                    "Invalid xcresult producer command", ConfigurationFailure)
         require(self._derived_scan_service is None and self._device_scan_service is None
                 and self._device_scan_context is None and self._derived_scan_context is None,
                 "Stale scan service", ConfigurationFailure)
@@ -1023,6 +1064,8 @@ class RecoveryRun:
                 entry = {"process": process, "state": {}, "record": record}
                 self.groups.append(entry)
                 record["pid"] = record["pgid"] = process.pid
+                if xcresult_producer:
+                    self._active_xcresult_producer = (entry, self.xcresult)
             finally:
                 if blocked is not None:
                     signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
@@ -1122,6 +1165,9 @@ class RecoveryRun:
             except BaseException:
                 pass
         finally:
+            # The larger allocation belongs only to the owned producer. Its
+            # terminal full guard and every collector read use the final cap.
+            self._active_xcresult_producer = None
             self._derived_scan_service = None
             self._derived_scan_context = None
             self._device_scan_service = None
@@ -1360,7 +1406,8 @@ class RecoveryRun:
                           "-resultBundlePath", self.xcresult, "-only-testing:" + CASE,
                           "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                           "-test-timeouts-enabled", "YES",
-                          "-maximum-test-execution-time-allowance", "420"], "ui-test", cap=480, on_poll=self.collector.poll_bridge)
+                          "-maximum-test-execution-time-allowance", "420"], "ui-test", cap=480,
+                         on_poll=self.collector.poll_bridge, xcresult_producer=True)
         except BaseException as error:
             test_error = error
         # Preserve and inventory the original even for a failed test. No reader

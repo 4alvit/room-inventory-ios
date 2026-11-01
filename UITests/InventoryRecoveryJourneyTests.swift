@@ -440,7 +440,10 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingName.count) + baseName)
         let observedName = filename.value as? String ?? ""
         try ledger.require("unique export base name", actual: observedName, expected: baseName)
-        let observedFolder = filesFolderTitles(folder, app: app).element(boundBy: 0).label
+        let observedTitle = filesFolderTitles(folder, app: app).element(boundBy: 0).label
+        let actionsSuffix = ", Actions Menu"
+        let observedFolder = observedTitle.hasSuffix(actionsSuffix)
+            ? String(observedTitle.dropLast(actionsSuffix.count)) : observedTitle
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
         try tap(app.buttons["Save"], app: app)
@@ -520,9 +523,12 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func filesFolderTitles(_ title: String, app: XCUIApplication) -> XCUIElementQuery {
-        // Files can give its navigation bar a controller identifier instead of
-        // the folder name. Its exact child title still identifies the location.
-        app.navigationBars.staticTexts.matching(NSPredicate(format: "label == %@", title))
+        // Local storage uses a static title; a folder title can be a menu button.
+        // Direct children avoid counting a button's own title a second time.
+        app.navigationBars.children(matching: .any).matching(NSPredicate(
+            format: "(elementType == %d AND label == %@) OR (elementType == %d AND label == %@)",
+            XCUIElement.ElementType.staticText.rawValue, title,
+            XCUIElement.ElementType.button.rawValue, title + ", Actions Menu"))
     }
 
     private func filesFolderIsOpen(_ title: String, app: XCUIApplication) throws -> Bool {

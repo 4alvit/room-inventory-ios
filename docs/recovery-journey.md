@@ -308,8 +308,11 @@ assertions remain required; no export service is invoked directly.
 
 ### Files location titles
 
-The journey recognizes a Files location by its exact, unique, visible static-text
-title inside a navigation bar. The bar itself can expose the identifier
+The journey recognizes a Files location by its exact, unique, visible title
+among a navigation bar's direct children: static text for local storage, or a
+button labelled with the folder name followed by `, Actions Menu`. The known
+suffix is removed when recording the exact folder name. The title button is
+observed, never activated to enter its own folder. The bar itself can expose the identifier
 `FullDocumentManagerViewControllerNavigationBar` instead of its displayed folder
 name. On local iOS 27.0 the save picker already opened at `On My iPhone`; matching
 the bar by that name failed and caused repeated taps on the noninteractive title.
@@ -320,7 +323,7 @@ Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
 unique keyboard Done button. It waits for editing to end before opening the
-folder. The earlier alert-based creation path remains available when that inline
+folder if Files has not already entered it. The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app

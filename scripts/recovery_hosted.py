@@ -867,6 +867,11 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             selection = select_runtime(inventory, sdk, runtime_line=profile["runtime_version"])
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)
+            # Complete the selected runtime's cache initialization before boot.
+            # Without --force this is a no-op for a ready cache; the existing
+            # preflight deadline still bounds any queued or required work.
+            discovery.command(["xcrun", "simctl", "runtime", "dyld_shared_cache", "update",
+                               selection["runtime"]], "runtime-cache", 60)
             installed = discovery.command([sys.executable, str(root / "scripts/install-xcodegen.py")], "install-xcodegen", 70).decode().strip()
             xcodegen = root / ".build/tools/xcodegen-2.46.0/xcodegen/bin/xcodegen"
             require(installed == str(xcodegen) and xcodegen.resolve() == xcodegen and os.access(xcodegen, os.X_OK),

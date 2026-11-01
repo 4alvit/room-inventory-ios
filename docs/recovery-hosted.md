@@ -142,9 +142,21 @@ are recorded; no Intel architecture is assumed. GitHub updates runner images, so
 the [exact job image](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners)
 and the job's own observations take precedence over a previously seen image.
 
+After selecting the runtime, preflight runs one non-forced
+`xcrun simctl runtime dyld_shared_cache update <selected-runtime>` before the
+XcodeGen installer and recovery controller. This follows
+[Apple's cache-completion guidance](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes):
+runtime scanning and cache generation can delay simulator startup. The
+[hosted image already builds these caches](https://github.com/actions/runner-images/blob/102f6553849daabcbd37e321e2e224dbab45c469/images/macos/scripts/build/Install-Xcode.ps1#L33-L44);
+this step checks for pending or invalidated cache work, without forcing a rebuild.
+Its nominal 60-second cap shares the existing absolute 120-second preflight
+window; timeout or command failure stops native work. Cache readiness does not
+establish that caching caused the observed silent `bootstatus` timeout, or replace
+the controller's boot-readiness check.
+
 ## Time and storage
 
-The adapter reserves at most 120 seconds for discovery, 1,800 seconds for the
+The adapter reserves at most 120 seconds for preflight, 1,800 seconds for the
 unchanged recovery controller and 180 seconds for retention. The controller keeps
 its own final 60-second cleanup reserve. The adapter step is capped at 36 minutes,
 upload at 5 minutes and the whole job at 45 minutes, leaving room for checkout and
@@ -163,9 +175,10 @@ and the absolute discovery deadline; work must finish four seconds before that.
 The adapter refuses to start a command with fewer than eight seconds remaining
 in its effective cap. Command caps are ceilings, not reserved consecutive slots:
 their worst-case sum exceeds 120 seconds. If inventory returns at elapsed 90
-seconds, the installer has at most 26 seconds of work and four of cleanup; at
-elapsed 113 seconds it cannot start. A successful command or receipt does not
-renew the discovery window. Before constructing the controller the adapter still
+seconds, remaining preflight commands share at most 26 seconds of work and four
+of cleanup; at elapsed 113 seconds another command cannot start. A successful
+command or receipt does not renew the discovery window. Before constructing the
+controller the adapter still
 requires at least 1,980 seconds remaining in the overall 2,100-second envelope,
 preserving the full controller and retention budgets. Slow discovery fails
 instead of borrowing either reserve.

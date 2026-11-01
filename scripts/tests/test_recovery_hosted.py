@@ -102,6 +102,7 @@ class HostedCase(unittest.TestCase):
         values = {"source-head": ("a" * 40 + "\n" + "b" * 40 + "\n").encode(), "source-status": b"",
                   "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 26.4.1\nBuild version 17E202",
                   "sdk-version": b"26.4\n", "simulator-inventory": json.dumps(self.inventory()).encode(),
+                  "runtime-cache": b"",
                   "install-xcodegen": str(self.xcodegen).encode()}
         self.command_values = values
 
@@ -318,18 +319,52 @@ class IntegrationTests(HostedCase):
     def test_malformed_xcode_output_never_starts_inventory_or_controller(self):
         self.assert_toolchain_rejected_before_inventory(b"Xcode 26.4.1")
 
-    def test_inventory_and_installer_request_fixed_caps_once(self):
+    def test_inventory_selected_runtime_cache_and_installer_request_fixed_caps_once(self):
         self.fake_execution()
         result = self.run_adapter()
         self.assertEqual(result["exit_code"], 0, result)
         calls = hosted.Discovery.command.call_args_list
         inventory = [call for call in calls if call.args[2] == "simulator-inventory"]
+        cache = [call for call in calls if call.args[2] == "runtime-cache"]
         installer = [call for call in calls if call.args[2] == "install-xcodegen"]
         self.assertEqual(len(inventory), 1)
         self.assertEqual(inventory[0].args[1], ["xcrun", "simctl", "list", "--json"])
         self.assertEqual(inventory[0].args[3], 90)
+        self.assertEqual(len(cache), 1)
+        self.assertEqual(cache[0].args[1], ["xcrun", "simctl", "runtime", "dyld_shared_cache", "update",
+                                          self.inventory()["runtimes"][0]["identifier"]])
+        self.assertEqual(cache[0].args[3], 60)
         self.assertEqual(len(installer), 1)
+        self.assertLess(calls.index(inventory[0]), calls.index(cache[0]))
+        self.assertLess(calls.index(cache[0]), calls.index(installer[0]))
         self.assertEqual(installer[0].args[3], 70)
+
+    def assert_runtime_cache_failure_stops_native_work(self, error, expected_code):
+        self.fake_execution()
+        ordinary = hosted.Discovery.command.side_effect
+        def fail_cache(instance, args, name, cap=20):
+            if name == "runtime-cache":
+                self.calls.append((name, args, dict(instance.env)))
+                self.assertEqual(cap, 60)
+                raise error
+            return ordinary(instance, args, name, cap)
+        hosted.Discovery.command.side_effect = fail_cache
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], expected_code)
+        self.assertEqual(result["primary_error"]["message"], str(error))
+        self.assertEqual(sum(name == "runtime-cache" for name, _, _ in self.calls), 1)
+        self.assertEqual(self.calls[-1][0], "runtime-cache")
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
+        self.assertIsNone(self.package.call_args.args[2]["controller_exit_code"])
+        selection = self.temp / "room-recovery-work/preflight/selection.json"
+        self.assertEqual(json.loads(selection.read_text())["runtime"], self.inventory()["runtimes"][0]["identifier"])
+
+    def test_runtime_cache_timeout_is_retained_without_retry_installer_or_controller(self):
+        self.assert_runtime_cache_failure_stops_native_work(hosted.Deadline("injected cache deadline"), 124)
+
+    def test_runtime_cache_failure_is_retained_without_retry_installer_or_controller(self):
+        self.assert_runtime_cache_failure_stops_native_work(hosted.Failure("injected cache failure"), 2)
 
     def test_inventory_timeout_is_not_retried_or_followed_by_controller(self):
         self.fake_execution()
@@ -412,7 +447,7 @@ class IntegrationTests(HostedCase):
         result = self.run_adapter()
         self.assertEqual(result["exit_code"], 0, result)
         self.assertEqual(validator.call_count, 2)
-        self.assertEqual([name for name, _, _ in self.calls], ["source-head", "source-status", "xcode-select", "xcode-version", "sdk-version", "simulator-inventory", "install-xcodegen"])
+        self.assertEqual([name for name, _, _ in self.calls], ["source-head", "source-status", "xcode-select", "xcode-version", "sdk-version", "simulator-inventory", "runtime-cache", "install-xcodegen"])
         self.assertEqual(sum(name == "simulator-inventory" for name, _, _ in self.calls), 1)
         self.assertTrue(all("GH_TOKEN" not in env for _, _, env in self.calls))
         work = self.temp / "room-recovery-work"
@@ -724,6 +759,26 @@ class CommandTests(HostedCase):
         self.assertEqual(2200.0 - discovery.alarm.end, 1980.0)
         self.cleanup.assert_called_once()
         self.assertEqual(self.popen.call_count, 2)
+
+    def test_runtime_cache_uses_remaining_preflight_budget_without_renewing_installer(self):
+        discovery = self.discovery()
+        self.clock.advance(90)
+        self.process_finishes_after(25.5)
+        self.cleanup.side_effect = lambda *args, **kwargs: (self.clock.advance(.25) or {"success": True})
+        command = ["xcrun", "simctl", "runtime", "dyld_shared_cache", "update",
+                   self.inventory()["runtimes"][0]["identifier"]]
+        discovery.command(command, "runtime-cache", cap=60)
+        self.assertEqual(discovery.records[0]["timing"], {
+            "start": 190.0, "work_deadline": 216.0, "command_deadline": 220.0,
+            "requested_cap": 60, "finish": 215.75})
+        self.assertEqual(discovery.records[0]["args"], command)
+        self.assertTrue(discovery.records[0]["cleanup"]["success"])
+        with self.assertRaisesRegex(hosted.Deadline, "Insufficient discovery/cleanup budget"):
+            discovery.command(["fake-installer"], "install-xcodegen", cap=70)
+        self.assertEqual(discovery.alarm.end, 220.0)
+        self.assertEqual(len(discovery.records), 1)
+        self.popen.assert_called_once()
+        self.cleanup.assert_called_once()
 
     def test_inventory_90_deadline_preserves_sticky_eperm_after_final_absence(self):
         discovery = self.discovery()

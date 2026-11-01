@@ -81,7 +81,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let initial = ["model": "BEFORE-MODEL", "serial": "KEEP-SERIAL", "price": "USD 1.00",
                        "date": "2025-01-01", "notes": names["notes"]!]
         for field in ["model", "serial", "price", "date", "notes"] {
-            try typeIntoEmptyField(element("itemEditor.\(field)", app), value: initial[field]!, app: app)
+            try typeIntoEmptyField(app.textFields["itemEditor.\(field)"], value: initial[field]!, app: app)
         }
         try tap(app.buttons["itemEditor.save"], app: app)
         try waitForDismissal(app.buttons["itemEditor.save"])
@@ -89,21 +89,39 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try closeItemEditor(app)
 
         try tap(app.buttons["item.addAttachment"], app: app, scroll: true)
-        try tap(element("import.purpose", app), app: app)
+        try tap(app.buttons["import.purpose"], app: app)
         try tap(app.buttons["Receipt"], app: app)
-        let purpose = element("import.purpose", app)
-        let selectedReceipt = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND value == %@", "Receipt"), object: purpose)
-        let selectionSettled = XCTWaiter.wait(for: [selectedReceipt], timeout: 10)
-        let purposeValue = purpose.value
-        let observedPurpose = purposeValue as? String ?? "<missing string value>"
-        if selectionSettled != .completed || observedPurpose != "Receipt" {
-            let actual = "value=\(String(describing: purposeValue)); label=\(purpose.label); wait=\(selectionSettled)"
+        let purpose = app.buttons["import.purpose"]
+        let selectionDeadline = ProcessInfo.processInfo.systemUptime + 10
+        var observedPurpose = "<no timely string value>"
+        var purposeSnapshotError: String?
+        // Reuse one typed snapshot per poll for the assertion and its evidence.
+        // A slow native query may outlive the wait, but cannot authorize a late
+        // success. Failure reporting must not resolve the purpose control again.
+        let selectedReceipt = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard ProcessInfo.processInfo.systemUptime < selectionDeadline else { return false }
+            do {
+                let snapshot = try purpose.snapshot()
+                purposeSnapshotError = nil
+                let value = snapshot.value as? String
+                guard ProcessInfo.processInfo.systemUptime < selectionDeadline else { return false }
+                observedPurpose = value ?? "<missing string value>"
+                return observedPurpose == "Receipt"
+            } catch {
+                purposeSnapshotError = String(describing: error)
+                return false
+            }
+        }, object: nil)
+        let selectionSettled = XCTWaiter.wait(for: [selectedReceipt],
+            timeout: max(0, selectionDeadline - ProcessInfo.processInfo.systemUptime))
+        let selectionWasTimely = ProcessInfo.processInfo.systemUptime < selectionDeadline
+        if selectionSettled != .completed || !selectionWasTimely || observedPurpose != "Receipt" {
+            let actual = "value=\(observedPurpose); wait=\(selectionSettled); timely=\(selectionWasTimely); snapshot_error=\(purposeSnapshotError ?? "<none>")"
             try ledger.require("Receipt purpose selected", actual: actual,
                                expected: "exact Receipt value within the selection wait")
         }
         try ledger.require("Receipt purpose selected", actual: observedPurpose, expected: "Receipt")
-        try tap(element("import.photos", app), app: app)
+        try tap(app.buttons["import.photos"], app: app)
         // PhotoKit verified the original and isolated this owned library before
         // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
@@ -273,7 +291,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try tap(app.buttons["item.editDetails"], app: app, scroll: true)
         var result: [String: String] = [:]
         for key in ["model", "serial", "price", "date", "notes"] {
-            let field = element("itemEditor.\(key)", app)
+            let field = app.textFields["itemEditor.\(key)"]
             try reveal(field, app: app)
             let value = field.value as? String ?? ""
             try ledger.require("stored raw \(key)", actual: value, expected: expected[key]!)

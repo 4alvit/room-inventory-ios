@@ -260,6 +260,18 @@ installation-only launch shares the existing XCTest/controller deadlines; it doe
 not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
+Opening the system Photos picker has one 30-second monotonic appearance window,
+starting after the single `import.photos` activation. The native existence wait
+receives only the remaining time, and a positive result returned at or after the
+deadline is rejected. The selector still requires a `Photo,` Image, followed by
+the existing exactly-one-photo, interaction and original-byte checks. There is
+no second picker launch or seed attempt, and the XCTest/controller limits do not
+increase. In run `41358495304`, PhotoKit had verified the sole fixture, but native
+session events show the Photos service appearing about 20 seconds after the
+existence wait began, beyond the former ten-second window. The later failure
+snapshot contains that exact image; it does not prove the image was available
+during the earlier wait.
+
 
 In run `41249372436` the strict Photos selector found one `Photo,` Image, but
 `control interactive: observed false, expected true` stopped the tap. The saved

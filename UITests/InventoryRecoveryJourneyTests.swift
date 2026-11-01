@@ -122,11 +122,15 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         try ledger.require("Receipt purpose selected", actual: observedPurpose, expected: "Receipt")
         try tap(app.buttons["import.photos"], app: app)
+        let photosAppearance = RecoveryPhotosAppearanceWindow()
         // PhotoKit verified the original and isolated this owned library before
         // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
         let photos = app.images.matching(photoPredicate)
-        try ledger.require("seeded photo appears", photos.firstMatch.waitForExistence(timeout: 10))
+        let photoAppeared = try photosAppearance.wait { remaining in
+            photos.firstMatch.waitForExistence(timeout: remaining)
+        }
+        try ledger.require("seeded photo appears", photoAppeared)
         ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
         try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
         let photoLabel = photos.firstMatch.label

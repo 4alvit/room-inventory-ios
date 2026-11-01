@@ -2,21 +2,12 @@
 
 ## Unreleased
 
-- Bound backup-file reads before restoration, reject non-regular inputs, and keep cancelling the file picker silent.
-- Align automatic Simulator selection with the active SDK, support explicit runtime pins, and use Xcode 26.4.1 with iOS 26.2 on hosted macOS 26 validation.
-- Stop before UI tests when app unit tests fail, preserving separate result bundles for both required phases.
-- Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
-- Capture Photos and Files diagnostics from one immutable application snapshot so a dismissed picker cannot fail the test during diagnostic reads.
-- Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
-- Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
-- Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.
-- Build same-repository PR Simulator candidates on GitHub-hosted macOS, with verified tested-tree identity and payload provenance, without publishing a release.
-- Add an offline English and Russian privacy/support page from the main screen, available without Pro. It explains local data, deletion, sharing, backups and public support, with optional links to published preview documents.
-
 ## [0.1.0] - development preview
 
 ### Added
 
+- Build same-repository PR Simulator candidates on GitHub-hosted macOS, with verified tested-tree identity and payload provenance, without publishing a release.
+- Add an offline English and Russian privacy/support page from the main screen, available without Pro. It explains local data, deletion, sharing, backups and public support, with optional links to published preview documents.
 - English and Russian UI, accessibility text, errors, permission text and report captions selected automatically from iOS language preferences.
 - Russian receipt/label OCR suggestions, regional display formatting and separate translated CSV output while machine CSV and backups retain their stable formats.
 
@@ -34,6 +25,14 @@ acceptance and App Review remain separate requirements.
 
 ### Fixed
 
+- Bound backup-file reads before restoration, reject non-regular inputs, and keep cancelling the file picker silent.
+- Align automatic Simulator selection with the active SDK, support explicit runtime pins, and use Xcode 26.4.1 with iOS 26.2 on hosted macOS 26 validation.
+- Stop before UI tests when app unit tests fail, preserving separate result bundles for both required phases.
+- Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
+- Capture Photos and Files diagnostics from one immutable application snapshot so a dismissed picker cannot fail the test during diagnostic reads.
+- Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
+- Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
+- Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.
 - Unsigned Release previews omit build-machine paths and code-coverage data; packaging rejects app payloads that retain them.
 - PDF fonts preserve exact Cyrillic text for copying and searching, including the letter к.
 

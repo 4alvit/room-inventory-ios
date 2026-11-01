@@ -188,6 +188,154 @@ class RecoveryCollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(C.CollectorError, "ambiguous saved Files"):
             self.collector._files()
 
+    def test_saved_files_ctime_drift_keeps_all_barriers_and_offline_verification(self):
+        self.collector.capture_initial_exports()
+        for index in range(2):
+            self.request(index * 2 + 1)
+            self.collector.poll_bridge()
+            _, saved = self.export(index)
+            self.request(index * 2 + 2)
+            self.collector.poll_bridge()
+        original_ctime = self.collector.origins[1]["saved_metadata"]["ctime_ns"]
+        original_read = self.collector._read
+        drift = 1
+
+        def read(path, limit):
+            data, record = original_read(path, limit)
+            if Path(path) == saved:
+                record["ctime_ns"] += drift
+            return data, record
+
+        with patch.object(self.collector, "_read", side_effect=read):
+            self.request(5)
+            self.assertEqual(self.collector.poll_bridge(), 5)
+            self.assertEqual(self.collector.barriers[-1]["snapshot"]["saved"]["entries"]
+                             [saved.name]["ctime_ns"], original_ctime + 1)
+            self.export(2)
+            drift = 2
+            self.request(6)
+            self.assertEqual(self.collector.poll_bridge(), 6)
+            self.assertEqual(self.collector.barriers[-1]["snapshot"]["saved"]["entries"]
+                             [saved.name]["ctime_ns"], original_ctime + 2)
+            for label, run in [("source", fixtures.SOURCE), ("target", fixtures.TARGET)]:
+                shutil.copytree(self.artifact_case.root / label, self.app / "tmp/RoomInventoryUITests" / run)
+            drift = 3
+            copy = self.collector.capture_xcresult(self.original)
+            manifest = self.collector.collect(copy)
+        self.assertEqual(fixtures.VERIFIER.verify_collection(manifest, fixtures.PIN)["status"],
+                         "PASS_OFFLINE_ARTIFACT_CONSISTENCY")
+        self.assertEqual(self.collector.origins[1]["saved_metadata"]["ctime_ns"], original_ctime)
+
+    def test_saved_files_other_cross_observation_changes_reject_before_ack(self):
+        self.collector.capture_initial_exports()
+        self.request(1)
+        self.collector.poll_bridge()
+        self.export(0)
+        self.request(2)
+        self.collector.poll_bridge()
+        self.request(3)
+        before = self.collector._files()
+
+        def reject(after):
+            with patch.object(self.collector, "_files", return_value=after):
+                with self.assertRaisesRegex(C.CollectorError, "outside their live barrier"):
+                    self.collector.poll_bridge()
+            self.assertFalse((self.collector.bridge / "ack-03.json").exists())
+
+        for field, replacement in [("inode", -1), ("device_id", -1), ("bytes", -1),
+                                   ("mtime_ns", -1), ("created_at_ns", -1),
+                                   ("sha256", "0" * 64), ("kind", "directory")]:
+            with self.subTest(field=field):
+                after = copy.deepcopy(before)
+                name = next(iter(after["entries"]))
+                after["entries"][name][field] = replacement
+                reject(after)
+        for alteration in ("remove", "add", "folder", "folder_identity"):
+            with self.subTest(alteration=alteration):
+                after = copy.deepcopy(before)
+                entries = after["entries"]
+                if alteration == "remove":
+                    entries.pop(next(iter(entries)))
+                elif alteration == "add":
+                    entries["foreign.zip"] = copy.deepcopy(next(iter(entries.values())))
+                elif alteration == "folder":
+                    after["folder"] += "-other"
+                else:
+                    after["identity"]["inode"] = -1
+                reject(after)
+
+    def test_saved_file_change_after_before_barrier_rejects_after_ack(self):
+        self.collector.capture_initial_exports()
+        self.request(1)
+        self.collector.poll_bridge()
+        _, saved = self.export(0)
+        self.request(2)
+        self.collector.poll_bridge()
+        self.request(3)
+        self.collector.poll_bridge()
+        self.export(1)
+        saved.write_bytes(b"changed after before barrier")
+        self.request(4)
+        with self.assertRaisesRegex(C.CollectorError, "prior saved Files copy changed"):
+            self.collector.poll_bridge()
+        self.assertFalse((self.collector.bridge / "ack-04.json").exists())
+
+    def test_saved_file_identity_change_at_final_read_rejects_collection(self):
+        self.journey()
+        copy = self.collector.capture_xcresult(self.original)
+        saved = self.sim / self.collector.origins[0]["saved"]
+        original_read = self.collector._read
+        reads = 0
+
+        def read(path, limit):
+            nonlocal reads
+            data, record = original_read(path, limit)
+            if Path(path) == saved:
+                reads += 1
+                if reads == 2:  # The final snapshot passed; now copy the saved artifact.
+                    record["inode"] += 1
+            return data, record
+
+        with patch.object(self.collector, "_read", side_effect=read):
+            with self.assertRaisesRegex(C.CollectorError, "export changed during final collection"):
+                self.collector.collect(copy)
+        self.assertFalse((self.collector.root / "collection.json").exists())
+
+    def test_generated_export_ctime_drift_still_rejects_before_ack(self):
+        self.collector.capture_initial_exports()
+        self.request(1)
+        self.collector.poll_bridge()
+        generated, _ = self.export(0)
+        self.request(2)
+        self.collector.poll_bridge()
+        self.request(3)
+        original_read = self.collector._read
+
+        def read(path, limit):
+            data, record = original_read(path, limit)
+            if Path(path) == generated:
+                record["ctime_ns"] += 1
+            return data, record
+
+        with patch.object(self.collector, "_read", side_effect=read):
+            with self.assertRaisesRegex(C.CollectorError, "outside their live barrier"):
+                self.collector.poll_bridge()
+        self.assertFalse((self.collector.bridge / "ack-03.json").exists())
+
+    def test_saved_file_ctime_change_during_read_still_fails(self):
+        _, saved = self.export(0)
+        original_fstat = C.os.fstat
+
+        def fstat(fd):
+            info = original_fstat(fd)
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                                   st_size=info.st_size, st_mtime_ns=info.st_mtime_ns,
+                                   st_ctime_ns=info.st_ctime_ns + 1)
+
+        with patch.object(C.os, "fstat", side_effect=fstat):
+            with self.assertRaisesRegex(C.CollectorError, "file changed while reading"):
+                self.collector._read(saved, C.MIB)
+
     def test_stale_and_duplicate_bridge_requests_fail_closed(self):
         self.collector.capture_initial_exports()
         self.request(1, schema_version=True)

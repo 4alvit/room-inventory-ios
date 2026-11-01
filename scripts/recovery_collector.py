@@ -74,6 +74,18 @@ def content_view(tree):
             for name, value in tree.items()}
 
 
+def saved_file_view(record):
+    # Files can update last-used metadata when the backup is opened for restore.
+    # Keep identity, content and modification/birth times exact across observations;
+    # ctime remains recorded and is still checked during each individual _read.
+    return {key: value for key, value in record.items() if key != "ctime_ns"}
+
+
+def export_observation_view(snapshot):
+    return {**snapshot, "saved": {**snapshot["saved"], "entries": {
+        name: saved_file_view(record) for name, record in snapshot["saved"]["entries"].items()}}}
+
+
 class Collector:
     def __init__(self, config, *, guard, run):
         self.config = dict(config)
@@ -562,7 +574,8 @@ class Collector:
         current = {"exports": self._exports(), "saved": self._files()}
         prior = self.barriers[-1]["snapshot"] if self.barriers else self.baseline
         if number % 2:
-            check(current == prior, "exports changed outside their live barrier")
+            check(export_observation_view(current) == export_observation_view(prior),
+                  "exports changed outside their live barrier")
         else:
             self._record_origin(request, prior, current)
         self.nonces.add(request["nonce"])
@@ -603,7 +616,8 @@ class Collector:
         if saved_before["folder"] is not None:
             check(saved_after["folder"] == saved_before["folder"] and saved_after["identity"] == saved_before["identity"], "saved Files folder changed identity")
         check(saved_after["folder"] is not None, "missing saved Files folder")
-        check(all(saved_after["entries"].get(name) == value for name, value in saved_before["entries"].items()), "prior saved Files copy changed")
+        check(all(saved_file_view(saved_after["entries"].get(name, {})) == saved_file_view(value)
+                  for name, value in saved_before["entries"].items()), "prior saved Files copy changed")
         extension = "roominventory" if index == 1 else "zip"
         saved_name = PREFIXES[index] + self.ids["journey_run_id"] + "." + extension
         check(set(saved_after["entries"]) - set(saved_before["entries"]) == {saved_name}, "barrier must save exactly its named Files copy")
@@ -762,7 +776,8 @@ class Collector:
             message = (f"Primary reader failure: {type(primary).__name__}: {primary}; " if primary is not None else "")
             raise CollectorError(message + "Post-reader verification: " + "; ".join(post_errors)) from primary
         check(self.poll_bridge() == 6 and len(self.origins) == 3, "incomplete live export barriers")
-        check({"exports": self._exports(), "saved": self._files()} == self.barriers[-1]["snapshot"], "exports changed after final barrier")
+        check(export_observation_view({"exports": self._exports(), "saved": self._files()}) ==
+              export_observation_view(self.barriers[-1]["snapshot"]), "exports changed after final barrier")
         artifacts = {}
         for label, run_key in [("source", "source_run_id"), ("target", "target_run_id")]:
             source = self.app / "tmp/RoomInventoryUITests" / self.ids[run_key]
@@ -781,10 +796,12 @@ class Collector:
         receipt_entries = []
         for index, origin in enumerate(self.origins):
             generated_key = ("source_generated_zip", "generated_backup", "target_generated_zip")[index]
-            for key, path, expected in [(generated_key, self.app / "tmp/InventoryExports" / origin["generated"], origin["metadata"]),
-                                        (origin["role"], self.simulator / origin["saved"], origin["saved_metadata"])]:
+            for key, path, expected, is_saved in [
+                    (generated_key, self.app / "tmp/InventoryExports" / origin["generated"], origin["metadata"], False),
+                    (origin["role"], self.simulator / origin["saved"], origin["saved_metadata"], True)]:
                 data, meta = self._read(path, 8 * MIB)
-                check(meta == expected, "export changed during final collection")
+                check(saved_file_view(meta) == saved_file_view(expected) if is_saved else meta == expected,
+                      "export changed during final collection")
                 relative = "artifacts/" + key + (".roominventory" if index == 1 else ".zip")
                 self._write(relative, data)
                 artifacts[key] = relative

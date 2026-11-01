@@ -198,7 +198,7 @@ the controller's boot-readiness check.
 ## Time and storage
 
 The adapter reserves at most 120 seconds for preflight, 1,800 seconds for the
-unchanged recovery controller and 180 seconds for retention. The controller keeps
+recovery controller and 180 seconds for retention. The controller keeps
 its own final 60-second cleanup reserve. The adapter step is capped at 36 minutes,
 upload at 5 minutes and the whole job at 45 minutes, leaving room for checkout and
 Python setup. Each boundary fails rather than beginning an unbounded retry.
@@ -239,6 +239,19 @@ device/DerivedData/output caps and xcresult subcaps remain in force. Availabilit
 on a particular hosted runner is not guaranteed. Failure to meet admission is a
 failed scenario, not evidence that recovery passed. No unrelated SDKs, runtimes,
 devices or files are deleted to manufacture admission space.
+
+The original xcresult has a 512 MiB allowance only during its exact owned
+`ui-test` producer command, within the unchanged 1 GiB controller-output cap.
+That allowance is revoked before terminal accounting: the finalized original
+and verified reader copy must each fit 192 MiB. This explicitly changes the
+earlier policy that also limited active result staging to 192 MiB. The generated
+test configuration uses `SystemAttachmentLifetime=deleteOnSuccess` and
+`UserAttachmentLifetime=keepAlways`; all 17 explicit checkpoint screenshots,
+17 accessibility trees and the final ledger remain required. System failure
+diagnostics remain subject to the final-result and packet limits. See the
+[result-lifecycle policy](recovery-journey.md#storage-admission-and-abort-policy)
+for the measured rationale and remaining qualification requirements.
+
 The numeric `admission_free_bytes` in the adapter context is the value from the
 existing admission disk query, not a second sample. It is retained only after
 the same 24 GiB guard has passed; no output directory is created before admission.
@@ -355,8 +368,9 @@ Snapshot APIs do not expose hit testing: `hittable: null` is
 explicitly unknown, not false, and cannot establish a non-hittable failure.
 The real tap and readiness assertions still use live UI controls.
 
-If the original result grows beyond 192 MiB while Xcode assembles system logs,
-the small capture can still be retained in a `PARTIAL` archive. Only after its
+If the original result reaches its active 512 MiB allowance or reaches the
+192 MiB final-result bound, the small capture can still be retained in a
+`PARTIAL` archive. Only after its
 bytes are verified in that archive may `failure_precedence` identify the exact
 structured `control interactive: observed false, expected true` assertion as the
 primary failure and retain the controller's xcresult-cap failure as secondary.

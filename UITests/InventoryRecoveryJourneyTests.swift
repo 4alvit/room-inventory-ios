@@ -486,14 +486,33 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             let more = app.buttons.matching(NSPredicate(format: "label == 'More' OR label == 'More Actions'")).firstMatch
             try tap(more, app: app)
             try tap(app.buttons["New Folder"], app: app)
-            let field = app.alerts.textFields.firstMatch
-            try tap(field, app: app)
-            let previous = field.value as? String ?? ""
-            field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + folder)
-            try ledger.require("folder name entered", actual: field.value as? String ?? "", expected: folder)
-            let createButton = app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")).firstMatch
-            try tap(createButton, app: app)
+            let inlineFields = app.textViews.matching(identifier: "DOC.inlineRenameField")
+            let inline = inlineFields.element(boundBy: 0)
+            if inline.waitForExistence(timeout: 5) {
+                try ledger.require("unique inline folder editor", inlineFields.count == 1)
+                try ledger.require("inline folder editor ready", inline.isHittable && inline.isEnabled)
+                let previous = inline.value as? String ?? ""
+                try ledger.require("inline default folder name present", !previous.isEmpty && previous.count <= 255)
+                // New Folder focuses and selects its inline name. Type directly
+                // so another tap cannot collapse the selection into the name.
+                inline.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + folder)
+                try ledger.require("folder name entered", actual: inline.value as? String ?? "", expected: folder)
+                let done = app.keyboards.buttons.matching(identifier: "Done")
+                try ledger.require("unique folder keyboard Done", done.count == 1)
+                try tap(done.element(boundBy: 0), app: app)
+                try waitForDismissal(inline)
+            } else {
+                let field = app.alerts.textFields.firstMatch
+                try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))
+                try ledger.require("unique folder alert field", app.alerts.textFields.count == 1)
+                try tap(field, app: app)
+                let previous = field.value as? String ?? ""
+                field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + folder)
+                try ledger.require("folder name entered", actual: field.value as? String ?? "", expected: folder)
+                let createButton = app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")).firstMatch
+                try tap(createButton, app: app)
+            }
         }
         if try !filesFolderIsOpen(folder, app: app) { try tap(fileItem(folder, app: app), app: app, scroll: true) }
         try ledger.require("run folder title appeared", filesFolderTitles(folder, app: app).element(boundBy: 0).waitForExistence(timeout: 5))

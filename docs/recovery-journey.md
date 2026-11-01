@@ -316,6 +316,13 @@ the bar by that name failed and caused repeated taps on the noninteractive title
 Folder creation, navigation, the exact run-folder name and the saved-file evidence
 remain mandatory.
 
+Files can also create a new folder with a focused `DOC.inlineRenameField` text
+view in the file grid. The journey requires this editor to be unique and ready,
+replaces the selected default name, verifies the exact result and activates the
+unique keyboard Done button. It waits for editing to end before opening the
+folder. The earlier alert-based creation path remains available when that inline
+editor is absent; neither path creates directories through a filesystem API.
+
 The first-Files-tap diagnostic keeps selector attributes from one immutable app
 snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy
 therefore uses the stable app root's later `debugDescription`, which includes the

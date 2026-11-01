@@ -33,6 +33,7 @@ acceptance and App Review remain separate requirements.
 - Check actual toolbar buttons during Recovery OCR selection instead of treating transparent full-screen toolbar containers as obstructions.
 - Select Recovery export actions by unique visible titles when native menus omit accessibility identifiers, and keep full snapshot diagnostics within their byte budget using compact JSON.
 - Recognize Files locations by their exact visible navigation titles and retain remote-picker diagnostics when application snapshots omit them.
+- Support Files' inline new-folder editor while preserving exact folder-name and save checks.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
 - Pin hosted app tests, Recovery and Simulator packaging to the GA Xcode 27 runner with Xcode 27.1, iOS 27.0 and iPhone 17; retain the supported Xcode 26.4.1 toolchain for required Swift CodeQL analysis.

@@ -39,6 +39,7 @@ POLICY = {
     "runner_label": "macos-26", "image_os": "macos26", "workflow_path": ".github/workflows/ci.yml",
     "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 26.4.1\nBuild version 17E202",
     "runtime_version": "26.2",
+    "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-16e",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
     "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,
@@ -676,12 +677,13 @@ def version(value):
     return tuple(int(p) for p in value.split(".")) + ((0,) if value.count(".") == 1 else ())
 
 
-def select_runtime(inventory, sdk, *, runtime_line=None):
-    """Newest installed patch in the selected line, then newest iPhone generation.
+def select_runtime(inventory, sdk, *, runtime_line=None, device_type=None):
+    """Newest installed patch in the selected line with a compatible iPhone.
 
     Default to the SDK major/minor unless an older/equal line is explicitly
     pinned. Patch equality is intentionally not required. A compatible type must
     appear in runtime support data, an available device, or a declared range.
+    Use the pinned type when supplied; otherwise choose the newest generation.
     No device boot, runtime download, fallback runtime or retry is performed.
     """
     sdk_version = version(sdk)
@@ -691,6 +693,10 @@ def select_runtime(inventory, sdk, *, runtime_line=None):
                 "Explicit runtime line must be major.minor", Failure)
         selected_line = version(runtime_line)[:2]
         require(selected_line <= sdk_version[:2], "Pinned runtime line exceeds SDK version", Failure)
+    if device_type is not None:
+        require(isinstance(device_type, str) and re.fullmatch(
+            r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-[A-Za-z0-9-]+", device_type),
+            "Explicit device type must be an iPhone identifier", Failure)
     require(isinstance(inventory.get("runtimes"), list) and isinstance(inventory.get("devicetypes"), list)
             and isinstance(inventory.get("devices"), dict), "Incomplete simulator inventory", Failure)
     runtimes = [r for r in inventory["runtimes"] if r.get("isAvailable") is True
@@ -710,6 +716,9 @@ def select_runtime(inventory, sdk, *, runtime_line=None):
                   (type(t.get("minRuntimeVersion")) is int and type(t.get("maxRuntimeVersion")) is int
                    and t["minRuntimeVersion"] <= encoded <= t["maxRuntimeVersion"]))]
     require(types, "No evidenced compatible installed iPhone type", Failure)
+    if device_type is not None:
+        types = [t for t in types if t["identifier"] == device_type]
+        require(types, "Pinned iPhone type is not installed and evidenced compatible", Failure)
     selected = max(types, key=lambda t: (int((re.search(r"iPhone-(\d+)", t["identifier"]) or ["", "0"])[1]), t["identifier"]))
     return {"runtime": runtime["identifier"], "runtime_version": runtime["version"], "sdk_version": sdk,
             "device_type": selected["identifier"], "patch_policy":
@@ -864,7 +873,8 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             require(xcode_version == profile["xcode_version"], "Installed Xcode version/build differs", Failure)
             sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
             inventory = json.loads(inventory_with_diagnostics(discovery, context))
-            selection = select_runtime(inventory, sdk, runtime_line=profile["runtime_version"])
+            selection = select_runtime(inventory, sdk, runtime_line=profile["runtime_version"],
+                                       device_type=profile["device_type"])
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)
             # Complete the selected runtime's cache initialization before boot.

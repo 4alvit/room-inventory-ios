@@ -198,6 +198,16 @@ class ContextTests(HostedCase):
             with self.subTest(profile=profile), self.assertRaises(hosted.Failure):
                 hosted.load_profile(self.root, hosted.controller.sha(raw))
 
+    def test_device_pin_cannot_be_changed_or_omitted_with_new_profile_hash(self):
+        profiles = [{**hosted.POLICY, "device_type": value} for value in (
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max", "iPhone 16e", None)]
+        profiles.append({key: value for key, value in hosted.POLICY.items() if key != "device_type"})
+        for profile in profiles:
+            raw = json.dumps(profile).encode()
+            (self.root / hosted.PROFILE_PATH).write_bytes(raw)
+            with self.subTest(profile=profile), self.assertRaises(hosted.Failure):
+                hosted.load_profile(self.root, hosted.controller.sha(raw))
+
     def test_all_five_events_bind_event_identity(self):
         cases = [("push", "refs/heads/main", self.event),
                  ("schedule", "refs/heads/main", {"repository": self.event["repository"]}),
@@ -227,6 +237,36 @@ class ContextTests(HostedCase):
 
 
 class SelectionTests(HostedCase):
+    def test_explicit_device_pin_wins_over_newer_compatible_generation(self):
+        inventory = self.inventory()
+        pinned = inventory["devicetypes"][0]["identifier"]
+        newer = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"
+        inventory["devicetypes"].append({**inventory["devicetypes"][0], "identifier": newer})
+        self.assertEqual(hosted.select_runtime(inventory, "26.4", runtime_line="26.2")["device_type"], newer)
+        self.assertEqual(hosted.select_runtime(inventory, "26.4", runtime_line="26.2",
+                                              device_type=pinned)["device_type"], pinned)
+
+    def test_explicit_device_pin_requires_installed_type_and_compatibility(self):
+        for installed, compatible in ((False, True), (True, False)):
+            inventory = self.inventory()
+            pinned = inventory["devicetypes"][0]["identifier"]
+            other = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"
+            inventory["devicetypes"].append({**inventory["devicetypes"][0], "identifier": other})
+            if not installed:
+                inventory["devicetypes"].pop(0)
+                inventory["runtimes"][0]["supportedDeviceTypes"] = [{"identifier": pinned}]
+            if not compatible:
+                inventory["devicetypes"][0]["minRuntimeVersion"] = 27 << 16
+            with self.subTest(installed=installed, compatible=compatible), self.assertRaisesRegex(
+                    hosted.Failure, "Pinned iPhone type"):
+                hosted.select_runtime(inventory, "26.4", runtime_line="26.2", device_type=pinned)
+
+    def test_explicit_device_pin_rejects_malformed_or_non_iphone_identifiers(self):
+        for value in ("", "iPhone 16e", "com.apple.CoreSimulator.SimDeviceType.iPad-Pro", True, 16,
+                      "com.apple.CoreSimulator.SimDeviceType.iPhone-16e\n"):
+            with self.subTest(value=value), self.assertRaisesRegex(hosted.Failure, "Explicit device type"):
+                hosted.select_runtime(self.inventory(), "26.4", runtime_line="26.2", device_type=value)
+
     def test_explicit_older_runtime_line_selects_only_its_highest_available_patch(self):
         inventory = self.inventory()
         for ver, available in (("26.2.1", True), ("26.2.9", False), ("26.4", True)):
@@ -283,6 +323,8 @@ class SelectionTests(HostedCase):
         runtime["supportedDeviceTypes"] = [{"identifier": device["identifier"]}]
         self.assertEqual(hosted.select_runtime(inventory, "26.2")["device_type"], device["identifier"])
         self.assertEqual(hosted.select_runtime(inventory, "26.4", runtime_line="26.2")["device_type"], device["identifier"])
+        self.assertEqual(hosted.select_runtime(inventory, "26.4", runtime_line="26.2",
+                                              device_type=device["identifier"])["device_type"], device["identifier"])
         device["identifier"] = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro"
         with self.assertRaises(hosted.Failure):
             hosted.select_runtime(inventory, "26.2")
@@ -296,6 +338,8 @@ class SelectionTests(HostedCase):
         device.pop("maxRuntimeVersion")
         inventory["devices"][inventory["runtimes"][0]["identifier"]] = [{"deviceTypeIdentifier": device["identifier"], "isAvailable": True}]
         self.assertEqual(hosted.select_runtime(inventory, "26.2")["device_type"], device["identifier"])
+        self.assertEqual(hosted.select_runtime(inventory, "26.4", runtime_line="26.2",
+                                              device_type=device["identifier"])["device_type"], device["identifier"])
 
 
 class IntegrationTests(HostedCase):
@@ -443,6 +487,10 @@ class IntegrationTests(HostedCase):
 
     def test_full_injected_path_validates_grant_and_packages_bound_source(self):
         self.fake_execution()
+        inventory = self.inventory()
+        inventory["devicetypes"].append({**inventory["devicetypes"][0],
+                                        "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"})
+        self.command_values["simulator-inventory"] = json.dumps(inventory).encode()
         validator = self.mock(hosted.controller, "validate_grant", wraps=hosted.controller.validate_grant)
         result = self.run_adapter()
         self.assertEqual(result["exit_code"], 0, result)
@@ -457,6 +505,9 @@ class IntegrationTests(HostedCase):
         self.assertEqual(envelope["selection"]["runtime_version"], "26.2")
         self.assertEqual(envelope["selection"]["sdk_version"], "26.4")
         self.assertEqual(envelope["policy"]["runtime_version"], "26.2")
+        self.assertEqual(envelope["selection"]["device_type"], hosted.POLICY["device_type"])
+        self.assertEqual(envelope["controller_grant"]["device_type"], hosted.POLICY["device_type"])
+        self.assertEqual(envelope["policy"]["device_type"], hosted.POLICY["device_type"])
         self.assertEqual(set(envelope["tool_hashes"]), {"controller", "collector", "adapter", "retention", "xcodegen_installer", "xcodegen"})
         self.assertNotIn("must-never-be-retained", (work / "hosted-grant-envelope.json").read_text())
         self.assertEqual((work / "preflight/recovery-hosted-profile.json").read_bytes(), self.profile_raw)
@@ -520,6 +571,18 @@ class IntegrationTests(HostedCase):
         self.assertEqual(self.calls[-1][0], "simulator-inventory")
         self.assertEqual(sum(name == "simulator-inventory" for name, _, _ in self.calls), 1)
         self.runner.execute.assert_not_called()
+
+    def test_missing_pinned_device_prevents_cache_preparation_installer_and_controller(self):
+        self.fake_execution()
+        inventory = self.inventory()
+        inventory["devicetypes"][0]["identifier"] = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"
+        self.command_values["simulator-inventory"] = json.dumps(inventory).encode()
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 2)
+        self.assertIn("Pinned iPhone type", result["primary_error"]["message"])
+        self.assertEqual(self.calls[-1][0], "simulator-inventory")
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
 
     def test_controller_failure_and_cleanup_remain_primary_if_retention_fails(self):
         self.fake_execution(code=124, primary={"message": "original deadline"}, cleanup=[{"error": "shutdown uncertain"}])

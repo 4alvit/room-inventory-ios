@@ -8,6 +8,7 @@
 - Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
+- Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.
 - Build same-repository PR Simulator candidates on GitHub-hosted macOS, with verified tested-tree identity and payload provenance, without publishing a release.
 - Add an offline English and Russian privacy/support page from the main screen, available without Pro. It explains local data, deletion, sharing, backups and public support, with optional links to published preview documents.
 

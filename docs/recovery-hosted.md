@@ -78,6 +78,15 @@ in its hashed profile. A missing or unavailable pinned runtime fails; neither
 job silently substitutes another runtime. Within that line, the newest installed
 patch is selected. The selected SDK and runtime versions are recorded separately.
 
+Both jobs also pin `com.apple.CoreSimulator.SimDeviceType.iPhone-16e`: app tests
+through `SIMULATOR_DEVICE_TYPE`, recovery through `device_type` in the hashed
+profile. This aligns recovery with the model used by the successful app-test
+run, instead of letting the two selectors choose different iPhones. The pinned
+model must be installed and compatible with the selected runtime; an unavailable
+model fails without substitution. The earlier recovery run used iPhone 17 Pro
+Max, but that difference does not establish why its boot-readiness check timed
+out. Timing limits and boot-readiness requirements are unchanged.
+
 This configuration change does not qualify the combined toolchain by itself.
 A fresh exact-source run must pass the existing native purchase, refund, pending
 approval, UI, recovery, and packaging checks before qualification is established.
@@ -131,8 +140,9 @@ the verified hosted job context and is a traceable execution contract, not a
 secret credential or a local execution permission.
 
 Discovery is one bounded pass over the selected Xcode, Simulator SDK and one
-installed simulator inventory. The chosen iPhone device type must exist in that
-inventory, and its available runtime must match the profile's explicit major/minor
+installed simulator inventory. The profile's pinned iPhone device type must exist
+in that inventory and have evidence of compatibility with the selected runtime.
+Its available runtime must match the profile's explicit major/minor
 line, which cannot be newer than the selected SDK. Without an explicit line, the
 selection helper requires the SDK's major/minor version. Runtime patch differences
 and intentional SDK/runtime differences are recorded explicitly. No runtime

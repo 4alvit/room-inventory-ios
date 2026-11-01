@@ -58,9 +58,14 @@ a different runtime version. It fails if the required runtime is absent.
 Set `SIMULATOR_RUNTIME_VERSION=26.2` to require the newest installed patch on that
 major/minor line instead. A runtime pin must not be newer than the active SDK;
 when combined with `SIMULATOR_UDID`, that device must also match the pinned line.
+Set `SIMULATOR_DEVICE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-16e` to
+require that exact iPhone model. An explicit `SIMULATOR_UDID` must match this
+model too; a missing or incompatible model fails without substitution.
 Hosted app tests and recovery explicitly use iOS 26.2 with Xcode 26.4.1 to avoid
 the observed StoreKit Test configuration failures on iOS 26.4.1. This is a
 declared test environment, not an automatic fallback; a missing runtime fails CI.
+Both jobs also pin iPhone 16e, matching the successful app-test run. This model
+alignment does not establish the cause of the earlier recovery boot timeout.
 See [toolchain qualification](docs/recovery-hosted.md#toolchain-qualification).
 App unit tests must pass before UI tests start. Both phases are required and retain
 separate result bundles; a failure in either phase fails the check.

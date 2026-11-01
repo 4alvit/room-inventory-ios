@@ -28,5 +28,6 @@
   "runner_arch": "ARM64",
   "process_arch": "arm64",
   "xcode_version": "Xcode 26.4.1\nBuild version 17E202",
-  "runtime_version": "26.2"
+  "runtime_version": "26.2",
+  "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-16e"
 }

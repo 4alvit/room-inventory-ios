@@ -11,6 +11,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
       SIMULATOR_RUNTIME_VERSION: '26.2'
+      SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-16e
     outputs:
       version: ${{ steps.preview-version.outputs.version }}
       tested-commit: ${{ steps.preview-version.outputs.commit }}
@@ -90,7 +91,7 @@ jobs:
           python-version: '3.12'
       - name: Run one bounded hosted recovery journey
         timeout-minutes: 36
-        run: python3 scripts/recovery_hosted.py --profile-sha256 ad3ab8e63f2cfbb9b2ffee6a397fed8bc4ecec450df4b7ef3a489eb3e4a2a235
+        run: python3 scripts/recovery_hosted.py --profile-sha256 0ee3b2ec1183c87c6671e6f5fdfd59a4f2423d568d2cf62dcdf4ec92ff424a99
       - name: Preserve compact recovery evidence
         if: ${{ always() }}
         timeout-minutes: 5

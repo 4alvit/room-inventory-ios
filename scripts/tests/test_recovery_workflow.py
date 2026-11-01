@@ -74,6 +74,9 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.profile["runtime_version"], "26.2")
         self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_RUNTIME_VERSION"],
                          self.profile["runtime_version"])
+        self.assertEqual(self.profile["device_type"], "com.apple.CoreSimulator.SimDeviceType.iPhone-16e")
+        self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_DEVICE_TYPE"],
+                         self.profile["device_type"])
         for job in (*ordinary, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
             self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.4.1.app/Contents/Developer")

@@ -247,6 +247,20 @@ class RecoveryRetentionTests(unittest.TestCase):
                 self.assertNotIn("native_failure", report)
                 shutil.rmtree(collector.root / "photos-selection")
 
+    def test_photos_snapshot_unknown_hittability_cannot_infer_native_failure(self):
+        collector, root = self.photos_capture_fixture()
+        self.photos_cap_context()
+        ax = json.loads((root / "after-ax.json").read_bytes())
+        ax["selector_observation"] = "first_matching_descendant_in_application_snapshot"
+        ax["selected_target"] = {"exists": True, "enabled": True, "hittable": None,
+                                 "hittable_unavailable_reason": "not_in_XCUIElementSnapshot"}
+        (root / "after-ax.json").write_bytes(R.encoded(ax))
+        self.files_stage_receipt(root, json.loads((root / "after.json").read_bytes()))
+        report = self.package(collector)
+        self.assertTrue(report["photos_selection"]["complete"], report)
+        self.assertNotIn("native_failure", report["photos_selection"])
+        self.assertNotIn("failure_precedence", report)
+
     def test_photos_changed_before_archive_cannot_change_primary_failure(self):
         collector, _ = self.photos_capture_fixture()
         self.photos_cap_context()

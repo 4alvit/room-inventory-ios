@@ -46,11 +46,11 @@ final class RecoveryJourneyEvidence {
     /// Two bounded observations in the owned runner, independent of xcresult.
     /// The host binds these run IDs to its pinned source and verifies every byte.
     func captureFirstFilesTap(_ stage: String, localTitle: String,
-                              target: XCUIElement, app: XCUIApplication) {
+                              app: XCUIApplication) {
         // Diagnostic failures never enter the acceptance ledger or escape to
         // the caller. The original tap remains outside this nonthrowing boundary.
         do {
-            try writeFirstFilesTap(stage, localTitle: localTitle, target: target, app: app)
+            try writeFirstFilesTap(stage, localTitle: localTitle, app: app)
         } catch {
             let label = stage == "before" ? "before" : stage == "after" ? "after" : "invalid"
             print("ROOM_FILES_CAPTURE_V1 \(label) incomplete")
@@ -60,10 +60,10 @@ final class RecoveryJourneyEvidence {
     /// Preserve the observed Photos selector independently of Xcode's large result bundle.
     /// This is diagnostic only and cannot authorize a tap or complete a checkpoint.
     func capturePhotosSelection(_ stage: String, fixtureIsolated: Bool,
-                                target: XCUIElement, app: XCUIApplication, failure: Error? = nil) {
+                                app: XCUIApplication, failure: Error? = nil) {
         guard fixtureIsolated else { return }
         do {
-            try writeFirstFilesTap(stage, localTitle: "Photo,", target: target, app: app, photos: true, failure: failure)
+            try writeFirstFilesTap(stage, localTitle: "Photo,", app: app, photos: true, failure: failure)
         } catch {
             let label = stage == "before" ? "before" : stage == "after" ? "after" : "invalid"
             print("ROOM_PHOTOS_CAPTURE_V1 \(label) incomplete")
@@ -80,7 +80,7 @@ final class RecoveryJourneyEvidence {
     }
 
     private func writeFirstFilesTap(_ stage: String, localTitle: String,
-                                    target: XCUIElement, app: XCUIApplication, photos: Bool = false, failure: Error? = nil) throws {
+                                    app: XCUIApplication, photos: Bool = false, failure: Error? = nil) throws {
         let stages = photos ? photosCaptureStages : filesCaptureStages
         let expected = stages.isEmpty ? "before" : "after"
         guard stages.count < 2, stage == expected,
@@ -102,20 +102,37 @@ final class RecoveryJourneyEvidence {
         guard !png.isEmpty, png.count <= 2 * 1_024 * 1_024 else {
             throw RecoveryJourneyFailure.assertion("Files PNG byte bound", String(png.count), "1...2097152")
         }
-        let query = photos
-            ? app.images.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,"))
-            : app.descendants(matching: .any).matching(NSPredicate(
-                format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@",
-                localTitle, localTitle + ".", localTitle + ","))
-        guard query.count <= 16, app.navigationBars.count <= 8 else {
+        // A successful tap can dismiss the picker between two live attribute
+        // reads. Observe its selector from one immutable application snapshot;
+        // diagnostics must never resolve the vanished target again.
+        let applicationSnapshot = try app.snapshot()
+        var pendingNodes = Array(applicationSnapshot.children.reversed())
+        var descendants: [any XCUIElementSnapshot] = []
+        while let node = pendingNodes.popLast() {
+            guard descendants.count < 10_000 else {
+                throw RecoveryJourneyFailure.assertion("Files AX node bound", "exceeded", "10000 descendants")
+            }
+            descendants.append(node)
+            pendingNodes.append(contentsOf: node.children.reversed())
+        }
+        let predicate = photos
+            ? NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
+            : NSPredicate(format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@",
+                          localTitle, localTitle + ".", localTitle + ",")
+        let matches = descendants.filter {
+            (!photos || $0.elementType == .image) && predicate.evaluate(with: ["label": $0.label])
+        }
+        let navigationBars = descendants.filter { $0.elementType == .navigationBar }
+        guard matches.count <= 16, navigationBars.count <= 8 else {
             throw RecoveryJourneyFailure.assertion("Files AX element bound", "exceeded", "16 matches / 8 bars")
         }
-        func describe(_ element: XCUIElement) -> [String: Any] {
-            guard element.exists else { return ["exists": false] }
+        func describe(_ element: (any XCUIElementSnapshot)?) -> [String: Any] {
+            guard let element else { return ["exists": false] }
             let frame = element.frame
             return ["type": element.elementType.rawValue, "identifier": element.identifier,
-                    "label": element.label, "exists": element.exists,
-                    "hittable": element.isHittable, "enabled": element.isEnabled,
+                    "label": element.label, "exists": true,
+                    "hittable": NSNull(), "hittable_unavailable_reason": "not_in_XCUIElementSnapshot",
+                    "enabled": element.isEnabled,
                     "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]]
         }
         let identity: [String: Any] = ["schema_version": 1, "stage": stage,
@@ -123,17 +140,19 @@ final class RecoveryJourneyEvidence {
             "target_run_id": targetID, "simulator_udid": deviceID]
         var observation = identity
         observation["local_title"] = localTitle
+        observation["selector_observation"] = "first_matching_descendant_in_application_snapshot"
         if photos {
             observation["capture_kind"] = "photos-selection"
             observation["selection_outcome"] = Self.photosSelectionOutcome(stage: stage, failure: failure)
             observation["observed_unix_milliseconds"] = Int64(Date().timeIntervalSince1970 * 1_000)
         }
-        observation["selected_target"] = describe(target)
-        observation["matches"] = query.allElementsBoundByIndex.map(describe)
-        observation["navigation_bars"] = app.navigationBars.allElementsBoundByIndex.map(describe)
-        // Full indentation preserves ancestors and bar children/titles; individual
-        // query matches above also expose the actual selector's ambiguity.
-        observation["hierarchy"] = app.debugDescription
+        observation["selected_target"] = describe(matches.first)
+        observation["matches"] = matches.map { describe($0) }
+        observation["navigation_bars"] = navigationBars.map { describe($0) }
+        // Preserve full ancestry from the same observation, including bar titles.
+        let hierarchy = try JSONSerialization.data(withJSONObject: applicationSnapshot.dictionaryRepresentation,
+                                                   options: [.prettyPrinted, .sortedKeys])
+        observation["hierarchy"] = String(decoding: hierarchy, as: UTF8.self)
         let ax = try JSONSerialization.data(withJSONObject: observation, options: [.sortedKeys])
         guard ax.count <= 256 * 1_024 else {
             throw RecoveryJourneyFailure.assertion("Files AX byte bound", String(ax.count), "262144")

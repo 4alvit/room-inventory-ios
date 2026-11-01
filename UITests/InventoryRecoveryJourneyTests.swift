@@ -113,16 +113,16 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
         let photoLabel = photos.firstMatch.label
         ledger.capturePhotosSelection("before", fixtureIsolated: bridge != nil,
-                                      target: photos.firstMatch, app: app)
+                                      app: app)
         do {
             try tap(photos.firstMatch, app: app)
         } catch {
             ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
-                                          target: photos.firstMatch, app: app, failure: error)
+                                          app: app, failure: error)
             throw error
         }
         ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
-                                      target: photos.firstMatch, app: app)
+                                      app: app)
         // Some supported picker versions expose Add for single selection;
         // others immediately deliver the sole selected image.
         if app.buttons["Add"].exists && app.buttons["Add"].isHittable {
@@ -409,11 +409,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             if local.exists && local.isHittable {
                 if !firstFilesTapCaptured {
                     firstFilesTapCaptured = true
-                    ledger.captureFirstFilesTap("before", localTitle: localTitle, target: local, app: app)
+                    ledger.captureFirstFilesTap("before", localTitle: localTitle, app: app)
                     // Keep the diagnostic pair when tap readiness throws; the
                     // nonthrowing capture preserves the original failure.
                     defer {
-                        ledger.captureFirstFilesTap("after", localTitle: localTitle, target: local, app: app)
+                        ledger.captureFirstFilesTap("after", localTitle: localTitle, app: app)
                     }
                     try tap(local, app: app)
                 } else {

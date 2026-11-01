@@ -312,6 +312,12 @@ No personal library or unrelated device is selected. These files are diagnostics
 never acceptance evidence and never permission to tap a passive Image/ancestor.
 A missing capture does not change the existing acceptance rules.
 
+Photos and first-Files-tap diagnostics derive selector matches and hierarchy from
+one immutable application snapshot, so a disappearing picker target is not
+queried again. Snapshot APIs do not expose hit testing: `hittable: null` is
+explicitly unknown, not false, and cannot establish a non-hittable failure.
+The real tap and readiness assertions still use live UI controls.
+
 If the original result grows beyond 192 MiB while Xcode assembles system logs,
 the small capture can still be retained in a `PARTIAL` archive. Only after its
 bytes are verified in that archive may `failure_precedence` identify the exact

@@ -395,10 +395,23 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func selectExport(_ id: String, app: XCUIApplication) throws {
+        // Native Menu rows can omit SwiftUI accessibility identifiers. This
+        // English-only journey selects one exact, visible action title instead.
+        let titles = ["export.package": "Inventory package · ZIP",
+                      "export.backup": "Restorable backup + originals",
+                      "export.restore": "Restore a backup"]
+        guard let title = titles[id] else {
+            throw RecoveryJourneyFailure.assertion("known export action", id, "package, backup or restore")
+        }
         try tap(app.buttons["inventory.exportMenu"], app: app)
-        let action = app.buttons[id]
+        let actions = app.buttons.matching(NSPredicate(format: "label == %@", title))
         for _ in 0..<5 {
-            if action.exists && action.isHittable { try tap(action, app: app); return }
+            let count = actions.count
+            try ledger.require("export action is unambiguous: \(id)", count <= 1)
+            if count == 1 {
+                let action = actions.element(boundBy: 0)
+                if action.isHittable { try tap(action, app: app); return }
+            }
             let anchors = ["Restore a backup", "Restorable backup + originals", "Item table · CSV", "Report · PDF", "Inventory package · ZIP"]
             guard let anchor = anchors.map({ app.buttons[$0] }).first(where: { $0.exists && $0.isHittable }) else { break }
             let point = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))

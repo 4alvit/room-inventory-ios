@@ -314,7 +314,9 @@ A missing capture does not change the existing acceptance rules.
 
 Photos and first-Files-tap diagnostics derive selector matches and hierarchy from
 one immutable application snapshot, so a disappearing picker target is not
-queried again. Snapshot APIs do not expose hit testing: `hittable: null` is
+queried again. Hierarchy JSON keeps every node and attribute but omits formatting
+whitespace so the existing 256 KiB capture limit is available for evidence.
+Snapshot APIs do not expose hit testing: `hittable: null` is
 explicitly unknown, not false, and cannot establish a non-hittable failure.
 The real tap and readiness assertions still use live UI controls.
 

@@ -151,7 +151,7 @@ final class RecoveryJourneyEvidence {
         observation["navigation_bars"] = navigationBars.map { describe($0) }
         // Preserve full ancestry from the same observation, including bar titles.
         let hierarchy = try JSONSerialization.data(withJSONObject: applicationSnapshot.dictionaryRepresentation,
-                                                   options: [.prettyPrinted, .sortedKeys])
+                                                   options: [.sortedKeys])
         observation["hierarchy"] = String(decoding: hierarchy, as: UTF8.self)
         let ax = try JSONSerialization.data(withJSONObject: observation, options: [.sortedKeys])
         guard ax.count <= 256 * 1_024 else {

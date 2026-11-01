@@ -31,6 +31,7 @@ acceptance and App Review remain separate requirements.
 - Reduce CSV share-sheet accessibility queries within the existing deadline and retain Files tap diagnostics when readiness fails.
 - Capture Photos and Files diagnostics from one immutable application snapshot so a dismissed picker cannot fail the test during diagnostic reads.
 - Check actual toolbar buttons during Recovery OCR selection instead of treating transparent full-screen toolbar containers as obstructions.
+- Select Recovery export actions by unique visible titles when native menus omit accessibility identifiers, and keep full snapshot diagnostics within their byte budget using compact JSON.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
 - Pin hosted app and Recovery tests to the same available iPhone 16e model instead of selecting unrelated devices.

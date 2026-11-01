@@ -296,6 +296,16 @@ and an immediate state check address the interaction ambiguity; a native run is
 still required to establish that selection and the rest of the journey pass.
 No resource cap, result-retention check or acceptance requirement is relaxed.
 
+### Native export menu actions
+
+The English-only recovery journey selects package, backup and restore commands
+by their exact visible titles and requires at most one matching button before
+activation. On local iOS 27.0, the native menu preserved these titles but omitted
+the SwiftUI `export.package` identifier, so scrolling could never find that ID.
+The same label semantics are used by the ordinary UI tests. The existing bounded
+scrolling, live readiness, one activation and subsequent Files or import-picker
+assertions remain required; no export service is invoked directly.
+
 ### Live export origin barriers
 
 The test runner publishes six numbered requests in its own

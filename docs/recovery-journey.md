@@ -80,6 +80,10 @@ evidence; repair and review the cause before separately authorizing another run.
    `EnvironmentVariables.RECOVERY_SOURCE_RUN_ID` and
    `EnvironmentVariables.RECOVERY_TARGET_RUN_ID` to three new, distinct UUIDs.
    Bind `EnvironmentVariables.RECOVERY_SIMULATOR_UDID` to the owned destination.
+   Set `UserAttachmentLifetime` to `keepAlways` and `SystemAttachmentLifetime`
+   to `deleteOnSuccess`. The test explicitly keeps all 17 checkpoint screenshots,
+   17 accessibility trees and the final evidence ledger; Xcode may discard its
+   redundant automatic diagnostics after success and retains them on failure.
    Retain mandatory generated test environment entries. Record before/after hashes
    and exact edits. The UI test validates and records these namespace identifiers.
    Do not set `UITargetAppEnvironmentVariables` for entitlement or storage overrides.
@@ -257,11 +261,12 @@ In run `41249372436` the strict Photos selector found one `Photo,` Image, but
 `control interactive: observed false, expected true` stopped the tap. The saved
 log identified `PXGGridLayout-Info`; it did not preserve enough AX/screenshot
 context to identify a legitimate actionable control. Later Xcode system-log
-collection crossed the unchanged result cap (206,925,824 allocated bytes in the
+collection crossed the then-current result cap (206,925,824 allocated bytes in the
 partial traversal). The smaller standalone Photos observations described in
 [hosted retention](recovery-hosted.md) preserve that missing diagnostic context.
-They do not guess an ancestor, retry selection, relax the interaction assertion,
-increase the cap, or claim the native journey passed.
+Those diagnostic additions did not guess an ancestor, retry selection, relax the
+interaction assertion, increase the cap or claim the native journey passed. The
+later result-lifecycle policy is described under storage admission below.
 
 ### Explicit OCR selection
 
@@ -288,13 +293,14 @@ exact post-activation state assertions remain required.
 In CI run `40893851357`, attempt 1, the UI log first reported
 `OCR selection model: observed 0, expected 1` after the two generic element taps.
 Xcode then collected failure diagnostics; a 112,718,394-byte `system.logarchive/dsc`
-entry crossed the unchanged 192 MiB result budget (209,453,056 allocated bytes
+entry crossed the then-current 192 MiB result budget (209,453,056 allocated bytes
 observed). That crossing was real allocation, not a sparse-file accounting error.
 The packet could not retain the oversized result, so it does not establish which
 part of the labeled switch received the original tap. Targeted single activation
 and an immediate state check address the interaction ambiguity; a native run is
 still required to establish that selection and the rest of the journey pass.
-No resource cap, result-retention check or acceptance requirement is relaxed.
+Those interaction changes did not alter resource caps, result-retention checks
+or acceptance requirements.
 
 ### Native export menu actions
 
@@ -388,8 +394,13 @@ including an empty root; root `lstat` and block validation are deadline checked.
 Missing, negative or non-integer block counts fail closed: logical length is not
 an upper bound on allocated storage. All other roots still enforce the larger
 of logical and allocated bytes. Reaching a sampled cap also aborts: new device 8 GiB,
-other attempt output 1 GiB, original xcresult 192 MiB, verified
-xcresult copy 192 MiB, exported attachments 128 MiB and logs 64 MiB. Each command
+other attempt output 1 GiB, finalized original xcresult 192 MiB, verified
+xcresult copy 192 MiB, exported attachments 128 MiB and logs 64 MiB. While the
+exact owned UI-test producer is active, its original xcresult has a separate
+512 MiB working allowance within the same 1 GiB output cap. This allowance is
+revoked before terminal accounting; final original inventory, copying, readers
+and retention still require the 192 MiB bound. A failure does not authorize
+copying or reading an oversized final bundle. Each command
 stream is additionally limited to 16 MiB. The collector limits its own writes to
 512 MiB and rejects copies that cannot fit its remaining allowance. Every complete
 sample and byte-cap crossing identifies its `cap_metric` as `allocated` or
@@ -397,6 +408,27 @@ sample and byte-cap crossing identifies its `cap_metric` as `allocated` or
 from logical size. Hardlinks remain conservatively charged per directory entry;
 each entry and every later walk obtain fresh metadata, including later growth.
 Entry-count, deadline, exclusions and cleanup bounds are unchanged.
+
+This is an explicit correction to the earlier policy that applied the 192 MiB
+final-artifact bound to Xcode's live staging directory as well. On local Xcode
+27.1 / iOS 27.0, the recovery test reached its restored original preview but raw
+AUT and session logs reached about 159 MB and 33 MB before result finalization.
+A bounded ordinary-test comparison found that the public
+`-collect-test-diagnostics never` option did not meaningfully reduce these logs,
+so the controller does not use it or private logging controls. With both
+attachment lifetimes set to `keepAlways`, that comparison retained complete
+logs through finalization; its live bundle was about 39 MB and its final bundle
+about 29 MB. These measurements distinguish staging from the final artifact;
+they do not prove that a full recovery result will fit either bound.
+
+The recovery configuration now retains user attachments with `keepAlways` and
+uses `deleteOnSuccess` for Xcode's automatic system attachments. All 17 explicit
+checkpoint PNGs, 17 accessibility trees, bridge receipts and final evidence JSON
+remain required and kept on success. Failure system diagnostics remain eligible
+for retention under the existing final-bundle and packet limits. No log is
+truncated or deleted by the controller to make a result pass. The real UI
+actions, assertions, collection provenance checks and offline verifier are
+unchanged by this lifecycle policy.
 
 The 24 GiB policy budgets 13 GiB of retained owned output, 3 GiB of transient/shared
 growth and the 8 GiB free-space floor. It deliberately includes the new simulator
@@ -762,7 +794,8 @@ The single `xcrun simctl list --json` discovery request has a 90-second maximum:
 reallocates up to 30 seconds within the same absolute 120-second discovery window.
 It does not establish an OS or product repair and does not retry the command.
 The 1,800-second controller, 180-second retention reservation, 2,100-second adapter
-envelope, 45-minute job timeout, ownership checks and all resource limits stay fixed.
+envelope, 45-minute job timeout, ownership checks and resource limits are not
+changed by that discovery allowance; the result-lifecycle limits are defined above.
 
 The installer still requests 70 seconds, clipped to the original discovery end.
 If R seconds remain at inventory entry, its total command deadline is at most

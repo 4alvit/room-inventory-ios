@@ -635,7 +635,13 @@ test and 240-second collection allowances. The 1,800-second outer deadline and
 60-second cleanup reserve remain unchanged. Reentering the device phase cannot
 renew its absolute startup deadline. Every command remains clipped to this phase
 and its own finite cap; all resource walks, identity checks and cleanup requirements
-remain mandatory. App and runner installation each allow 90 seconds, including the
+remain mandatory. The single boot-status command allows 300 seconds, including
+four seconds for process cleanup (296 seconds for child work and live accounting),
+and is clipped to the same absolute startup deadline. This accommodates
+[Apple's documented several-minute first launch](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
+without adding a retry or extending the overall attempt. Successful boot still
+requires a fresh complete terminal resource walk and does not replace UI acceptance.
+App and runner installation each allow 90 seconds, including the
 existing four-second process-cleanup allowance (86 seconds for child work and live
 accounting). Both remain single attempts inside the same 1,020-second startup pool.
 This finite hosted cold-start allowance does not predict installation latency or

@@ -106,9 +106,15 @@ configuration is unchanged. The app's minimum deployment target remains iOS 17.
 
 [Apple's Xcode 27.1 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
 list slow initial Simulator launch as known issue 187708500. Local progress does
-not establish hosted boot performance. The existing 90-second boot-status limit,
-all other deadlines, disk limits, cache preparation and cleanup requirements remain
-unchanged.
+not establish hosted boot performance. The single boot-status command allows up
+to 300 seconds, including its existing four-second process-cleanup reserve, so
+the former 86-second work limit does not preempt a several-minute first boot.
+This allowance remains clipped to the original 1,020-second startup deadline;
+the 1,800-second outer deadline, full test/collection reserves, other command
+caps, disk limits and mandatory terminal accounting/cleanup remain unchanged.
+This is a bounded cold-start allowance, not evidence that a particular silent
+boot failure was caused by first-boot initialization. A timeout still fails the
+attempt, and successful boot alone cannot qualify Recovery.
 
 Swift CodeQL remains a required check on the tested source using the existing
 `macos-26` ARM64 runner and exact Xcode 26.4.1 build 17E202. GitHub's

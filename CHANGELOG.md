@@ -41,6 +41,7 @@ acceptance and App Review remain separate requirements.
 - Give the active Recovery test's xcresult staging a 512 MiB allowance within the existing 1 GiB output cap, while retaining 192 MiB final-result limits; keep all explicit checkpoint evidence and let Xcode discard automatic system diagnostics only after success.
 - Poll discovery subprocesses while their streams remain open and retain buffered failure diagnostics within the existing deadlines.
 - Complete the selected Simulator runtime's cache preparation within the existing hosted preflight deadline before starting Recovery.
+- Allow a several-minute first Simulator boot within the existing Recovery startup budget, preserving one attempt, complete resource accounting and required cleanup.
 - Keep real StoreKit and ordinary UI tests on Xcode 26.4.1 / iOS 26.2 / iPhone 16e, while requiring Recovery on Xcode 27.1 / iOS 27.0 / iPhone 17 and building previews with Xcode 27.1; retain supported Swift CodeQL analysis on Xcode 26.4.1.
 - Unsigned Release previews omit build-machine paths and code-coverage data; packaging rejects app payloads that retain them.
 - PDF fonts preserve exact Cyrillic text for copying and searching, including the letter к.

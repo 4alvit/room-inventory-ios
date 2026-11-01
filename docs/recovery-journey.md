@@ -664,6 +664,13 @@ of the earlier 180-second device phase. It does not guarantee filesystem or
 simulator latency, collector completion, XCTest success or simulator shutdown;
 any exhausted command, phase or outer deadline still fails the attempt. No
 historical failed run becomes accepted.
+The single `simctl addmedia` seed receives 90 seconds including its four-second
+process-cleanup reserve (86 seconds for child work and live accounting), clipped
+to the same 660-second startup boundary. A hosted import exhausted the former
+26-second work limit while regular child polls still observed it running. This
+finite headroom does not establish the underlying Photos delay or guarantee
+completion. There is no retry or additional seed; exact fixture/UDID binding,
+full terminal accounting and later PhotoKit content checks remain required.
 In `cleanup_mode`, the existing guard returns after its deadline tick and remains
 time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.

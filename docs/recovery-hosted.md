@@ -116,6 +116,14 @@ This is a bounded cold-start allowance, not evidence that a particular silent
 boot failure was caused by first-boot initialization. A timeout still fails the
 attempt, and successful boot alone cannot qualify Recovery.
 
+The single `simctl addmedia` import has a 90-second cap, including four seconds
+for owned-process cleanup. A hosted import remained running with empty output
+at its former 26-second work boundary, despite regular child polling. The new
+cap supplies bounded headroom within the same 660-second startup deadline;
+90 seconds is not a measured required duration or proof of a Photos repair.
+The exact fixture is imported once, without retry. A successful command still
+requires complete terminal accounting and later PhotoKit verification.
+
 Swift CodeQL remains a required check on the tested source using the existing
 `macos-26` ARM64 runner and exact Xcode 26.4.1 build 17E202. GitHub's
 [CodeQL compatibility guidance](https://github.blog/changelog/2026-10-09-codeql-2-27-2-improves-c-go-rust-and-javascript-analysis/#macos-27-compatibility)

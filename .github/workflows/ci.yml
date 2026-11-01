@@ -6,12 +6,12 @@ permissions:
 jobs:
   ios:
     name: Core and iOS tests
-    runs-on: xcode-27
+    runs-on: macos-26
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      SIMULATOR_RUNTIME_VERSION: '27.0'
-      SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-17
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
+      SIMULATOR_RUNTIME_VERSION: '26.2'
+      SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-16e
     outputs:
       version: ${{ steps.preview-version.outputs.version }}
       tested-commit: ${{ steps.preview-version.outputs.commit }}
@@ -32,10 +32,10 @@ jobs:
         run: |
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = arm64
-          test "$ImageOS" = macos27
+          test "$ImageOS" = macos26
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
-          test "$xcode_version" = $'Xcode 27.1\nBuild version 27A9275'
+          test "$xcode_version" = $'Xcode 26.4.1\nBuild version 17E202'
           swift --version
           xcrun simctl list runtimes
       - name: Run source contracts, Core tests, Simulator build and app tests

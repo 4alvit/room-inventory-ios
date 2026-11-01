@@ -64,25 +64,29 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(set(self.profile["allowed_events"]),
                          {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"})
 
-    def test_native_jobs_share_toolchain_and_codeql_keeps_supported_tracing_toolchain(self):
+    def test_jobs_use_two_explicit_supported_toolchains(self):
         codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(), Loader=yaml.BaseLoader)
         release = yaml.load((ROOT / ".github/workflows/release-build.yml").read_text(), Loader=yaml.BaseLoader)
-        ordinary = (self.ci["jobs"]["ios"], release["jobs"]["package"])
+        ios = self.ci["jobs"]["ios"]
+        package = release["jobs"]["package"]
+        analysis = codeql["jobs"]["swift"]
         self.assertEqual(self.profile["runner_arch"], "ARM64")
         self.assertEqual(self.profile["process_arch"], "arm64")
         self.assertEqual(self.profile["image_os"], "macos27")
         self.assertEqual(self.profile["xcode_version"], "Xcode 27.1\nBuild version 27A9275")
         self.assertEqual(self.profile["runtime_version"], "27.0")
-        self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_RUNTIME_VERSION"],
-                         self.profile["runtime_version"])
+        self.assertEqual(ios["env"]["SIMULATOR_RUNTIME_VERSION"], "26.2")
         self.assertEqual(self.profile["device_type"], "com.apple.CoreSimulator.SimDeviceType.iPhone-17")
-        self.assertEqual(self.ci["jobs"]["ios"]["env"]["SIMULATOR_DEVICE_TYPE"],
-                         self.profile["device_type"])
-        for job in (*ordinary, self.job):
+        self.assertEqual(ios["env"]["SIMULATOR_DEVICE_TYPE"],
+                         "com.apple.CoreSimulator.SimDeviceType.iPhone-16e")
+        for job in (package, self.job):
             self.assertEqual(job["runs-on"], self.profile["runner_label"])
             self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_27.1.app/Contents/Developer")
+        for job in (ios, analysis):
+            self.assertEqual(job["runs-on"], "macos-26")
+            self.assertEqual(job["env"]["DEVELOPER_DIR"], "/Applications/Xcode_26.4.1.app/Contents/Developer")
         guards = []
-        for job in ordinary:
+        for job in (ios, package, analysis):
             steps = job["steps"]
             guards.append(next(step["run"] for step in steps if step.get("name") == "Verify installed ARM toolchain"))
             guard_index = next(i for i, step in enumerate(steps) if step.get("name") == "Verify installed ARM toolchain")
@@ -90,28 +94,20 @@ class RecoveryWorkflowTests(unittest.TestCase):
                 "Run source contracts, Core tests, Simulator build and app tests", "Build app for analysis", "Build committed preview assets"})
             self.assertLess(guard_index, build_index)
         common = guards[1]
-        self.assertTrue(guards[0].startswith(common))
         self.assertIn('test "$RUNNER_ARCH" = ' + self.profile["runner_arch"], common)
         self.assertIn('test "$(uname -m)" = ' + self.profile["process_arch"], common)
         self.assertIn('test "$ImageOS" = ' + self.profile["image_os"], common)
         self.assertIn('xcode_version="$(xcodebuild -version)"', common)
         self.assertIn('test "$xcode_version" = $\'' + self.profile["xcode_version"].replace("\n", "\\n") + "'", common)
 
-        # CodeQL cannot trace compiled-language builds on macOS 27 or Xcode 27.
-        # Keep its required source analysis on an explicit supported toolchain.
-        analysis = codeql["jobs"]["swift"]
-        self.assertEqual(analysis["runs-on"], "macos-26")
-        self.assertEqual(analysis["env"]["DEVELOPER_DIR"],
-                         "/Applications/Xcode_26.4.1.app/Contents/Developer")
+        # Real StoreKit purchase tests retain the known-working iOS 26.2 stack.
+        # CodeQL also needs Xcode 26 because Xcode 27 cannot support its tracing.
+        # Both groups keep the same strict architecture, image and build guards.
+        supported_guard = common.replace("macos27", "macos26").replace(
+            "Xcode 27.1\\nBuild version 27A9275", "Xcode 26.4.1\\nBuild version 17E202")
+        self.assertTrue(guards[0].startswith(supported_guard))
+        self.assertEqual(guards[2], supported_guard)
         analysis_steps = analysis["steps"]
-        guard_index = next(i for i, step in enumerate(analysis_steps)
-                           if step.get("name") == "Verify installed ARM toolchain")
-        build_index = next(i for i, step in enumerate(analysis_steps)
-                           if step.get("name") == "Build app for analysis")
-        self.assertLess(guard_index, build_index)
-        analysis_guard = analysis_steps[guard_index]["run"]
-        self.assertEqual(analysis_guard, common.replace("macos27", "macos26").replace(
-            "Xcode 27.1\\nBuild version 27A9275", "Xcode 26.4.1\\nBuild version 17E202"))
         initialization = next(step for step in analysis_steps
                               if step.get("uses", "").startswith("github/codeql-action/init@"))
         self.assertEqual(initialization["with"], {"languages": "swift", "build-mode": "manual"})

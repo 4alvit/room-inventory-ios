@@ -61,13 +61,14 @@ when combined with `SIMULATOR_UDID`, that device must also match the pinned line
 Set `SIMULATOR_DEVICE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-17` to
 require that exact iPhone model. An explicit `SIMULATOR_UDID` must match this
 model too; a missing or incompatible model fails without substitution.
-Hosted app tests, recovery and Simulator packaging use the standard `xcode-27`
-runner with Xcode 27.1 build 27A9275. Both test jobs explicitly select iOS 27.0
-and iPhone 17, matching the local stack that progressed through native recovery.
-Missing or incompatible pins fail CI; there is no automatic substitution. A
-successful hosted run is still required to qualify this environment. Required
-Swift CodeQL analysis remains on macOS 26 / Xcode 26.4.1 because CodeQL cannot
-trace compiled-language builds on macOS 27 or Xcode 27.
+Hosted Core, app unit and ordinary UI tests use `macos-26`, Xcode 26.4.1
+build 17E202, iOS 26.2 and iPhone 16e, where the real StoreKit purchase tests
+have passed. Recovery and Simulator packaging use `xcode-27` with Xcode 27.1
+build 27A9275; Recovery selects iOS 27.0 and iPhone 17. These are explicit,
+required configurations of the same source commit and tree. Missing or
+incompatible pins fail CI; there is no automatic substitution. StoreKit purchase
+tests on iOS 27.0 remain unqualified. Required Swift CodeQL analysis also stays
+on macOS 26 / Xcode 26.4.1 because CodeQL cannot trace builds using Xcode 27.
 See [toolchain qualification](docs/recovery-hosted.md#toolchain-qualification).
 App unit tests must pass before UI tests start. Both phases are required and retain
 separate result bundles; a failure in either phase fails the check.

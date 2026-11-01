@@ -8,11 +8,12 @@ first execution needs a separately approved source commit and CI cohort.
 
 The existing callable `ci.yml` adds one `recovery` job after `ios`. The job uses
 the standard `xcode-27` runner class, read-only repository permissions
-and the same pinned checkout, Python and artifact actions. App tests, recovery
-and Simulator packaging require an actual `arm64` host and Xcode 27.1 build
-27A9275 on `ImageOS=macos27`; they do not fall back to another runner or toolchain.
-Required Swift CodeQL analysis retains its separately pinned macOS 26 / Xcode
-26.4.1 build 17E202 environment because of CodeQL's tracing requirements described
+and the same pinned checkout, Python and artifact actions. Recovery and Simulator
+packaging require an actual `arm64` host and Xcode 27.1 build 27A9275 on
+`ImageOS=macos27`. Core, app unit and ordinary UI tests use `macos-26` with
+Xcode 26.4.1 build 17E202, iOS 26.2 and iPhone 16e. Swift CodeQL also requires
+that exact Xcode 26.4.1 toolchain on macOS 26 for its supported tracing path.
+Neither group falls back to another runner or toolchain; the reasons are described
 below. Recovery retains its 24 GiB admission floor. The PR preview now
 needs both `ios` and `recovery`. A failed recovery job therefore fails the existing
 required reusable validation; the generated Quality gate is unchanged.
@@ -74,18 +75,32 @@ ARM64 architecture and the exact Xcode version/build, and records the actual ima
 version. GitHub may update an image behind the runner label; no other Xcode version
 is accepted automatically.
 
-Hosted app tests and recovery explicitly select the installed iOS 27.0 runtime
-line and `com.apple.CoreSimulator.SimDeviceType.iPhone-17`. This matches the local
-Xcode build, runtime line and model that progressed through native Recovery,
-rather than repeating the failing hosted environment. It is an environment
-qualification, not a demonstrated fix for the old boot failure. The image's iOS
-27.1 runtime supports only iPhone Duo, so choosing the SDK's minor version would
-not preserve the intended model. The app-test job declares
-`SIMULATOR_RUNTIME_VERSION=27.0` and `SIMULATOR_DEVICE_TYPE`; recovery binds the
-same runtime and device pins in its hashed profile. Missing, unavailable or
-incompatible pins fail without substitution. Within the runtime line, the newest
-installed patch is selected; SDK and runtime versions are recorded separately.
-The app's minimum deployment target remains iOS 17.
+Recovery explicitly selects the installed iOS 27.0 runtime line and
+`com.apple.CoreSimulator.SimDeviceType.iPhone-17`. This matches the local Xcode
+build, runtime line and model that progressed through native Recovery. The
+image's iOS 27.1 runtime supports only iPhone Duo, so selecting the SDK's minor
+version would not preserve the intended model. Recovery binds its runtime and
+device pins in the hashed profile. Missing, unavailable or incompatible pins fail
+without substitution. Within the runtime line, the newest installed patch is
+selected; SDK and runtime versions are recorded separately.
+
+The ordinary Core, app unit and UI job instead uses the previously passing
+Xcode 26.4.1 / iOS 26.2 / iPhone 16e configuration. The
+[versioned macOS 26 image inventory](https://github.com/actions/runner-images/blob/102f6553849daabcbd37e321e2e224dbab45c469/images/macos/macos-26-arm64-Readme.md)
+includes the required toolchain and runtime. Its job explicitly declares
+`SIMULATOR_RUNTIME_VERSION=26.2` and
+`SIMULATOR_DEVICE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-16e`.
+On the newer runtime, isolating unit-host startup restored local product lookup,
+but the real app purchase still opened a Sandbox account prompt. That is not a
+qualified local StoreKit purchase. The matrix retains all real purchase, refund,
+pending-approval and restore tests on the working older runtime while exercising
+full Recovery and building the Simulator candidate with Xcode 27.1.
+
+Every required job still validates the same source commit and tree. Source
+provenance does not require identical compilers or runtimes, and no result is
+claimed as proof that StoreKit purchases pass on iOS 27.0. The shared test plan
+remains free of StoreKit configuration; Recovery's recursive rejection of such
+configuration is unchanged. The app's minimum deployment target remains iOS 17.
 
 [Apple's Xcode 27.1 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
 list slow initial Simulator launch as known issue 187708500. Local progress does
@@ -101,7 +116,7 @@ with Xcode 27. The workflow therefore retains the supported analysis toolchain,
 its strict identity checks and manual build; it does not skip or weaken security
 analysis. Cross-workflow contracts verify both explicit toolchain profiles.
 
-This configuration change does not qualify the combined toolchain by itself.
+This configuration change does not qualify the matrix by itself.
 A fresh exact-source run must pass the existing native purchase, refund, pending
 approval, UI, recovery, and packaging checks before qualification is established.
 Source-contract tests establish only coherent configuration and guard behavior.

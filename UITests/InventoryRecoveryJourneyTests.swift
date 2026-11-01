@@ -169,7 +169,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let warning = confirmation.staticTexts["Replace the current inventory?"].label
         try ledger.require("actual replacement warning", actual: warning, expected: "Replace the current inventory?")
         try checkpoint("restore_confirmation", observations: ["warning": warning], app: app)
-        try tap(confirmation.buttons["restore.confirm"], app: app)
+        try tap(restoreConfirmationButton(in: confirmation), app: app)
         let restored = app.alerts["Inventory restored"]
         try ledger.require("restore succeeded", restored.waitForExistence(timeout: 15))
         try tap(restored.buttons["OK"], app: app)
@@ -543,6 +543,25 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private func fileItem(_ name: String, app: XCUIApplication) -> XCUIElement {
         let predicate = NSPredicate(format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@", name, name + ".", name + ",")
         return app.descendants(matching: .any).matching(predicate).firstMatch
+    }
+
+    private func restoreConfirmationButton(in alert: XCUIElement) throws -> XCUIElement {
+        let matches = alert.buttons.matching(identifier: "restore.confirm")
+        try ledger.require("Restore button appeared", matches.firstMatch.waitForExistence(timeout: 10))
+        let count = matches.count
+        try ledger.require("bounded Restore button representation", (1...2).contains(count))
+        let outer = matches.element(boundBy: 0)
+        try ledger.require("Restore button label", actual: outer.label, expected: "Restore backup")
+        let nested = outer.buttons.matching(identifier: "restore.confirm")
+        try ledger.require("Restore duplicate is nested", nested.count == count - 1)
+        let target = count == 2 ? nested.element(boundBy: 0) : outer
+        try ledger.require("Restore target label", actual: target.label, expected: "Restore backup")
+        let outerFrame = outer.frame
+        try ledger.require("Restore button has visible bounds", !outerFrame.isEmpty)
+        try ledger.require("Restore target shares wrapper bounds", target.frame == outerFrame)
+        // Some runtimes expose an inaccessible wrapper with the same identifier.
+        // The real leaf still passes the normal enabled/hittable wait before tap.
+        return target
     }
 
     private func tap(_ target: XCUIElement, app: XCUIApplication, scroll: Bool = false) throws {

@@ -332,6 +332,12 @@ therefore uses the stable app root's later `debugDescription`, which includes th
 remote picker. `hierarchy_observation` explicitly distinguishes these observations;
 they are diagnostic evidence and do not authorize an action or prove acceptance.
 
+The replacement alert can expose two nested `restore.confirm` buttons for one
+visible Restore backup action. The journey accepts one button or a single nested
+pair with the same exact identifier, label and nonempty frame, then selects the
+leaf. The existing enabled/hittable wait and one real tap remain required; a
+disabled, covered or ambiguous action still fails the test.
+
 ### Live export origin barriers
 
 The test runner publishes six numbered requests in its own

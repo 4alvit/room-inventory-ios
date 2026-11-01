@@ -58,7 +58,9 @@ class RecoveryRetentionTests(unittest.TestCase):
                         "tool_hashes": {"controller": "1" * 64, "collector": "2" * 64, "retention": "3" * 64}}
         self.write("preflight/recovery-hosted-profile.json", self.profile)
         self.write("preflight/ci.yml", self.workflow)
-        self.grant = {"source_commit": self.source["commit"], "source_tree": self.source["tree"]}
+        self.grant = {"source_commit": self.source["commit"], "source_tree": self.source["tree"],
+                      "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-27-0",
+                      "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"}
         self.envelope = {key: self.context[key] for key in ("source_commit", "source_tree", "profile_sha256", "workflow_sha256", "hosted_identity", "tool_hashes")}
         self.envelope["controller_grant"] = self.grant
         self.write("hosted-grant-envelope.json", R.encoded(self.envelope))
@@ -104,6 +106,89 @@ class RecoveryRetentionTests(unittest.TestCase):
         self.result = {"status": "PASS_UI_AND_ARTIFACTS_PIXEL_REVIEW_PENDING", "exit_code": 0, "primary_error": None,
                        "cleanup_errors": [], "device_final_state": "Shutdown", "build_count": 1, "test_count": 1, "commands": commands}
         self.write("run/result.json", R.encoded(self.result))
+        self.runtime_readiness_fixture()
+
+    def runtime_readiness_fixture(self):
+        runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+        mount = "/Volumes/iOS_24A434"
+        key = "11111111-1111-4111-8111-111111111111"
+        self.runtime_selection = {"runtime": runtime, "runtime_version": "27.0",
+                                  "device_type": self.grant["device_type"]}
+        inventory = {"runtimes": [{"identifier": runtime, "version": "27.0", "buildversion": "24A434",
+                                    "bundlePath": mount + "/iOS.simruntime"}]}
+        self.runtime_images = {key: {"identifier": key, "runtimeIdentifier": runtime,
+            "platformIdentifier": "com.apple.platform.iphonesimulator", "version": "27.0", "build": "24A434",
+            "state": "Ready", "mountPath": mount, "runtimeBundlePath": mount + "/iOS.simruntime"}}
+        raw = R.encoded(self.runtime_images)
+        observed = {"image_id": key, "runtime": runtime, "runtime_version": "27.0", "runtime_build": "24A434",
+                    "state": "Ready", "mount_path": mount, "mounted": True, "ready": True}
+        observed.update(command="runtime-images-1", stdout_sha256=R.digest(raw), elapsed=1)
+        self.readiness = {"schema_version": 1, "status": "READY", "start": 100, "deadline": 130,
+            "observations": [observed], "native_cause": "UNKNOWN", "source_commit": self.context["source_commit"],
+            "source_tree": self.context["source_tree"], "selection": self.runtime_selection,
+            "inventory_sha256": R.digest(json.dumps(inventory, sort_keys=True).encode())}
+        self.runtime_commands = [{"name": "runtime-images-1", "args": ["xcrun", "simctl", "runtime", "list", "--json"],
+            "exit_code": 0, "primary_error": None, "output_retained": True,
+            "stdout_sha256": R.digest(raw), "stderr_sha256": R.digest(b""),
+            "cleanup": {"success": True, "leader_reaped": True, "group_state": "absent", "errors": [],
+                        "budget_exhausted": False},
+            "timing": {"start": 100, "finish": 101, "work_deadline": 111, "command_deadline": 115,
+                       "requested_cap": 15}}]
+        self.write("preflight/simulator-inventory.stdout", R.encoded(inventory))
+        self.write("preflight/selection.json", R.encoded(self.runtime_selection))
+        self.write("preflight/runtime-images-1.stdout", raw)
+        self.write("preflight/runtime-images-1.stderr", b"")
+        self.save_readiness()
+
+    def save_readiness(self):
+        self.context["runtime_readiness"] = self.readiness
+        self.envelope.update(runtime_readiness=self.readiness, selection=self.runtime_selection)
+        self.write("preflight/runtime-readiness.json", R.encoded(self.readiness))
+        self.write("preflight/commands.json", R.encoded(self.runtime_commands))
+        self.write("hosted-grant-envelope.json", R.encoded(self.envelope))
+
+    def test_missing_runtime_readiness_cannot_be_complete(self):
+        (self.work / "preflight/runtime-readiness.json").unlink()
+        self.assertFalse(self.package()["complete"])
+
+    def test_runtime_readiness_raw_hash_mismatch_cannot_be_complete(self):
+        self.write("preflight/runtime-images-1.stdout", b"{}")
+        self.assertFalse(self.package()["complete"])
+
+    def test_runtime_readiness_rebound_wrong_build_cannot_be_complete(self):
+        next(iter(self.runtime_images.values()))["build"] = "24A999"
+        raw = R.encoded(self.runtime_images)
+        self.readiness["observations"][0].update(runtime_build="24A999", stdout_sha256=R.digest(raw))
+        self.runtime_commands[0]["stdout_sha256"] = R.digest(raw)
+        self.write("preflight/runtime-images-1.stdout", raw)
+        self.save_readiness()
+        with self.assertRaisesRegex(R.RetentionError, "response identity"):
+            R.validate_complete(self.work, self.context, R.Files(self.guard))
+
+    def test_runtime_readiness_unmounted_final_observation_cannot_be_complete(self):
+        self.readiness["observations"][0].update(mounted=False, ready=False)
+        self.save_readiness()
+        with self.assertRaisesRegex(R.RetentionError, "normalized observation"):
+            R.validate_complete(self.work, self.context, R.Files(self.guard))
+
+    def test_runtime_readiness_deadline_and_cleanup_are_required(self):
+        original = copy.deepcopy(self.readiness)
+        command = copy.deepcopy(self.runtime_commands[0])
+        for mutation in ("deadline", "late", "cleanup", "command"):
+            with self.subTest(mutation=mutation):
+                self.readiness = copy.deepcopy(original)
+                self.runtime_commands[0] = copy.deepcopy(command)
+                if mutation == "deadline":
+                    self.readiness["deadline"] = 190
+                elif mutation == "late":
+                    self.readiness["observations"][0]["elapsed"] = 31
+                elif mutation == "cleanup":
+                    self.runtime_commands[0]["cleanup"]["leader_reaped"] = False
+                else:
+                    self.runtime_commands[0]["args"] = ["xcrun", "simctl", "list", "--json"]
+                self.save_readiness()
+                with self.assertRaisesRegex(R.RetentionError, "runtime readiness"):
+                    R.validate_complete(self.work, self.context, R.Files(self.guard))
 
     def guard(self):
         self.guard_calls += 1

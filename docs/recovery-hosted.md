@@ -177,13 +177,47 @@ Its available runtime must match the profile's explicit major/minor
 line, which cannot be newer than the selected SDK. Without an explicit line, the
 selection helper requires the SDK's major/minor version. Runtime patch differences
 and intentional SDK/runtime differences are recorded explicitly. No runtime
-download, alternate runner, fallback Xcode or probe/retry loop is allowed. Actual
+download, alternate runner, fallback Xcode or retry of failed commands is allowed. Actual
 Xcode version/build, SDK/runtime versions, runner image version and architecture
 are recorded; no Intel architecture is assumed. GitHub updates runner images, so
 the [exact job image](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners)
 and the job's own observations take precedence over a previously seen image.
 
-After selecting the runtime, preflight runs one non-forced
+After selecting the runtime, preflight observes `xcrun simctl runtime list --json`
+before building or booting. Runtime availability and a usable dyld cache do not
+establish that a runtime image is mounted. The selected image must uniquely match
+the inventory's runtime identifier, version, build and bundle path, report `Ready`,
+and have an actual mounted `mountPath`. Ordinary volume and cryptex paths are both
+accepted; an unknown signature-state label is not treated as an error. Other
+runtime images are not changed or required to become usable.
+
+Readiness shares the original 120-second preflight deadline and is additionally
+bounded to 30 seconds and eight observations. Each successful but not-ready
+response may be followed by a one-second wait and another observation. Each native
+command retains its normal stream limits, owned-process cleanup and four-second
+cleanup reserve, with a cap of at most 15 seconds or the remaining readiness time.
+Failed commands, missing/duplicated images, contradictory identities and an unusable
+selected image fail immediately. A late command or mount check cannot establish
+readiness. Raw responses and normalized observations are retained; successful
+readiness also writes `preflight/runtime-readiness.json`.
+The retained packet must bind that receipt to the source, selected runtime and
+controller grant, reproduce its normalization from the raw responses, and retain
+the bounded command and successful cleanup records. Missing or contradictory
+readiness evidence prevents a `COMPLETE` packet. Offline validation checks the
+recorded mount observation; it cannot inspect a mount on a torn-down runner.
+
+This is a readiness mitigation and additional evidence, not an assertion that a
+runtime mount race caused a particular failure. For example, run `41333130962`
+built successfully but timed out before UI in silent `bootstatus`; later cleanup
+commands also timed out. Its retained packet did not contain runtime-image state
+or evidence of an unmount. The upstream
+[runtime-mount report](https://github.com/actions/runner-images/issues/14946#issuecomment-6486239367)
+describes a different observed trigger involving Metal toolchain installation.
+No service is killed, runtime removed, security setting disabled or deadline
+extended by this check. Boot completion and the complete Recovery journey remain
+separate requirements.
+
+Preflight then runs one non-forced
 `xcrun simctl runtime dyld_shared_cache update <selected-runtime>` before the
 XcodeGen installer and recovery controller. This follows
 [Apple's cache-completion guidance](https://developer.apple.com/documentation/xcode-release-notes/xcode-26_4-release-notes):

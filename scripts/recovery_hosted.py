@@ -726,6 +726,141 @@ def select_runtime(inventory, sdk, *, runtime_line=None, device_type=None):
             else "same-major-minor-newest-installed-patch"}
 
 
+def runtime_image_observation(raw, selection, inventory, *, mounted=None):
+    """Bind one selected runtime image to the inventory, without modifying it.
+
+    Runtime availability and dyld-cache usability do not describe mount state.
+    A plain volume mount is as valid as a cryptex mount; signatureState is not a
+    readiness signal (healthy system runtimes can report Unknown).
+    """
+    require(isinstance(raw, bytes) and len(raw) <= 256 * 1024,
+            "Runtime image inventory exceeds its byte limit", Failure)
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, "Duplicate runtime image JSON key", Failure)
+            value[key] = item
+        return value
+
+    try:
+        images = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise Failure("Invalid runtime image JSON") from error
+    require(isinstance(images, dict) and 0 < len(images) <= 100,
+            "Invalid runtime image inventory", Failure)
+    runtimes = [item for item in inventory["runtimes"]
+                if item.get("identifier") == selection["runtime"]]
+    require(len(runtimes) == 1, "Selected runtime inventory is ambiguous", Failure)
+    runtime = runtimes[0]
+    build = runtime.get("buildversion")
+    require(isinstance(build, str) and re.fullmatch(r"[A-Za-z0-9.]{1,64}", build),
+            "Selected runtime build is missing or invalid", Failure)
+    candidates = []
+    for key, item in images.items():
+        require(isinstance(item, dict), "Invalid runtime image record", Failure)
+        # Also catch contradictory records claiming the selected version but
+        # naming a different runtime identifier.
+        if (item.get("runtimeIdentifier") != selection["runtime"] and
+                not (item.get("platformIdentifier") == "com.apple.platform.iphonesimulator"
+                     and item.get("version") == selection["runtime_version"])):
+            continue
+        require(isinstance(key, str) and re.fullmatch(
+            r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", key)
+                and item.get("identifier") == key,
+                "Runtime image identifier is contradictory", Failure)
+        require(item.get("runtimeIdentifier") == selection["runtime"]
+                and item.get("version") == selection["runtime_version"]
+                and item.get("build") == build
+                and item.get("platformIdentifier") == "com.apple.platform.iphonesimulator",
+                "Selected runtime image identity differs", Failure)
+        candidates.append(item)
+    require(len(candidates) == 1, "Selected runtime image is missing or duplicated", Failure)
+    image = candidates[0]
+    state = image.get("state")
+    require(isinstance(state, str) and re.fullmatch(r"[A-Za-z][A-Za-z ]{0,63}", state),
+            "Invalid selected runtime image state", Failure)
+    observation = {"image_id": image["identifier"], "runtime": selection["runtime"],
+                   "runtime_version": selection["runtime_version"], "runtime_build": build,
+                   "state": state, "mount_path": None, "mounted": False, "ready": False}
+    if state != "Ready":
+        require(state != "Unusable", "Selected runtime image is unusable", Failure)
+        return observation
+    mount, bundle = image.get("mountPath"), image.get("runtimeBundlePath")
+    for value in (mount, bundle):
+        require(isinstance(value, str) and len(value) <= 4096 and "\x00" not in value
+                and Path(value).is_absolute() and ".." not in Path(value).parts
+                and str(Path(value)) == value, "Invalid selected runtime mount path", Failure)
+    require(bundle == runtime.get("bundlePath") and Path(bundle).is_relative_to(Path(mount))
+            and bundle != mount, "Selected runtime bundle differs from its mount", Failure)
+    observation["mount_path"] = mount
+    observation["mounted"] = bool((mounted or os.path.ismount)(mount))
+    observation["ready"] = observation["mounted"]
+    return observation
+
+
+def wait_for_runtime_image(discovery, selection, inventory, context, *, sleep=None):
+    """A bounded readiness observation, not a retry of failed native commands."""
+    parent_alarm = discovery.alarm
+    start = parent_alarm.clock()
+    end = min(parent_alarm.end, start + 30)
+    receipt = {"schema_version": 1, "status": "OBSERVING", "start": start,
+               "deadline": end, "observations": [], "native_cause": "UNKNOWN",
+               "source_commit": context.get("source_commit"), "source_tree": context.get("source_tree"),
+               "selection": dict(selection),
+               "inventory_sha256": None}
+    context["runtime_readiness"] = receipt
+    # Discovery.command performs its own entry checks before it calculates a
+    # child deadline. Share this absolute bound through those checks, cleanup
+    # and receipt writes; a relative remaining-time cap alone can drift.
+    discovery.alarm = Alarm(end, parent_alarm.clock)
+
+    def check():
+        discovery.check()
+        require(discovery.alarm.clock() < end, "Runtime image readiness deadline reached", Deadline)
+
+    try:
+        discovery.alarm.arm()
+        receipt["inventory_sha256"] = controller.sha(json.dumps(inventory, sort_keys=True).encode())
+        for attempt in range(1, 9):
+            check()
+            require(end - discovery.alarm.clock() >= 8,
+                    "Insufficient runtime image observation/cleanup budget", Deadline)
+            name = "runtime-images-" + str(attempt)
+            raw = discovery.command(["xcrun", "simctl", "runtime", "list", "--json"], name,
+                                    min(15, end - discovery.alarm.clock()))
+            # The command restores its parent timer. Narrow it again before
+            # parsing or querying the mount, without extending either deadline.
+            discovery.alarm.arm(end)
+            check()
+            observed = runtime_image_observation(raw, selection, inventory)
+            check()
+            observed.update(command=name, stdout_sha256=controller.sha(raw),
+                            elapsed=discovery.alarm.clock() - start)
+            receipt["observations"].append(observed)
+            if observed["ready"]:
+                receipt["status"] = "READY"
+                controller.write_json(discovery.output / "runtime-readiness.json", receipt)
+                check()
+                return receipt
+            require(attempt < 8, "Runtime image did not become ready within eight observations", Deadline)
+            (sleep or time.sleep)(min(1, max(0, end - discovery.alarm.clock())))
+            check()
+    except BaseException as error:
+        receipt["status"] = "FAILED"
+        receipt["error"] = {"type": type(error).__name__, "message": str(error)}
+        raise
+    finally:
+        # Restore only the original absolute preflight deadline. A failed
+        # restoration must not replace the primary native/identity failure.
+        discovery.alarm = parent_alarm
+        try:
+            discovery.alarm.arm()
+        except BaseException:
+            if receipt["status"] != "FAILED":
+                raise
+
+
 def parse_commit_identity(raw, audit):
     """Read only tree/parent headers, including in a depth-one checkout."""
     audit.check("commit_object_bound", isinstance(raw, bytes) and len(raw) <= 4 * controller.MIB)
@@ -877,6 +1012,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
                                        device_type=profile["device_type"])
             selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
             controller.write_json(preflight / "selection.json", selection)
+            wait_for_runtime_image(discovery, selection, inventory, context)
             # Complete the selected runtime's cache initialization before boot.
             # Without --force this is a no-op for a ready cache; the existing
             # preflight deadline still bounds any queued or required work.
@@ -889,6 +1025,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             hashes["xcodegen"] = controller.sha(bounded_read(xcodegen, 64 * controller.MIB))
             context["tool_hashes"] = hashes
             envelope = make_envelope(root, work, expected, context["workflow_sha256"], host, source, selection, developer, xcodegen, hashes)
+            envelope["runtime_readiness"] = context["runtime_readiness"]
             controller.write_json(work / "hosted-grant-envelope.json", envelope)
             discovery.check()
         require(outer_end - clock() >= 1980, "Insufficient full controller and retention budget", Deadline)

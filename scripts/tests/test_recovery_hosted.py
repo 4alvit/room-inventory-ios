@@ -89,7 +89,8 @@ class HostedCase(unittest.TestCase):
         Path(self.env["GITHUB_EVENT_PATH"]).write_text(json.dumps(self.event))
 
     def inventory(self):
-        return {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "isAvailable": True}],
+        return {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "isAvailable": True,
+                              "buildversion": "24A434", "bundlePath": "/Volumes/iOS_24A434/iOS.simruntime"}],
                 "devicetypes": [{"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17", "minRuntimeVersion": 18 << 16, "maxRuntimeVersion": 0xffffffff}],
                 "devices": {}}
 
@@ -103,8 +104,10 @@ class HostedCase(unittest.TestCase):
                   "xcode-select": str(self.developer).encode(), "xcode-version": b"Xcode 27.1\nBuild version 27A9275",
                   "sdk-version": b"27.1\n", "simulator-inventory": json.dumps(self.inventory()).encode(),
                   "runtime-cache": b"",
+                  "runtime-images-1": json.dumps(self.runtime_images()).encode(),
                   "install-xcodegen": str(self.xcodegen).encode()}
         self.command_values = values
+        self.mock(hosted.os.path, "ismount", return_value=True)
 
         def command(instance, args, name, cap=20):
             self.calls.append((name, args, dict(instance.env)))
@@ -119,6 +122,158 @@ class HostedCase(unittest.TestCase):
         p = patch.dict(sys.modules, {"recovery_retention": replacement})
         p.start()
         self.addCleanup(p.stop)
+
+    def runtime_images(self):
+        key = "11111111-1111-4111-8111-111111111111"
+        return {key: {"identifier": key, "runtimeIdentifier": self.inventory()["runtimes"][0]["identifier"],
+                      "version": "27.0", "build": "24A434", "state": "Ready",
+                      "platformIdentifier": "com.apple.platform.iphonesimulator",
+                      "mountPath": "/Volumes/iOS_24A434",
+                      "runtimeBundlePath": "/Volumes/iOS_24A434/iOS.simruntime",
+                      "signatureState": "Unknown"}}
+
+
+class RuntimeImageReadinessTests(HostedCase):
+    def selection(self):
+        return hosted.select_runtime(self.inventory(), "27.1", runtime_line="27.0")
+
+    def observe(self, images=None, *, mounted=True, inventory=None):
+        return hosted.runtime_image_observation(
+            json.dumps(self.runtime_images() if images is None else images).encode(),
+            self.selection(), self.inventory() if inventory is None else inventory,
+            mounted=lambda _: mounted)
+
+    def test_plain_and_cryptex_mounts_are_valid_with_unknown_signature_state(self):
+        for mount in ("/Volumes/iOS_24A434", "/private/var/run/com.apple.security.cryptexd/mnt/iOS"):
+            with self.subTest(mount=mount):
+                images = self.runtime_images()
+                image = next(iter(images.values()))
+                image.update(mountPath=mount, runtimeBundlePath=mount + "/iOS.simruntime")
+                inventory = self.inventory()
+                inventory["runtimes"][0]["bundlePath"] = image["runtimeBundlePath"]
+                observed = self.observe(images, inventory=inventory)
+                self.assertTrue(observed["ready"])
+                self.assertEqual(observed["runtime_build"], "24A434")
+                self.assertEqual(observed["mount_path"], mount)
+
+    def test_ready_state_without_a_real_mount_is_not_ready(self):
+        self.assertFalse(self.observe(mounted=False)["ready"])
+
+    def test_mounting_state_does_not_probe_an_absent_mount(self):
+        images = self.runtime_images()
+        image = next(iter(images.values()))
+        image.update(state="Mounting")
+        image.pop("mountPath")
+        mounted = Mock(side_effect=AssertionError("mount not ready"))
+        observed = hosted.runtime_image_observation(json.dumps(images).encode(), self.selection(),
+                                                    self.inventory(), mounted=mounted)
+        self.assertFalse(observed["ready"])
+        mounted.assert_not_called()
+
+    def test_unusable_and_contradictory_selected_images_are_rejected(self):
+        changes = ({"state": "Unusable"}, {"build": "24A999"}, {"version": "27.1"},
+                   {"platformIdentifier": "com.apple.platform.watchsimulator"},
+                   {"runtimeIdentifier": "com.apple.CoreSimulator.SimRuntime.iOS-28-0"},
+                   {"identifier": "22222222-2222-4222-8222-222222222222"},
+                   {"mountPath": "relative"}, {"mountPath": "/Volumes/../Volumes/iOS_24A434"},
+                   {"runtimeBundlePath": "/unrelated/iOS.simruntime"})
+        for change in changes:
+            with self.subTest(change=change):
+                images = self.runtime_images()
+                next(iter(images.values())).update(change)
+                with self.assertRaises(hosted.Failure):
+                    self.observe(images)
+
+    def test_duplicate_selected_images_and_inventory_are_rejected(self):
+        images = self.runtime_images()
+        key = "22222222-2222-4222-8222-222222222222"
+        images[key] = {**next(iter(images.values())), "identifier": key}
+        with self.assertRaisesRegex(hosted.Failure, "duplicated"):
+            self.observe(images)
+        inventory = self.inventory()
+        inventory["runtimes"].append(dict(inventory["runtimes"][0]))
+        with self.assertRaisesRegex(hosted.Failure, "ambiguous"):
+            self.observe(inventory=inventory)
+
+    def test_unrelated_unusable_image_is_not_selected_or_mounted(self):
+        images = self.runtime_images()
+        images["unrelated"] = {"runtimeIdentifier": "com.apple.CoreSimulator.SimRuntime.watchOS-27-0",
+                               "state": "Unusable"}
+        self.assertTrue(self.observe(images)["ready"])
+
+    def test_bounded_json_rejects_duplicate_keys_and_bad_shape(self):
+        for raw in (b"[]", b"{}", b"{", b'{"a":{},"a":{}}', b" " * (256 * 1024 + 1)):
+            with self.subTest(raw=raw[:30]), self.assertRaises(hosted.Failure):
+                hosted.runtime_image_observation(raw, self.selection(), self.inventory())
+
+    def discovery(self, command=None, end=220):
+        alarm = hosted.Alarm(end, self.clock)
+        return SimpleNamespace(alarm=alarm, check=alarm.check, output=self.temp,
+                               command=command or Mock(return_value=json.dumps(self.runtime_images()).encode()))
+
+    def test_unmounted_then_mounted_is_observed_without_changing_parent_deadline(self):
+        discovery, context = self.discovery(), {}
+        parent = discovery.alarm
+        self.mock(hosted.os.path, "ismount", side_effect=[False, True])
+        receipt = hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), context,
+                                                sleep=self.clock.advance)
+        self.assertEqual(receipt["status"], "READY")
+        self.assertEqual(receipt["deadline"], 130)
+        self.assertEqual(discovery.alarm.end, 220)
+        self.assertIs(discovery.alarm, parent)
+        self.assertEqual([r["ready"] for r in receipt["observations"]], [False, True])
+        self.assertEqual(discovery.command.call_count, 2)
+        self.assertEqual(discovery.command.call_args_list[0].args,
+                         (["xcrun", "simctl", "runtime", "list", "--json"], "runtime-images-1", 15))
+        self.assertEqual(json.loads((self.temp / "runtime-readiness.json").read_text()), receipt)
+        self.assertIs(context["runtime_readiness"], receipt)
+
+    def test_failed_native_command_is_never_retried(self):
+        discovery = self.discovery(Mock(side_effect=hosted.Deadline("native timeout")))
+        parent = discovery.alarm
+        context = {}
+        with self.assertRaisesRegex(hosted.Deadline, "native timeout"):
+            hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), context)
+        self.assertEqual(discovery.command.call_count, 1)
+        self.assertEqual(context["runtime_readiness"]["status"], "FAILED")
+        self.assertFalse((self.temp / "runtime-readiness.json").exists())
+        self.assertIs(discovery.alarm, parent)
+        self.assertEqual(discovery.alarm.end, 220)
+
+    def test_observation_count_is_bounded_even_with_an_unmoving_clock(self):
+        discovery = self.discovery()
+        self.mock(hosted.os.path, "ismount", return_value=False)
+        with self.assertRaisesRegex(hosted.Deadline, "eight observations"):
+            hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), {}, sleep=lambda _: None)
+        self.assertEqual(discovery.command.call_count, 8)
+
+    def test_preflight_time_is_not_renewed_and_insufficient_budget_cannot_spawn(self):
+        discovery = self.discovery(end=107)
+        with self.assertRaisesRegex(hosted.Deadline, "Insufficient runtime"):
+            hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), {})
+        discovery.command.assert_not_called()
+        self.assertEqual(discovery.alarm.end, 107)
+
+    def test_late_command_cannot_probe_mount_or_report_success(self):
+        def late(*_):
+            self.clock.advance(31)
+            return json.dumps(self.runtime_images()).encode()
+        discovery = self.discovery(Mock(side_effect=late))
+        mounted = self.mock(hosted.os.path, "ismount", side_effect=AssertionError("late mount probe"))
+        with self.assertRaises(hosted.Deadline):
+            hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), {})
+        mounted.assert_not_called()
+        self.assertFalse((self.temp / "runtime-readiness.json").exists())
+
+    def test_late_mount_observation_cannot_report_success(self):
+        def late(_):
+            self.clock.advance(31)
+            return True
+        self.mock(hosted.os.path, "ismount", side_effect=late)
+        discovery = self.discovery()
+        with self.assertRaises(hosted.Deadline):
+            hosted.wait_for_runtime_image(discovery, self.selection(), self.inventory(), {})
+        self.assertFalse((self.temp / "runtime-readiness.json").exists())
 
 
 class ContextTests(HostedCase):
@@ -370,19 +525,34 @@ class IntegrationTests(HostedCase):
         self.assertEqual(result["exit_code"], 0, result)
         calls = hosted.Discovery.command.call_args_list
         inventory = [call for call in calls if call.args[2] == "simulator-inventory"]
+        images = [call for call in calls if call.args[2] == "runtime-images-1"]
         cache = [call for call in calls if call.args[2] == "runtime-cache"]
         installer = [call for call in calls if call.args[2] == "install-xcodegen"]
         self.assertEqual(len(inventory), 1)
         self.assertEqual(inventory[0].args[1], ["xcrun", "simctl", "list", "--json"])
         self.assertEqual(inventory[0].args[3], 90)
         self.assertEqual(len(cache), 1)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0].args[3], 15)
         self.assertEqual(cache[0].args[1], ["xcrun", "simctl", "runtime", "dyld_shared_cache", "update",
                                           self.inventory()["runtimes"][0]["identifier"]])
         self.assertEqual(cache[0].args[3], 60)
         self.assertEqual(len(installer), 1)
         self.assertLess(calls.index(inventory[0]), calls.index(cache[0]))
+        self.assertLess(calls.index(inventory[0]), calls.index(images[0]))
+        self.assertLess(calls.index(images[0]), calls.index(cache[0]))
         self.assertLess(calls.index(cache[0]), calls.index(installer[0]))
         self.assertEqual(installer[0].args[3], 70)
+
+    def test_runtime_image_failure_stops_cache_installer_and_controller(self):
+        self.fake_execution()
+        self.command_values["runtime-images-1"] = b"{}"
+        result = self.run_adapter()
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(self.package.call_args.args[2]["runtime_readiness"]["status"], "FAILED")
+        self.assertEqual(self.calls[-1][0], "runtime-images-1")
+        self.runner_class.assert_not_called()
+        self.package.assert_called_once()
 
     def assert_runtime_cache_failure_stops_native_work(self, error, expected_code):
         self.fake_execution()
@@ -496,11 +666,16 @@ class IntegrationTests(HostedCase):
         result = self.run_adapter()
         self.assertEqual(result["exit_code"], 0, result)
         self.assertEqual(validator.call_count, 2)
-        self.assertEqual([name for name, _, _ in self.calls], ["source-head", "source-status", "xcode-select", "xcode-version", "sdk-version", "simulator-inventory", "runtime-cache", "install-xcodegen"])
+        self.assertEqual([name for name, _, _ in self.calls], ["source-head", "source-status", "xcode-select", "xcode-version", "sdk-version", "simulator-inventory", "runtime-images-1", "runtime-cache", "install-xcodegen"])
         self.assertEqual(sum(name == "simulator-inventory" for name, _, _ in self.calls), 1)
         self.assertTrue(all("GH_TOKEN" not in env for _, _, env in self.calls))
         work = self.temp / "room-recovery-work"
         envelope = json.loads((work / "hosted-grant-envelope.json").read_text())
+        readiness = json.loads((work / "preflight/runtime-readiness.json").read_text())
+        self.assertEqual(readiness, envelope["runtime_readiness"])
+        self.assertEqual(readiness, self.package.call_args.args[2]["runtime_readiness"])
+        self.assertEqual(readiness["source_commit"], "a" * 40)
+        self.assertEqual(readiness["source_tree"], "b" * 40)
         self.assertEqual(envelope["source_tree"], "b" * 40)
         self.assertEqual(envelope["profile_sha256"], self.profile_sha)
         self.assertEqual(envelope["selection"]["runtime_version"], "27.0")
@@ -725,6 +900,65 @@ class CommandTests(HostedCase):
             self.clock.advance(seconds)
             return []
         self.selector.select.side_effect = select
+
+    def test_readiness_native_entry_latency_cannot_extend_absolute_window(self):
+        discovery = self.discovery()
+        parent = discovery.alarm
+        self.fake_process()
+        actual_command = discovery.command
+        calls = []
+        def readiness_command(args, name, cap):
+            calls.append(name)
+            if len(calls) == 1:
+                # A successful initial observation consumes most of the bound.
+                self.clock.advance(20)
+                return json.dumps(self.runtime_images()).encode()
+            original_disk = discovery.disk_usage
+            delay = True
+            def delayed_entry(path):
+                nonlocal delay
+                if delay:
+                    delay = False
+                    self.clock.advance(.5)
+                return original_disk(path)
+            discovery.disk_usage = delayed_entry
+            return actual_command(args, name, cap)
+        discovery.command = readiness_command
+        self.mock(hosted.os.path, "ismount", return_value=False)
+        selection = hosted.select_runtime(self.inventory(), "27.1", runtime_line="27.0")
+        # Empty injected native stdout fails parsing, after its real bounded
+        # command/cleanup/receipt path has run and recorded the absolute end.
+        with self.assertRaises(hosted.Failure):
+            hosted.wait_for_runtime_image(discovery, selection, self.inventory(), {}, sleep=self.clock.advance)
+        self.assertEqual(calls, ["runtime-images-1", "runtime-images-2"])
+        timing = discovery.records[0]["timing"]
+        self.assertEqual(timing["start"], 121.5)
+        self.assertEqual(timing["requested_cap"], 9)
+        self.assertEqual(timing["command_deadline"], 130)
+        self.assertEqual(timing["work_deadline"], 126)
+        self.assertEqual(self.cleanup.call_args.args[1], 130)
+        self.assertIs(discovery.alarm, parent)
+        self.assertEqual(parent.end, 220)
+
+    def test_readiness_expired_slow_entry_never_spawns_native_child(self):
+        discovery = self.discovery()
+        parent = discovery.alarm
+        original_check = discovery.check
+        calls = 0
+        def slow_entry():
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # Discovery.command's first entry check.
+                self.clock.advance(31)
+            original_check()
+        discovery.check = slow_entry
+        selection = hosted.select_runtime(self.inventory(), "27.1", runtime_line="27.0")
+        with self.assertRaises(hosted.Deadline):
+            hosted.wait_for_runtime_image(discovery, selection, self.inventory(), {})
+        self.popen.assert_not_called()
+        self.assertEqual(discovery.records, [])
+        self.assertIs(discovery.alarm, parent)
+        self.assertEqual(parent.end, 220)
 
     def assert_inventory_success_after(self, seconds):
         discovery = self.discovery()

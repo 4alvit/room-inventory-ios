@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
@@ -542,6 +543,85 @@ def capture_partial(work, collector, files):
     return report
 
 
+def validate_runtime_readiness(work, context, envelope, files):
+    # Reconstruct identity/state from the retained raw response. The live mount
+    # observation is a recorded fact, not a mount check on the reader's machine.
+    spec = importlib.util.spec_from_file_location("retention_runtime_readiness", Path(__file__).with_name("recovery_hosted.py"))
+    readiness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness)
+    receipt = files.json(work / "preflight/runtime-readiness.json")
+    require(receipt == context.get("runtime_readiness") == envelope.get("runtime_readiness")
+            and receipt.get("schema_version") == 1 and receipt.get("status") == "READY"
+            and receipt.get("native_cause") == "UNKNOWN", "runtime readiness binding differs")
+    require(all(receipt.get(key) == context[key] for key in ("source_commit", "source_tree")),
+            "runtime readiness source differs")
+    selection = files.json(work / "preflight/selection.json")
+    require(selection == receipt.get("selection") == envelope.get("selection"),
+            "runtime readiness selection differs")
+    grant = envelope.get("controller_grant", {})
+    require(isinstance(grant, dict) and isinstance(selection.get("runtime"), str)
+            and isinstance(selection.get("device_type"), str)
+            and all(selection[key] == grant.get(key) for key in ("runtime", "device_type")),
+            "runtime readiness controller selection differs")
+    raw, _ = files.read(work / "preflight/simulator-inventory.stdout", 4 * MIB)
+    inventory = json.loads(raw)
+    require(digest(json.dumps(inventory, sort_keys=True).encode()) == receipt.get("inventory_sha256"),
+            "runtime readiness inventory differs")
+    commands = files.json(work / "preflight/commands.json")
+    require(isinstance(commands, list) and all(isinstance(row, dict) for row in commands),
+            "runtime readiness command inventory is invalid")
+    command_rows = [row for row in commands if str(row.get("name", "")).startswith("runtime-images-")]
+    observations = receipt.get("observations")
+    require(isinstance(observations, list) and 1 <= len(observations) <= 8
+            and len(command_rows) == len(observations), "runtime readiness observations missing")
+
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    start, end = receipt.get("start"), receipt.get("deadline")
+    require(number(start) and number(end) and 0 < end - start <= 30,
+            "runtime readiness deadline differs")
+    previous = 0
+    for index, (observed, command) in enumerate(zip(observations, command_rows), 1):
+        name = "runtime-images-" + str(index)
+        require(isinstance(observed, dict) and observed.get("command") == command.get("name") == name
+                and command.get("args") == ["xcrun", "simctl", "runtime", "list", "--json"]
+                and type(command.get("exit_code")) is int and command["exit_code"] == 0
+                and command.get("primary_error") is None and command.get("output_retained") is True,
+                "runtime readiness command differs")
+        cleanup = command.get("cleanup", {})
+        require(cleanup.get("success") is True and cleanup.get("leader_reaped") is True
+                and cleanup.get("group_state") == "absent" and cleanup.get("errors") == []
+                and cleanup.get("budget_exhausted") is False, "runtime readiness cleanup is incomplete")
+        elapsed = observed.get("elapsed")
+        timing = command.get("timing", {})
+        require(number(elapsed) and previous <= elapsed < end - start
+                and all(number(timing.get(key)) for key in ("start", "finish", "work_deadline", "command_deadline", "requested_cap"))
+                and start + previous <= timing["start"] <= timing["finish"] <= start + elapsed
+                and 8 <= timing["requested_cap"] <= 15
+                and timing["start"] < timing["work_deadline"] < timing["command_deadline"] <= end
+                and timing["finish"] < timing["command_deadline"]
+                and timing["command_deadline"] <= timing["start"] + timing["requested_cap"]
+                and abs(timing["command_deadline"] - timing["work_deadline"] - 4) < 1e-6,
+                "runtime readiness timing differs")
+        previous = elapsed
+        raw, _ = files.read(work / "preflight" / (name + ".stdout"), 256 * 1024)
+        error_raw, _ = files.read(work / "preflight" / (name + ".stderr"), 4 * MIB)
+        require(digest(raw) == observed.get("stdout_sha256") == command.get("stdout_sha256")
+                and digest(error_raw) == command.get("stderr_sha256"), "runtime readiness response differs")
+        require(type(observed.get("mounted")) is bool and type(observed.get("ready")) is bool,
+                "runtime readiness observation is invalid")
+        try:
+            rebuilt = readiness.runtime_image_observation(raw, selection, inventory,
+                mounted=lambda path: observed["mounted"] and observed.get("mount_path") == path)
+        except readiness.Failure as error:
+            raise RetentionError("runtime readiness response identity is invalid") from error
+        require(rebuilt == {key: value for key, value in observed.items()
+                            if key not in ("command", "stdout_sha256", "elapsed")}
+                and observed["ready"] is (index == len(observations)),
+                "runtime readiness normalized observation differs")
+
+
 def validate_complete(work, context, files):
     for key, size in [("source_commit", 40), ("source_tree", 40), ("profile_sha256", 64), ("workflow_sha256", 64)]:
         require(valid_hash(context.get(key), size), "invalid hosted source/config context")
@@ -562,6 +642,7 @@ def validate_complete(work, context, files):
     envelope = files.json(work / "hosted-grant-envelope.json")
     for key in ("source_commit", "source_tree", "profile_sha256", "workflow_sha256", "hosted_identity", "tool_hashes"):
         require(key in context and envelope.get(key) == context[key], "hosted envelope/context binding differs")
+    validate_runtime_readiness(work, context, envelope, files)
     require(isinstance(context["tool_hashes"], dict) and context["tool_hashes"] and
             all(valid_hash(value, 64) for value in context["tool_hashes"].values()), "invalid tool hash inventory")
     grant = envelope.get("controller_grant")

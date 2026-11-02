@@ -533,7 +533,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Save to Files")).firstMatch
         if !saveToFiles.waitForExistence(timeout: 10) { try reveal(saveToFiles, app: app) }
         try tap(saveToFiles, app: app, scroll: true)
-        try ledger.require("Files save dialog presented", app.buttons["Save"].waitForExistence(timeout: 10))
+        let saveButtons = app.buttons.matching(identifier: "Save")
+        let saveButton = saveButtons.element
+        try ledger.require("Files save dialog presented", saveButton.waitForExistence(timeout: 10))
         try enterFilesFolder(folder, create: createFolder, app: app)
         let filename = app.textFields.firstMatch
         try tap(filename, app: app)
@@ -549,8 +551,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             ? String(observedTitle.dropLast(actionsSuffix.count)) : observedTitle
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
-        try tap(app.buttons["Save"], app: app)
-        try waitForDismissal(app.buttons["Save"])
+        try tap(saveButton, app: app)
+        let dismissal = RecoveryFilesDismissalReadiness()
+        try ledger.require("sheet dismissed", try dismissal.waitForDismissal { saveButtons.count })
         if app.buttons["Close"].exists && app.buttons["Close"].isHittable { try tap(app.buttons["Close"], app: app) }
         try ledger.require("export returned to dashboard", app.buttons["inventory.exportMenu"].isHittable)
         try bridge.synchronize(role: role, phase: .after, test: self)
@@ -606,7 +609,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                let dismissal = RecoveryFilesRenameReadiness()
+                let dismissal = RecoveryFilesDismissalReadiness()
                 try ledger.require("sheet dismissed", try dismissal.waitForDismissal { inlineFields.count })
             } else {
                 let field = app.alerts.textFields.firstMatch

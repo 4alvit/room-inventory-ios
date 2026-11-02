@@ -426,6 +426,17 @@ before saving. The journey opens the folder if Files has not already entered it.
 The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
+Saving uses the same bounded live-query observer for the exact Save selector
+used by the tap. In run `41534245115`, inline rename passed, but the old
+element-bound Save absence predicate spent its allowance resolving a remote
+hierarchy and timed out. The native session recorded the host presentation's
+disappearance before the deadline; the later failure screenshot showed the
+dashboard. Neither observation proves that the exported file was committed.
+The journey still requires the dashboard to be interactive and the runner's
+after-export barrier to verify the actual saved bytes. A zero query count only
+proves that the matching UI control is absent; late counts and query failures
+do not authorize progress.
+
 The first-Files-tap diagnostic keeps selector attributes from one immutable app
 snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy
 therefore uses the stable app root's later `debugDescription`, which includes the

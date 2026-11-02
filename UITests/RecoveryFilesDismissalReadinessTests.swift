@@ -1,10 +1,10 @@
 import XCTest
 
-final class RecoveryFilesRenameReadinessTests: XCTestCase {
+final class RecoveryFilesDismissalReadinessTests: XCTestCase {
     @MainActor
     func testImmediateZeroCountCompletesBeforePredicatePollingDelay() throws {
         var now = 0.0
-        let dismissal = RecoveryFilesRenameReadiness(clock: { now })
+        let dismissal = RecoveryFilesDismissalReadiness(clock: { now })
         now = 9.25
         var calls = 0
         XCTAssertTrue(try dismissal.waitForDismissal {
@@ -17,9 +17,9 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testPresentAndDuplicateEditorsAreNotAbsence() throws {
+    func testPresentAndDuplicateControlsAreNotAbsence() throws {
         for presentCount in [1, 2] {
-            let dismissal = RecoveryFilesRenameReadiness(clock: { 0 })
+            let dismissal = RecoveryFilesDismissalReadiness(clock: { 0 })
             var calls = 0
             XCTAssertTrue(try dismissal.waitForDismissal {
                 calls += 1
@@ -34,13 +34,13 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
     func testExactAndLateZeroCountCannotAuthorizeDismissal() {
         for elapsed in [10.0, 10.001] {
             var now = 0.0
-            let dismissal = RecoveryFilesRenameReadiness(clock: { now })
+            let dismissal = RecoveryFilesDismissalReadiness(clock: { now })
             var calls = 0
             XCTAssertThrowsError(try dismissal.waitForDismissal {
                 calls += 1
                 now = elapsed
                 return 0
-            }) { XCTAssertEqual($0 as? RecoveryFilesRenameReadiness.Failure, .expired) }
+            }) { XCTAssertEqual($0 as? RecoveryFilesDismissalReadiness.Failure, .expired) }
             XCTAssertEqual(calls, 1)
             XCTAssertNil(dismissal.lastCount)
         }
@@ -49,14 +49,14 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
     @MainActor
     func testLateZeroDoesNotReplaceLastTimelyPresentCount() {
         var now = 0.0
-        let dismissal = RecoveryFilesRenameReadiness(clock: { now })
+        let dismissal = RecoveryFilesDismissalReadiness(clock: { now })
         var calls = 0
         XCTAssertThrowsError(try dismissal.waitForDismissal {
             calls += 1
             if calls == 1 { return 1 }
             now = 10
             return 0
-        }) { XCTAssertEqual($0 as? RecoveryFilesRenameReadiness.Failure, .expired) }
+        }) { XCTAssertEqual($0 as? RecoveryFilesDismissalReadiness.Failure, .expired) }
         XCTAssertEqual(calls, 2)
         XCTAssertEqual(dismissal.lastCount, 1)
     }
@@ -65,7 +65,7 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
     func testDeadlineAtWaitReturnRejectsPreviouslyTimelyZero() {
         var queryReturned = false
         var checksAfterQuery = 0
-        let dismissal = RecoveryFilesRenameReadiness(clock: {
+        let dismissal = RecoveryFilesDismissalReadiness(clock: {
             guard queryReturned else { return 0 }
             checksAfterQuery += 1
             // The query postcheck and pending probe postcheck are timely;
@@ -75,20 +75,20 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
         XCTAssertThrowsError(try dismissal.waitForDismissal {
             queryReturned = true
             return 0
-        }) { XCTAssertEqual($0 as? RecoveryFilesRenameReadiness.Failure, .expired) }
+        }) { XCTAssertEqual($0 as? RecoveryFilesDismissalReadiness.Failure, .expired) }
         XCTAssertEqual(dismissal.lastCount, 0)
     }
 
     @MainActor
     func testExpiredWindowDoesNotEvaluateQuery() {
         var now = 0.0
-        let dismissal = RecoveryFilesRenameReadiness(clock: { now })
+        let dismissal = RecoveryFilesDismissalReadiness(clock: { now })
         now = 10
         var calls = 0
         XCTAssertThrowsError(try dismissal.waitForDismissal {
             calls += 1
             return 0
-        }) { XCTAssertEqual($0 as? RecoveryFilesRenameReadiness.Failure, .expired) }
+        }) { XCTAssertEqual($0 as? RecoveryFilesDismissalReadiness.Failure, .expired) }
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         XCTAssertEqual(calls, 0)
         XCTAssertNil(dismissal.lastCount)
@@ -99,7 +99,7 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
         enum QueryFailure: Error { case interrupted }
         for expires in [false, true] {
             var now = 0.0
-            let dismissal = RecoveryFilesRenameReadiness(clock: { now })
+            let dismissal = RecoveryFilesDismissalReadiness(clock: { now })
             var calls = 0
             XCTAssertThrowsError(try dismissal.waitForDismissal {
                 calls += 1
@@ -116,7 +116,7 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
     func testOuterWaitInterruptsQueryAndRejectsItsZeroResult() {
         let start = ProcessInfo.processInfo.systemUptime
         var used = 0.0
-        let dismissal = RecoveryFilesRenameReadiness(clock: {
+        let dismissal = RecoveryFilesDismissalReadiness(clock: {
             used + ProcessInfo.processInfo.systemUptime - start
         })
         used = 9.25
@@ -126,7 +126,7 @@ final class RecoveryFilesRenameReadinessTests: XCTestCase {
             calls += 1
             nestedResult = XCTWaiter.wait(for: [XCTestExpectation(description: "pending query")], timeout: 3)
             return 0
-        }) { XCTAssertEqual($0 as? RecoveryFilesRenameReadiness.Failure, .expired) }
+        }) { XCTAssertEqual($0 as? RecoveryFilesDismissalReadiness.Failure, .expired) }
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         XCTAssertEqual(nestedResult, .interrupted)
         XCTAssertEqual(calls, 1)

@@ -1,14 +1,14 @@
 import Foundation
 import XCTest
 
-/// Observe the live editor query after Done, without resolving a vanished
-/// indexed element. The subsequent folder-title checks still prove navigation.
+/// Observe a live Files query after Done or Save, without resolving a vanished
+/// element. Navigation and exported bytes are verified separately by the caller.
 @MainActor
-final class RecoveryFilesRenameReadiness {
+final class RecoveryFilesDismissalReadiness {
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired
 
-        var description: String { "Files rename dismissal deadline expired" }
+        var description: String { "Files dismissal deadline expired" }
     }
 
     private let window: RecoveryOCRReadinessWindow

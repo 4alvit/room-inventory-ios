@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 alvit
+Copyright (c) 2026 4alvit
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +20,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Vendored release tooling retains its MIT license and copyright notice in
+.github/third-party/venus-os-ci-toolkit.LICENSE. The pinned XcodeGen tool is
+downloaded only for local/CI builds; its distribution contains its own license.

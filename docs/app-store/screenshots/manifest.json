@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "product_source": "68041c3f1f1c70f4c07207f443dd636a141f5f65",
+  "status": "candidate_assets_not_app_store_submission",
+  "apple_requirements_checked": "2026-10-25",
+  "apple_requirements_url": "https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/",
+  "provenance_note": "Original raw captures are preserved in local QA evidence. Reused Russian captures retain their af4587e source identity; App and Core Git trees match 68041c3. RGB pixels and sRGB metadata are preserved; no generated UI, scaling, captions or price overlays.",
+  "screenshots": [
+    {
+      "locale": "en-US",
+      "path": "en-US/iphone-01-inventory.png",
+      "raw_sha256": "9c32ebf8f923b15cdb2b40c346ebd4264ff64679824cf3f36870a432ed3c886d",
+      "sha256": "a94bc7dd9684ac924b620da22be20098ceaa3b6daec2b4edb6da526c49bac185",
+      "source_commit": "68041c3f1f1c70f4c07207f443dd636a141f5f65",
+      "dimensions": [
+        1206,
+        2622
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPhone 17 Pro",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "ru",
+      "path": "ru/iphone-01-inventory.png",
+      "raw_sha256": "dfefd483a02223cca42174323613a76459bf2d76c52b51250fc20700a111500e",
+      "sha256": "1c2e604a3aa4788518e147ae7869405cd2c9b8f8f8610beafaa086ec3ede1f65",
+      "source_commit": "af4587e90247b76a36115060cb941c124e7fc785",
+      "dimensions": [
+        1206,
+        2622
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPhone 17 Pro",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "ru",
+      "path": "ru/iphone-02-item.png",
+      "raw_sha256": "49a18f7c893bda60e268887659e155f46e6905eeb49e17add3ca4d2cb71560dc",
+      "sha256": "63407b0bf3318476839f61aa8d51a30813abb59700649151689cf31e5b8770a2",
+      "source_commit": "af4587e90247b76a36115060cb941c124e7fc785",
+      "dimensions": [
+        1206,
+        2622
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPhone 17 Pro",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "ru",
+      "path": "ru/iphone-03-ocr.png",
+      "raw_sha256": "55d9517efc38968fbc5bbee159240f71a2f4713c6a8925d13354d45ff74e7247",
+      "sha256": "05ac4795061d075eb20cb4136495f5436aea012f08ef1a02e9af20d5dcc29ad8",
+      "source_commit": "af4587e90247b76a36115060cb941c124e7fc785",
+      "dimensions": [
+        1206,
+        2622
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPhone 17 Pro",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "en-US",
+      "path": "en-US/iphone-02-item.png",
+      "raw_sha256": "acf982051da59288bf5132b88cb6d71461900c708c5283b1402a23daff74f46b",
+      "sha256": "54225d1c4370e7f574e2a849d6d81cdcd5978fd35b2060ec166dccdd221f01e4",
+      "source_commit": "68041c3f1f1c70f4c07207f443dd636a141f5f65",
+      "dimensions": [
+        1206,
+        2622
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPhone 17 Pro",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "en-US",
+      "path": "en-US/ipad-01-inventory.png",
+      "raw_sha256": "461e946e1cc2a5005cd316d739384cae104bee0fc9637c9273c99eae4d10b1a8",
+      "sha256": "3d85bfa06aac9421f972c0c1d20f125e737a130b3089f5661633301b969dff23",
+      "source_commit": "68041c3f1f1c70f4c07207f443dd636a141f5f65",
+      "dimensions": [
+        2064,
+        2752
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPad Pro 13-inch (M5)",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    },
+    {
+      "locale": "ru",
+      "path": "ru/ipad-01-inventory.png",
+      "raw_sha256": "5264f2ffe46d3cf7d0a14f570b95083b31044a267fbbe6d6ddb2af60b68fbf27",
+      "sha256": "47c82e2bf02a9e9ef50408beed58bb3efd72b85947b1614bb55ab4f672ccc046",
+      "source_commit": "68041c3f1f1c70f4c07207f443dd636a141f5f65",
+      "dimensions": [
+        2064,
+        2752
+      ],
+      "operation": "Drop fully opaque alpha; all RGB pixels unchanged; no resizing",
+      "color_profile_preserved": true,
+      "preserved_color_metadata": [
+        "srgb"
+      ],
+      "device": "iPad Pro 13-inch (M5)",
+      "runtime": "iOS / iPadOS 27.0 Simulator",
+      "build_version": "0.1.0 (1)",
+      "state": "review_candidate_not_uploaded",
+      "contains_simulated_iap_price": false
+    }
+  ],
+  "excluded": [
+    "English OCR capture: real navigation title is truncated; kept internal.",
+    "Local StoreKit/paywall screenshots: simulated IAP pricing is not storefront evidence.",
+    "Historical 11-inch iPad screenshots do not fill the required 13-inch slot."
+  ]
+}

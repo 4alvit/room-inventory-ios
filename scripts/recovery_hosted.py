@@ -1,0 +1,1093 @@
+#!/usr/bin/env python3
+"""One hosted recovery attempt; ordinary local invocation fails before spawning.
+
+The reviewed workflow and GitHub-provided context are the trust boundary, not an
+environment-based cryptographic attestation. No credentials or full event payload
+are retained. The 35-minute envelope includes discovery, the unchanged 30-minute
+controller, and retention. GitHub's independent 45-minute job timeout is the final
+backstop. Ephemeral device/DerivedData paths are not durable artifact promises.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import re
+import selectors
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("room_recovery_controller", ROOT / "scripts/run-recovery-journey.py")
+controller = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = controller
+spec.loader.exec_module(controller)
+require, Failure, Deadline = controller.require, controller.ConfigurationFailure, controller.DeadlineFailure
+PROFILE_PATH = "scripts/recovery-hosted-profile.json"
+POLICY = {
+    "schema_version": 1, "repository": "4alvit/room-inventory-ios", "job_id": "recovery",
+    "runner_label": "xcode-27", "image_os": "macos27", "workflow_path": ".github/workflows/ci.yml",
+    "runner_arch": "ARM64", "process_arch": "arm64", "xcode_version": "Xcode 27.1\nBuild version 27A9275",
+    "runtime_version": "27.0",
+    "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+    "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
+    "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
+    "discovery_seconds": 120, "recovery_seconds": 1800, "retention_seconds": 180,
+    "job_timeout_minutes": 45, "admission_free_bytes": 24 * controller.GIB,
+    "abort_free_bytes": 8 * controller.GIB, "device_cap_bytes": 8 * controller.GIB,
+    "derived_data_cap_bytes": 4 * controller.GIB, "output_cap_bytes": controller.GIB,
+}
+
+
+def bounded_read(path, cap=controller.MIB):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= cap, "Not a bounded regular file: " + str(path), Failure)
+    with path.open("rb") as stream:
+        raw = stream.read(cap + 1)
+    require(len(raw) <= cap, "File grew beyond its byte cap", Failure)
+    return raw
+
+
+def load_profile(root, expected):
+    require(re.fullmatch(r"[0-9a-f]{64}", expected or ""), "Invalid profile digest", Failure)
+    raw = bounded_read(root / PROFILE_PATH, 65536)
+    require(controller.sha(raw) == expected, "Profile digest differs", Failure)
+    profile = json.loads(raw)
+    require(profile == POLICY and all(type(profile[k]) is type(v) for k, v in POLICY.items()),
+            "Unsupported hosted policy", Failure)
+    return profile, raw
+
+
+def validate_host(env, profile, root, *, machine=None, system=None):
+    for key, value in {"GITHUB_ACTIONS": "true", "CI": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+                       "RUNNER_OS": "macOS", "ImageOS": profile["image_os"], "GITHUB_SERVER_URL": "https://github.com",
+                       "GITHUB_REPOSITORY": profile["repository"], "GITHUB_JOB": profile["job_id"]}.items():
+        require(env.get(key) == value, "Unsupported hosted context: " + key, Failure)
+    require((system or platform.system()) == "Darwin", "macOS process required", Failure)
+    arch = machine or platform.machine()
+    require(env.get("RUNNER_ARCH") == profile["runner_arch"] and arch == profile["process_arch"],
+            "Runner architecture differs", Failure)
+    require(isinstance(env.get("ImageVersion"), str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", env["ImageVersion"]),
+            "Missing or invalid runner image version", Failure)
+    for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "RECOVERY_TESTED_COMMIT", "RECOVERY_TESTED_TREE"):
+        require(re.fullmatch(r"[0-9a-f]{40}", env.get(key, "")), "Missing source identity: " + key, Failure)
+    require(env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"], "iOS job tested a different commit", Failure)
+    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+        require(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")), "Invalid run identity", Failure)
+    require(env.get("GITHUB_EVENT_NAME") in profile["allowed_events"], "Unsupported event", Failure)
+    workspace = Path(env.get("GITHUB_WORKSPACE", ""))
+    require(workspace.is_absolute() and workspace.resolve() == root.resolve(), "Checkout path differs", Failure)
+    temp = Path(env.get("RUNNER_TEMP", ""))
+    require(temp.is_absolute() and temp.is_dir() and not temp.is_symlink()
+            and not temp.resolve().is_relative_to(root.resolve()) and not root.resolve().is_relative_to(temp.resolve()),
+            "Runner temporary root must be separate", Failure)
+    caller = env.get("GITHUB_WORKFLOW_REF", "")
+    prefix, separator, caller_ref = caller.partition("@")
+    allowed = [profile["repository"] + "/" + p for p in profile["allowed_caller_workflows"]]
+    require(separator and prefix in allowed and caller_ref == env.get("GITHUB_REF")
+            and caller_ref.startswith("refs/"), "Caller workflow identity differs", Failure)
+    return {"repository": env["GITHUB_REPOSITORY"], "job_id": env["GITHUB_JOB"],
+            "run_id": env["GITHUB_RUN_ID"], "run_attempt": env["GITHUB_RUN_ATTEMPT"],
+            "event_name": env["GITHUB_EVENT_NAME"], "ref": env["GITHUB_REF"],
+            "workflow_ref": caller, "workflow_sha": env["GITHUB_WORKFLOW_SHA"],
+            "runner_environment": env["RUNNER_ENVIRONMENT"], "runner_os": env["RUNNER_OS"],
+            "runner_arch": env["RUNNER_ARCH"], "process_arch": arch,
+            "image_os": env["ImageOS"], "image_version": env["ImageVersion"]}
+
+
+MISSING = object()
+SHA40 = r"[0-9a-f]{40}"
+REPOSITORY = r"(?!\.{1,2}/)[A-Za-z0-9_.-]{1,100}/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}"
+
+
+class IdentityAudit:
+    """Small allowlisted evidence, including failures before directory admission."""
+    def __init__(self):
+        self.stage, self.checks, self.observed = "host", {}, {}
+
+    def observe(self, name, value=MISSING, pattern=None):
+        kind = ("missing" if value is MISSING else "null" if value is None else
+                "boolean" if type(value) is bool else "integer" if type(value) is int else
+                "string" if isinstance(value, str) else "object" if isinstance(value, dict) else
+                "array" if isinstance(value, list) else "other")
+        item = {"type": kind}
+        if isinstance(value, str):
+            item["length"] = len(value)
+            if len(value) <= 256 and pattern and re.fullmatch(pattern, value):
+                item["value"] = value
+        elif type(value) is bool or (type(value) is int and 0 < value <= 2**53 - 1):
+            item["value"] = value
+        self.observed[name] = item
+
+    def check(self, name, condition):
+        self.checks[name] = bool(condition)
+        require(condition, "Identity check failed: " + name, Failure)
+
+    def snapshot(self):
+        value = {"schema_version": 1, "stage": self.stage,
+                 "checks": dict(self.checks), "observed": dict(self.observed)}
+        if len(json.dumps(value).encode()) > 8192:
+            # Keys are source constants; never truncate an arbitrary raw value.
+            value = {"schema_version": 1, "stage": self.stage,
+                     "checks": dict(list(self.checks.items())[-64:]), "observed": {},
+                     "observations_omitted_for_size": True}
+        return value
+
+
+def valid_text(value, pattern):
+    return isinstance(value, str) and len(value) <= 256 and re.fullmatch(pattern, value) is not None
+
+
+def validate_event(event, env, audit=None):
+    audit = audit or IdentityAudit()
+    audit.stage = "event"
+    audit.observe("event", event)
+    audit.check("event_object", isinstance(event, dict))
+    repository = event.get("repository", MISSING)
+    audit.observe("repository", repository)
+    audit.check("event_repository_object", isinstance(repository, dict))
+    audit.observe("event_repository", repository.get("full_name", MISSING), REPOSITORY)
+    audit.check("event_repository_matches", repository.get("full_name") == env["GITHUB_REPOSITORY"])
+    kind, commit, ref = env["GITHUB_EVENT_NAME"], env["GITHUB_SHA"], env["GITHUB_REF"]
+    identity = {"kind": kind, "source_commit": commit, "ref": ref}
+    if kind == "pull_request":
+        pr = event.get("pull_request", MISSING)
+        audit.observe("pull_request", pr)
+        audit.check("pr_object", isinstance(pr, dict))
+        number = event.get("number")
+        audit.observe("number", event.get("number", MISSING))
+        audit.check("pr_number", type(number) is int and 0 < number <= 2**53 - 1)
+        audit.check("pr_merge_ref", ref == f"refs/pull/{number}/merge")
+        merge = pr.get("merge_commit_sha", MISSING)
+        audit.observe("merge_commit_sha", merge, SHA40)
+        audit.check("pr_merge_metadata_type", merge is MISSING or merge is None or valid_text(merge, SHA40))
+        # Webhook snapshot metadata is not an atomic identity for the run.
+        audit.observe("merge_metadata_matches_run", merge == commit)
+        identity["merge_metadata_matches_run"] = merge == commit
+        identity["merge_metadata_state"] = "missing" if merge is MISSING else "null" if merge is None else "sha"
+        if valid_text(merge, SHA40):
+            identity["merge_commit_sha"] = merge
+        for side in ("base", "head"):
+            item = pr.get(side, MISSING)
+            audit.observe(side, item)
+            audit.check("pr_" + side + "_object", isinstance(item, dict))
+            sha = item.get("sha")
+            audit.observe(side + "_sha", item.get("sha", MISSING), SHA40)
+            audit.check("pr_" + side + "_sha", valid_text(sha, SHA40))
+            repo = item.get("repo", MISSING)
+            audit.observe(side + "_repo", repo)
+            audit.check("pr_" + side + "_repo_object", isinstance(repo, dict))
+            name = repo.get("full_name")
+            audit.observe(side + "_repository", repo.get("full_name", MISSING), REPOSITORY)
+            audit.check("pr_" + side + "_repository", valid_text(name, REPOSITORY))
+            identity[side] = {"sha": sha, "repository": name}
+        audit.check("pr_base_repository_matches", identity["base"]["repository"] == repository["full_name"])
+        identity["number"] = number
+    elif kind == "merge_group":
+        group = event.get("merge_group", {})
+        audit.check("merge_group_object", isinstance(group, dict))
+        require(group.get("head_sha") == commit and group.get("head_ref") == ref
+                and ref.startswith("refs/heads/gh-readonly-queue/"), "Merge-group identity differs", Failure)
+        identity["base_ref"] = group.get("base_ref")
+    elif kind == "push":
+        require(event.get("after") == commit and event.get("ref") == ref and ref.startswith("refs/heads/")
+                and event.get("deleted") is not True, "Push identity differs", Failure)
+    else:
+        require(kind in ("schedule", "workflow_dispatch"), "Unsupported event", Failure)
+        branch = repository.get("default_branch")
+        require(isinstance(branch, str) and branch and ref == "refs/heads/" + branch,
+                "Scheduled/manual run must use default branch", Failure)
+        inputs = event.get("inputs") or {}
+        audit.check("event_inputs_object", isinstance(inputs, dict))
+        expected = inputs.get("expected_sha") if kind == "workflow_dispatch" else None
+        require(not expected or expected == commit, "Manual expected_sha differs", Failure)
+        identity["default_branch"] = branch
+    return identity
+
+
+class Alarm:
+    """Non-renewing operation deadline; relinquished before the base controller."""
+    def __init__(self, end, clock=time.monotonic):
+        self.end, self.clock = end, clock
+        self.last_sample = None
+
+    def check(self):
+        now = self.clock()
+        self.last_sample = ("alarm_check", now)
+        require(now < self.end, "Hosted absolute deadline reached", Deadline)
+
+    def arm(self, end=None):
+        now = self.clock()
+        self.last_sample = ("alarm_arm", now)
+        remaining = min(self.end, end if end is not None else self.end) - now
+        require(remaining > 0, "Hosted deadline exhausted", Deadline)
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+
+    def __enter__(self):
+        require(signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0), "Existing process timer is active", Failure)
+        self.previous = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, self.expired)
+        try:
+            self.arm()
+        except BaseException:
+            signal.signal(signal.SIGALRM, self.previous)
+            raise
+        return self
+
+    def expired(self, *_):
+        raise Deadline("Hosted absolute deadline reached")
+
+    def __exit__(self, *_):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, self.previous)
+
+
+class Discovery:
+    """Bounded one-pass commands with the controller's owned-group cleanup."""
+    def __init__(self, root, output, env, alarm, *, disk_usage=shutil.disk_usage):
+        self.root, self.output, self.env, self.alarm = root, output, dict(env), alarm
+        self.disk_usage = disk_usage
+        self.records, self.cleanup_errors = [], []
+        self._observation = None
+
+    def observe(self, stage, *, completed=False):
+        if self._observation is not None:
+            self._observation["last_completed" if completed else "last_entered"] = stage
+
+    def count(self, fields, key, amount=1):
+        limit = 2**31 - 1
+        if fields[key] + amount > limit:
+            fields[key] = limit
+            self._observation["saturated"] = self._observation["capture_incomplete"] = True
+        else:
+            fields[key] += amount
+
+    def capture_observation(self, observation, start):
+        # No clock read: this is the last sampled checkpoint, not a timestamp
+        # of capture, operation return, or actual native exit.
+        sample = self.alarm.last_sample
+        if sample is not None:
+            source, value = sample
+            elapsed = value - start if type(value) in (int, float) else None
+            observation["clock_sample"] = {"source": source, "elapsed":
+                round(elapsed, 6) if elapsed is not None and 0 <= elapsed <= 86400 else None}
+        return {**observation, "stdout": dict(observation["stdout"]),
+                "stderr": dict(observation["stderr"])}
+
+    def check(self):
+        if self._observation is not None:
+            self._observation["check_substage"] = "pre_alarm"
+        self.alarm.check()
+        if self._observation is not None:
+            self._observation["check_substage"] = "disk"
+        require(self.disk_usage(self.output).free >= POLICY["abort_free_bytes"], "Hosted disk abort floor reached")
+        if self._observation is not None:
+            self._observation["check_substage"] = "post_alarm"
+        self.alarm.check()
+
+    def command(self, args, name, cap=20, *, retain_output=True):
+        self.check()
+        start = self.alarm.clock()
+        end = min(self.alarm.end, start + cap)
+        require(end - self.alarm.clock() >= 8, "Insufficient discovery/cleanup budget", Deadline)
+        record = {"name": name, "args": [str(a) for a in args], "exit_code": None, "primary_error": None,
+                  "timing": {"start": start, "work_deadline": end - 4,
+                             "command_deadline": end, "requested_cap": cap}}
+        self.records.append(record)
+        buffers, process, selector, primary = [bytearray(), bytearray()], None, None, None
+        state = {}
+        observation = {"last_entered": "unstarted", "last_completed": "unstarted",
+                       "tick_site": None, "check_substage": None, "popen_assigned": False,
+                       "select_returns": 0, "poll_returns": 0, "poll_seen": False, "last_poll_result": None,
+                       "stdout": {"read_returns": 0, "returned_bytes": 0, "retained_bytes": 0, "eof": False, "would_block": 0},
+                       "stderr": {"read_returns": 0, "returned_bytes": 0, "retained_bytes": 0, "eof": False, "would_block": 0},
+                       "clock_sample": None, "capture_incomplete": False, "saturated": False}
+        snapshot = None
+        def tick(site):
+            observation["tick_site"] = site
+            self.observe("tick")
+            self.check()
+            observation["check_substage"] = "work_compare"
+            now = self.alarm.clock()
+            self.alarm.last_sample = ("work_compare", now)
+            require(now < end - 4, "Discovery command deadline reached", Deadline)
+            self.observe("tick", completed=True)
+        def poll():
+            self.observe("poll")
+            result = process.poll()
+            self.count(observation, "poll_returns")
+            observation["poll_seen"] = True
+            if result is None or type(result) is int and -255 <= result <= 255:
+                observation["last_poll_result"] = result
+            else:
+                observation["last_poll_result"] = None
+                observation["capture_incomplete"] = True
+            self.observe("poll", completed=True)
+            return result
+        def get_map():
+            self.observe("get_map")
+            result = selector.get_map()
+            self.observe("get_map", completed=True)
+            return result
+        try:
+            self._observation = observation
+            self.observe("arm")
+            self.alarm.arm(end - 4)
+            self.observe("arm", completed=True)
+            self.observe("selector")
+            selector = selectors.DefaultSelector()
+            self.observe("selector", completed=True)
+            self.observe("mask")
+            oldmask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+            try:
+                self.observe("mask", completed=True)
+                tick("pre_spawn")
+                self.observe("spawn")
+                process = subprocess.Popen(record["args"], cwd=self.root, env=self.env, start_new_session=True,
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                observation["popen_assigned"] = True
+                self.observe("spawn", completed=True)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, oldmask)
+            self.observe("pipe_setup")
+            for index, pipe in enumerate((process.stdout, process.stderr)):
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, index)
+            self.observe("pipe_setup", completed=True)
+            while get_map() or poll() is None:
+                tick("loop_head")
+                # Open pipes do not establish that the direct child is alive:
+                # native services can inherit them. Observe the child each
+                # quantum, and surface a failed exit without waiting for EOF.
+                # A successful exit still needs both EOFs and owned cleanup.
+                child_status = poll()
+                if child_status not in (None, 0):
+                    record["exit_code"] = child_status
+                self.observe("select")
+                now = self.alarm.clock()
+                self.alarm.last_sample = ("select_timeout", now)
+                require(now < end - 4, "Discovery command deadline reached", Deadline)
+                # Preserve already-buffered diagnostics on a failed exit,
+                # without waiting on streams held by inherited descendants.
+                timeout = 0 if child_status not in (None, 0) else min(.1, max(0, end - 4 - now))
+                ready = selector.select(timeout)
+                self.count(observation, "select_returns")
+                self.observe("select", completed=True)
+                for key, _ in ready:
+                    tick("read_ready")
+                    pipe_observation = observation[("stdout", "stderr")[key.data]]
+                    self.observe("read")
+                    try:
+                        data = os.read(key.fileobj.fileno(), 65536)
+                    except BlockingIOError:
+                        self.count(pipe_observation, "would_block")
+                        continue
+                    self.count(pipe_observation, "read_returns")
+                    self.count(pipe_observation, "returned_bytes", len(data))
+                    self.observe("read", completed=True)
+                    if not data:
+                        pipe_observation["eof"] = True
+                        selector.unregister(key.fileobj)
+                    else:
+                        require(len(buffers[key.data]) + len(data) <= 4 * controller.MIB, "Discovery stream cap reached")
+                        buffers[key.data].extend(data)
+                        self.count(pipe_observation, "retained_bytes", len(data))
+                require(child_status is None or child_status == 0,
+                        "Discovery command failed: " + name)
+            tick("final")
+            self.observe("wait")
+            record["exit_code"] = process.wait(timeout=0)
+            self.observe("wait", completed=True)
+            require(record["exit_code"] == 0, "Discovery command failed: " + name)
+            snapshot = self.capture_observation(observation, start)
+            record["discovery_observation"] = snapshot
+        except BaseException as error:
+            primary = error
+            record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+            try:
+                observation["capture_incomplete"] = True
+                snapshot = self.capture_observation(observation, start)
+                record["discovery_observation"] = snapshot
+            except BaseException:
+                pass
+        finally:
+            self._observation = None
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            # Kill/reap before closing pipes, and never renew the absolute end.
+            operations = []
+            if process is not None:
+                operations.append(("owned_group", lambda: controller.kill_owned(process, end, state=state, clock=self.alarm.clock)))
+            if selector is not None:
+                operations.append(("selector_close", selector.close))
+            if process is not None:
+                operations.extend(("pipe_close", p.close) for p in (process.stdout, process.stderr))
+            for operation, action in operations:
+                try:
+                    require(self.alarm.clock() < end, "Discovery cleanup deadline reached", Deadline)
+                    self.alarm.arm(end)
+                    result = action()
+                    if operation == "owned_group":
+                        record["cleanup"] = result
+                        require(result["success"], "Discovery owned-group cleanup uncertain")
+                except BaseException as error:
+                    self.cleanup_errors.append({"command": name, "operation": operation, "error": str(error)})
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            try:
+                # Sample only after owned-group cleanup. Receipt failures must
+                # not prevent cleanup or replace an existing command error.
+                record["timing"]["finish"] = self.alarm.clock()
+                self.alarm.arm()
+                self.check()
+                for suffix, data in zip(("stdout", "stderr"), buffers):
+                    self.check()
+                    if retain_output:
+                        (self.output / (name + "." + suffix)).write_bytes(data)
+                        record[suffix + "_sha256"] = controller.sha(data)
+                    else:
+                        # Raw commit output includes names, email and message.
+                        record[suffix + "_bytes"] = len(data)
+                record["output_retained"] = retain_output
+                if snapshot is not None:
+                    # Only the original post-cleanup receipt path serializes it.
+                    require(len(json.dumps({"commands": [{"discovery_observation": snapshot}]}, indent=2).encode()) <= 2048,
+                            "Discovery observation size bound exceeded")
+                controller.write_json(self.output / "commands.json", self.records)
+                controller.tree_size(self.output, 16 * controller.MIB, self.check, max_entries=128)
+                self.check()
+            except BaseException as error:
+                self.cleanup_errors.append({"command": name, "operation": "receipt", "error": str(error)})
+                primary = primary or error
+                try:
+                    if snapshot is not None:
+                        snapshot["capture_incomplete"] = True
+                except BaseException:
+                    pass
+        if primary:
+            raise primary
+        require(not any(e["command"] == name for e in self.cleanup_errors), "Discovery cleanup/receipt incomplete")
+        return bytes(buffers[0])
+
+
+NATIVE_LOG_LIMIT = 4 * controller.MIB
+NATIVE_LOG_PREDICATE = ('process == "simctl" OR process == "com.apple.CoreSimulator.CoreSimulatorService" '
+                        'OR subsystem BEGINSWITH "com.apple.CoreSimulator"')
+NATIVE_LOG_TERMS = ("connection invalid", "connection interrupted", "timed out", "timeout", "refused",
+                    "unavailable", "failed", "error", "permission", "denied", "registration", "migration")
+NATIVE_LOG_DOMAINS = ("NSPOSIXErrorDomain", "NSCocoaErrorDomain", "NSMachErrorDomain",
+                      "NSOSStatusErrorDomain", "com.apple.CoreSimulator.SimError")
+
+
+class NativeLogUnavailable(Exception):
+    """Only source-owned reason codes are retained, never native error text."""
+
+
+def log_require(value, code):
+    if not value:
+        raise NativeLogUnavailable(code)
+
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def sanitize_native_log(raw, begin, finish, check):
+    """Parse a bounded complete response; no raw native string is returned."""
+    log_require(type(raw) is bytes and len(raw) <= NATIVE_LOG_LIMIT, "response_byte_cap")
+    depth, quoted, escaped = 0, False, False
+    for offset, char in enumerate(raw):
+        if offset % 65536 == 0:
+            check()
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == 92:
+                escaped = True
+            elif char == 34:
+                quoted = False
+        elif char == 34:
+            quoted = True
+        elif char in (91, 123):
+            depth += 1
+            log_require(depth <= 16, "response_depth_cap")
+        elif char in (93, 125):
+            depth -= 1
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            log_require(key not in result, "duplicate_json_key")
+            result[key] = value
+        return result
+    def constant(_):
+        raise NativeLogUnavailable("invalid_json_number")
+    def number(value):
+        result = float(value)
+        log_require(math.isfinite(result), "invalid_json_number")
+        return result
+    try:
+        events = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                            parse_constant=constant, parse_float=number)
+    except (ValueError, UnicodeError, RecursionError):
+        raise NativeLogUnavailable("invalid_json") from None
+    check()
+    log_require(isinstance(events, list) and len(events) <= 4096, "event_count_or_shape")
+    signals, outside = [], 0
+    for event in events:
+        check()
+        log_require(isinstance(event, dict), "invalid_event")
+        process, subsystem = event.get("processImagePath", ""), event.get("subsystem", "")
+        log_require(isinstance(process, str) and len(process) <= 4096
+                    and isinstance(subsystem, str) and len(subsystem) <= 256, "invalid_source")
+        name = process.rsplit("/", 1)[-1]
+        source = ("simctl" if name == "simctl" else "coresimulator_service"
+                  if name == "com.apple.CoreSimulator.CoreSimulatorService" else "coresimulator_subsystem"
+                  if subsystem.startswith("com.apple.CoreSimulator") else None)
+        if source is None:
+            continue
+        stamp, message = event.get("timestamp"), event.get("eventMessage")
+        log_require(isinstance(stamp, str) and len(stamp) <= 64
+                    and isinstance(message, str) and len(message) <= 256 * 1024, "invalid_event_fields")
+        try:
+            parsed = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            log_require(parsed.tzinfo is not None, "invalid_timestamp")
+            epoch = parsed.timestamp()
+        except (ValueError, OverflowError):
+            raise NativeLogUnavailable("invalid_timestamp") from None
+        if not begin <= epoch <= finish:
+            outside += 1
+            continue
+        terms = [term for term in NATIVE_LOG_TERMS if re.search(r"\b" + re.escape(term) + r"\b", message.lower())]
+        domains = [domain for domain in NATIVE_LOG_DOMAINS if domain in message]
+        codes = [int(value) for value in re.findall(r"\b(?:Code|code|errno)\s*[=:]\s*(-?\d{1,6})(?!\d)", message)[:8]]
+        if not (terms or domains or codes):
+            continue
+        log_require(len(signals) < 128, "signal_count_cap")
+        signals.append({"source": source, "timestamp": parsed.astimezone(dt.timezone.utc).isoformat(),
+                        "terms": terms, "error_domains": domains, "numeric_codes": codes})
+    result = {"returned_event_count": len(events), "outside_window_count": outside, "signals": signals}
+    log_require(len(json.dumps(result).encode()) <= 64 * 1024, "signal_byte_cap")
+    check()
+    return result
+
+
+def diagnose_inventory_failure(discovery, context, command_index, begin, wall_clock):
+    """One post-failure log read, only after the original owned group is absent."""
+    if "inventory_native_log" in context:
+        return
+    row = {"schema_version": 1, "status": "UNAVAILABLE", "complete": False, "native_cause": "UNKNOWN",
+           "raw_text_retained": False, "query_attempted": False,
+           "coverage": "returned_query_events_only", "reason": "preconditions_not_met"}
+    context["inventory_native_log"] = row
+    raw, parent_alarm = None, None
+    try:
+        log_require(len(discovery.records) == command_index + 1, "inventory_record_missing")
+        original = discovery.records[command_index]
+        log_require(original.get("name") == "simulator-inventory"
+                    and original.get("args") == ["xcrun", "simctl", "list", "--json"]
+                    and original.get("primary_error") is not None, "inventory_record_mismatch")
+        cleanup = original.get("cleanup", {})
+        log_require(cleanup.get("success") is True and cleanup.get("leader_reaped") is True
+                    and cleanup.get("group_state") == "absent" and not cleanup.get("errors")
+                    and not discovery.cleanup_errors, "inventory_cleanup_unconfirmed")
+        discovery.check()
+        parent_alarm = discovery.alarm
+        now = parent_alarm.clock()
+        log_require(parent_alarm.end - now >= 14, "insufficient_remaining_budget")
+        operation_end = now + 14
+        # Preparation, child work/cleanup and parsing share one non-renewing
+        # subdeadline. Discovery.command must not rearm the longer outer alarm.
+        discovery.alarm = Alarm(operation_end, parent_alarm.clock)
+        discovery.alarm.arm()
+        finish = wall_clock()
+        timing = original.get("timing", {})
+        elapsed = (timing.get("finish", float("nan")) - timing.get("start", float("nan")))
+        log_require(finite_number(begin) and finite_number(finish) and finite_number(elapsed)
+                    and 0 <= finish - begin <= 120 and 0 <= elapsed <= 90
+                    and abs((finish - begin) - elapsed) <= 2, "clock_window_unconfirmed")
+        date = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+0000")
+        # A fresh HOME prevents ~/.logrc from adding an archive/directory option.
+        home = discovery.output / "native-log-home"
+        home.mkdir(mode=0o700)
+        discovery.check()
+        log_require(operation_end - discovery.alarm.clock() >= 10, "insufficient_observation_budget")
+        row.update(window_start=dt.datetime.fromtimestamp(begin, dt.timezone.utc).isoformat(),
+                   window_end=dt.datetime.fromtimestamp(finish, dt.timezone.utc).isoformat())
+        args = ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + str(home),
+                "LANG=C", "LC_ALL=C", "/usr/bin/log", "show", "--style", "json", "--timezone", "UTC",
+                "--no-pager", "--info", "--debug", "--start", date(math.floor(begin)),
+                "--end", date(math.ceil(finish)), "--predicate", NATIVE_LOG_PREDICATE]
+        row["query_attempted"] = True
+        raw = discovery.command(args, "inventory-native-log", 10, retain_output=False)
+        discovery.alarm.arm(operation_end)
+        def check():
+            discovery.check()
+            log_require(discovery.alarm.clock() < operation_end, "observation_deadline")
+        summary = sanitize_native_log(raw, begin, finish, check)
+        row.update(summary, status="OBSERVED" if summary["signals"] else "NO_MATCHING_SIGNALS",
+                   complete=True, reason="complete_response")
+    except BaseException as error:
+        # Diagnostic errors cannot replace the original inventory failure.
+        # No further native work follows this path, including interruption.
+        row.update(status="UNAVAILABLE", complete=False,
+                   reason=str(error) if isinstance(error, NativeLogUnavailable) else
+                   "interrupted" if not isinstance(error, Exception) else "query_or_parse_unavailable")
+    finally:
+        raw = None
+        if parent_alarm is not None:
+            discovery.alarm = parent_alarm
+        try:
+            discovery.alarm.arm()  # Restore only the unchanged discovery end.
+        except BaseException:
+            pass
+
+
+def inventory_with_diagnostics(discovery, context, *, wall_clock=None):
+    wall_clock = wall_clock or time.time
+    try:
+        begin = wall_clock()
+    except Exception:
+        begin = None  # An unavailable diagnostic clock cannot prevent inventory.
+    command_index = len(discovery.records)
+    try:
+        return discovery.command(["xcrun", "simctl", "list", "--json"], "simulator-inventory", 90)
+    except Exception:
+        try:
+            diagnose_inventory_failure(discovery, context, command_index, begin, wall_clock)
+        except BaseException:
+            # Also preserve the primary error if collection is interrupted
+            # before its own guarded body or during its final alarm restore.
+            context["inventory_native_log"] = {"schema_version": 1, "status": "UNAVAILABLE",
+                                                "complete": False, "native_cause": "UNKNOWN",
+                                                "raw_text_retained": False, "reason": "diagnostic_interrupted"}
+        raise
+
+
+def version(value):
+    require(isinstance(value, str) and re.fullmatch(r"\d+\.\d+(?:\.\d+)?", value), "Invalid SDK/runtime version", Failure)
+    return tuple(int(p) for p in value.split(".")) + ((0,) if value.count(".") == 1 else ())
+
+
+def select_runtime(inventory, sdk, *, runtime_line=None, device_type=None):
+    """Newest installed patch in the selected line with a compatible iPhone.
+
+    Default to the SDK major/minor unless an older/equal line is explicitly
+    pinned. Patch equality is intentionally not required. A compatible type must
+    appear in runtime support data, an available device, or a declared range.
+    Use the pinned type when supplied; otherwise choose the newest generation.
+    No device boot, runtime download, fallback runtime or retry is performed.
+    """
+    sdk_version = version(sdk)
+    selected_line = sdk_version[:2]
+    if runtime_line is not None:
+        require(isinstance(runtime_line, str) and re.fullmatch(r"\d+\.\d+", runtime_line),
+                "Explicit runtime line must be major.minor", Failure)
+        selected_line = version(runtime_line)[:2]
+        require(selected_line <= sdk_version[:2], "Pinned runtime line exceeds SDK version", Failure)
+    if device_type is not None:
+        require(isinstance(device_type, str) and re.fullmatch(
+            r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-[A-Za-z0-9-]+", device_type),
+            "Explicit device type must be an iPhone identifier", Failure)
+    require(isinstance(inventory.get("runtimes"), list) and isinstance(inventory.get("devicetypes"), list)
+            and isinstance(inventory.get("devices"), dict), "Incomplete simulator inventory", Failure)
+    runtimes = [r for r in inventory["runtimes"] if r.get("isAvailable") is True
+                and re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+", r.get("identifier", ""))
+                and version(r.get("version"))[:2] == selected_line]
+    require(runtimes, "No installed available runtime matches " +
+            ("pinned major/minor" if runtime_line is not None else "SDK major/minor"), Failure)
+    runtime = max(runtimes, key=lambda r: (version(r["version"]), r["identifier"]))
+    supported = {t.get("identifier") for t in runtime.get("supportedDeviceTypes", []) if isinstance(t, dict)}
+    supported.update(d.get("deviceTypeIdentifier") for d in inventory["devices"].get(runtime["identifier"], [])
+                     if d.get("isAvailable") is True)
+    v = version(runtime["version"])
+    encoded = (v[0] << 16) | (v[1] << 8) | v[2]
+    types = [t for t in inventory["devicetypes"]
+             if re.fullmatch(r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-[A-Za-z0-9-]+", t.get("identifier", ""))
+             and (t["identifier"] in supported or
+                  (type(t.get("minRuntimeVersion")) is int and type(t.get("maxRuntimeVersion")) is int
+                   and t["minRuntimeVersion"] <= encoded <= t["maxRuntimeVersion"]))]
+    require(types, "No evidenced compatible installed iPhone type", Failure)
+    if device_type is not None:
+        types = [t for t in types if t["identifier"] == device_type]
+        require(types, "Pinned iPhone type is not installed and evidenced compatible", Failure)
+    selected = max(types, key=lambda t: (int((re.search(r"iPhone-(\d+)", t["identifier"]) or ["", "0"])[1]), t["identifier"]))
+    return {"runtime": runtime["identifier"], "runtime_version": runtime["version"], "sdk_version": sdk,
+            "device_type": selected["identifier"], "patch_policy":
+            "pinned-major-minor-newest-installed-patch" if runtime_line is not None
+            else "same-major-minor-newest-installed-patch"}
+
+
+def runtime_image_observation(raw, selection, inventory, *, mounted=None):
+    """Bind one selected runtime image to the inventory, without modifying it.
+
+    Runtime availability and dyld-cache usability do not describe mount state.
+    A plain volume mount is as valid as a cryptex mount; signatureState is not a
+    readiness signal (healthy system runtimes can report Unknown).
+    """
+    require(isinstance(raw, bytes) and len(raw) <= 256 * 1024,
+            "Runtime image inventory exceeds its byte limit", Failure)
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, "Duplicate runtime image JSON key", Failure)
+            value[key] = item
+        return value
+
+    try:
+        images = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise Failure("Invalid runtime image JSON") from error
+    require(isinstance(images, dict) and 0 < len(images) <= 100,
+            "Invalid runtime image inventory", Failure)
+    runtimes = [item for item in inventory["runtimes"]
+                if item.get("identifier") == selection["runtime"]]
+    require(len(runtimes) == 1, "Selected runtime inventory is ambiguous", Failure)
+    runtime = runtimes[0]
+    build = runtime.get("buildversion")
+    require(isinstance(build, str) and re.fullmatch(r"[A-Za-z0-9.]{1,64}", build),
+            "Selected runtime build is missing or invalid", Failure)
+    candidates = []
+    for key, item in images.items():
+        require(isinstance(item, dict), "Invalid runtime image record", Failure)
+        # Also catch contradictory records claiming the selected version but
+        # naming a different runtime identifier.
+        if (item.get("runtimeIdentifier") != selection["runtime"] and
+                not (item.get("platformIdentifier") == "com.apple.platform.iphonesimulator"
+                     and item.get("version") == selection["runtime_version"])):
+            continue
+        require(isinstance(key, str) and re.fullmatch(
+            r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", key)
+                and item.get("identifier") == key,
+                "Runtime image identifier is contradictory", Failure)
+        require(item.get("runtimeIdentifier") == selection["runtime"]
+                and item.get("version") == selection["runtime_version"]
+                and item.get("build") == build
+                and item.get("platformIdentifier") == "com.apple.platform.iphonesimulator",
+                "Selected runtime image identity differs", Failure)
+        candidates.append(item)
+    require(len(candidates) == 1, "Selected runtime image is missing or duplicated", Failure)
+    image = candidates[0]
+    state = image.get("state")
+    require(isinstance(state, str) and re.fullmatch(r"[A-Za-z][A-Za-z ]{0,63}", state),
+            "Invalid selected runtime image state", Failure)
+    observation = {"image_id": image["identifier"], "runtime": selection["runtime"],
+                   "runtime_version": selection["runtime_version"], "runtime_build": build,
+                   "state": state, "mount_path": None, "mounted": False, "ready": False}
+    if state != "Ready":
+        require(state != "Unusable", "Selected runtime image is unusable", Failure)
+        return observation
+    mount, bundle = image.get("mountPath"), image.get("runtimeBundlePath")
+    for value in (mount, bundle):
+        require(isinstance(value, str) and len(value) <= 4096 and "\x00" not in value
+                and Path(value).is_absolute() and ".." not in Path(value).parts
+                and str(Path(value)) == value, "Invalid selected runtime mount path", Failure)
+    require(bundle == runtime.get("bundlePath") and Path(bundle).is_relative_to(Path(mount))
+            and bundle != mount, "Selected runtime bundle differs from its mount", Failure)
+    observation["mount_path"] = mount
+    observation["mounted"] = bool((mounted or os.path.ismount)(mount))
+    observation["ready"] = observation["mounted"]
+    return observation
+
+
+def wait_for_runtime_image(discovery, selection, inventory, context, *, sleep=None):
+    """A bounded readiness observation, not a retry of failed native commands."""
+    parent_alarm = discovery.alarm
+    start = parent_alarm.clock()
+    end = min(parent_alarm.end, start + 30)
+    receipt = {"schema_version": 1, "status": "OBSERVING", "start": start,
+               "deadline": end, "observations": [], "native_cause": "UNKNOWN",
+               "source_commit": context.get("source_commit"), "source_tree": context.get("source_tree"),
+               "selection": dict(selection),
+               "inventory_sha256": None}
+    context["runtime_readiness"] = receipt
+    # Discovery.command performs its own entry checks before it calculates a
+    # child deadline. Share this absolute bound through those checks, cleanup
+    # and receipt writes; a relative remaining-time cap alone can drift.
+    discovery.alarm = Alarm(end, parent_alarm.clock)
+
+    def check():
+        discovery.check()
+        require(discovery.alarm.clock() < end, "Runtime image readiness deadline reached", Deadline)
+
+    try:
+        discovery.alarm.arm()
+        receipt["inventory_sha256"] = controller.sha(json.dumps(inventory, sort_keys=True).encode())
+        for attempt in range(1, 9):
+            check()
+            require(end - discovery.alarm.clock() >= 8,
+                    "Insufficient runtime image observation/cleanup budget", Deadline)
+            name = "runtime-images-" + str(attempt)
+            raw = discovery.command(["xcrun", "simctl", "runtime", "list", "--json"], name,
+                                    min(15, end - discovery.alarm.clock()))
+            # The command restores its parent timer. Narrow it again before
+            # parsing or querying the mount, without extending either deadline.
+            discovery.alarm.arm(end)
+            check()
+            observed = runtime_image_observation(raw, selection, inventory)
+            check()
+            observed.update(command=name, stdout_sha256=controller.sha(raw),
+                            elapsed=discovery.alarm.clock() - start)
+            receipt["observations"].append(observed)
+            if observed["ready"]:
+                receipt["status"] = "READY"
+                controller.write_json(discovery.output / "runtime-readiness.json", receipt)
+                check()
+                return receipt
+            require(attempt < 8, "Runtime image did not become ready within eight observations", Deadline)
+            (sleep or time.sleep)(min(1, max(0, end - discovery.alarm.clock())))
+            check()
+    except BaseException as error:
+        receipt["status"] = "FAILED"
+        receipt["error"] = {"type": type(error).__name__, "message": str(error)}
+        raise
+    finally:
+        # Restore only the original absolute preflight deadline. A failed
+        # restoration must not replace the primary native/identity failure.
+        discovery.alarm = parent_alarm
+        try:
+            discovery.alarm.arm()
+        except BaseException:
+            if receipt["status"] != "FAILED":
+                raise
+
+
+def parse_commit_identity(raw, audit):
+    """Read only tree/parent headers, including in a depth-one checkout."""
+    audit.check("commit_object_bound", isinstance(raw, bytes) and len(raw) <= 4 * controller.MIB)
+    end = raw.find(b"\n\n", 0, 65538)
+    audit.check("commit_header_bound", 0 <= end <= 65536)
+    lines = raw[:end].split(b"\n")
+    trees = [line[5:] for line in lines if line.startswith(b"tree ")]
+    parents = [line[7:] for line in lines if line.startswith(b"parent ")]
+    audit.check("commit_tree_header", len(trees) == 1 and lines[0].startswith(b"tree ")
+                and re.fullmatch(rb"[0-9a-f]{40}", trees[0]) is not None)
+    audit.check("commit_parent_headers", len(parents) <= 2
+                and all(re.fullmatch(rb"[0-9a-f]{40}", p) is not None for p in parents))
+    identity = {"tree": trees[0].decode("ascii"), "parents": [p.decode("ascii") for p in parents]}
+    audit.observe("commit_tree", identity["tree"], SHA40)
+    for i, parent in enumerate(identity["parents"]):
+        audit.observe("commit_parent_" + str(i), parent, SHA40)
+    return identity
+
+
+def source_identity(discovery, env, event_identity=None, audit=None):
+    audit = audit or IdentityAudit()
+    audit.stage = "source"
+    lines = discovery.command(["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"],
+                              "source-head", 10).decode("ascii", errors="replace").splitlines()
+    audit.check("checkout_identity_shape", len(lines) == 2)
+    audit.observe("checkout_commit", lines[0], SHA40)
+    audit.observe("checkout_tree", lines[1], SHA40)
+    audit.check("checkout_commit_matches", lines[0] == env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"])
+    audit.check("checkout_tree_matches", lines[1] == env["RECOVERY_TESTED_TREE"])
+    audit.check("checkout_clean", discovery.command(["git", "status", "--porcelain=v1"], "source-status", 10) == b"")
+    if env["GITHUB_EVENT_NAME"] == "pull_request":
+        audit.check("pr_event_identity_available", isinstance(event_identity, dict) and event_identity.get("kind") == "pull_request")
+        raw = discovery.command(["git", "--no-replace-objects", "cat-file", "commit", env["GITHUB_SHA"]],
+                                "source-commit", 10, retain_output=False)
+        actual = parse_commit_identity(raw, audit)
+        audit.check("commit_tree_matches", actual["tree"] == lines[1])
+        audit.check("pr_parent_count", len(actual["parents"]) == 2)
+        audit.check("pr_head_is_parent", event_identity["head"]["sha"] in actual["parents"])
+        audit.check("pr_base_is_parent", event_identity["base"]["sha"] in actual["parents"])
+        # Conservative snapshot policy; base advancement can fail this gate.
+        # Parent order is observed, not assumed to be part of GitHub's contract.
+        audit.check("pr_snapshot_parents_match", sorted(actual["parents"]) ==
+                    sorted([event_identity["base"]["sha"], event_identity["head"]["sha"]]))
+        discovery.check()
+        controller.write_json(discovery.output / "source-identity.json", actual)
+        discovery.check()
+    audit.stage = "source_verified"
+    return lines
+
+
+def make_envelope(root, work, profile_hash, workflow_hash, host, source, selection, developer_dir, xcodegen, hashes):
+    now = controller.utc_now()
+    grant = {"schema_version": 1, "native_execution_authorized": True,
+             "not_before": now.isoformat(), "expires_at": (now + dt.timedelta(seconds=1860)).isoformat(),
+             "source_commit": source[0], "source_tree": source[1], "worktree": str(root), "output_root": str(work / "run"),
+             "controller_sha256": hashes["controller"], "collector_sha256": hashes["collector"],
+             "device_type": selection["device_type"], "runtime": selection["runtime"],
+             "xcodegen_path": str(xcodegen), "xcodegen_sha256": hashes["xcodegen"],
+             "developer_dir": str(developer_dir), "journey_run_id": str(uuid.uuid4()).upper()}
+    # Embedding never bypasses the unchanged standalone controller validator.
+    controller.validate_grant(grant, now=controller.utc_now(), script_root=root)
+    return {"schema_version": 1, "kind": "github-hosted-recovery", "hosted_identity": host,
+            "source_commit": source[0], "source_tree": source[1], "profile_sha256": profile_hash,
+            "workflow_sha256": workflow_hash, "tool_hashes": hashes, "selection": selection,
+            "controller_grant": grant, "policy": POLICY,
+            "ephemeral_paths_are_not_durable_artifacts": True}
+
+
+class HostedRecoveryRun(controller.RecoveryRun):
+    def build(self):
+        super().build()
+        from recovery_retention import capture_build_identity
+        capture_build_identity(self, self.output.parent / "build-identity", self.guard)
+
+
+def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usage=shutil.disk_usage):
+    env = dict(os.environ if env is None else env)
+    start = clock()
+    outer_end = start + 2100
+    work, upload, runner, discovery = None, None, None, None
+    context, primary, code = {}, None, 1
+    audit = IdentityAudit()
+    try:
+        with Alarm(start + 120, clock) as alarm:
+            profile, profile_raw = load_profile(root, expected)
+            host = validate_host(env, profile, root)
+            for key in ("GITHUB_SHA", "RECOVERY_TESTED_COMMIT", "RECOVERY_TESTED_TREE"):
+                audit.observe(key, env[key], SHA40)
+            audit.observe("run_ref", env["GITHUB_REF"], r"refs/[A-Za-z0-9_./-]+")
+            audit.stage = "event_read"
+            event_name = env.get("GITHUB_EVENT_PATH", "")
+            audit.check("event_path_type", isinstance(event_name, str))
+            event_path = Path(event_name)
+            audit.check("event_path_absolute", event_path.is_absolute())
+            try:
+                event_raw = bounded_read(event_path, 4 * controller.MIB)
+            except Failure:
+                audit.check("event_file_bounded_regular", False)
+            except (OSError, ValueError) as error:
+                audit.observe("event_file_errno", getattr(error, "errno", None))
+                audit.check("event_file_readable", False)
+            audit.check("event_file_bounded_regular", True)
+            try:
+                event = json.loads(event_raw)
+            except (ValueError, UnicodeError, RecursionError):
+                audit.check("event_json", False)
+            audit.check("event_json", True)
+            host["event"] = validate_event(event, env, audit)
+            temporary = Path(env["RUNNER_TEMP"])
+            proposed, upload = temporary / "room-recovery-work", temporary / "room-recovery-upload"
+            require(not any(p.exists() or p.is_symlink() for p in (proposed, upload)), "Attempt output already exists", Failure)
+            admission_free_bytes = disk_usage(temporary).free
+            require(admission_free_bytes >= profile["admission_free_bytes"], "Admission requires 24 GiB free", Failure)
+            proposed.mkdir(mode=0o700)
+            work = proposed
+            preflight = work / "preflight"
+            preflight.mkdir(mode=0o700)
+            context = {"source_commit": env["GITHUB_SHA"], "source_tree": env["RECOVERY_TESTED_TREE"],
+                       "profile_sha256": expected, "hosted_identity": host, "controller_exit_code": None,
+                       "primary_error": None, "cleanup_errors": [], "admission_free_bytes": admission_free_bytes}
+            workflow_raw = bounded_read(root / profile["workflow_path"])
+            context["workflow_sha256"] = controller.sha(workflow_raw)
+            (preflight / "recovery-hosted-profile.json").write_bytes(profile_raw)
+            (preflight / "ci.yml").write_bytes(workflow_raw)
+            controller.write_json(preflight / "hosted-identity.json", host)
+            # No tokens/context dump: native tools receive only their ordinary
+            # OS/tool environment. Git identity checks need no credentials.
+            child_env = {k: v for k, v in env.items() if k in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "DEVELOPER_DIR"}}
+            discovery = Discovery(root, preflight, child_env, alarm, disk_usage=disk_usage)
+            source = source_identity(discovery, env, host["event"], audit)
+            hashes = {name: controller.sha(bounded_read(root / "scripts" / path)) for name, path in {
+                "controller": "run-recovery-journey.py", "collector": "recovery_collector.py",
+                "adapter": "recovery_hosted.py", "retention": "recovery_retention.py",
+                "xcodegen_installer": "install-xcodegen.py"}.items()}
+            # All source/host/profile checks precede the first native command.
+            selected = discovery.command(["xcode-select", "-p"], "xcode-select", 10).decode().strip()
+            developer = Path(selected)
+            require(developer.is_absolute() and developer.is_dir() and developer.name == "Developer",
+                    "Selected Xcode developer directory is invalid", Failure)
+            require(not env.get("DEVELOPER_DIR") or Path(env["DEVELOPER_DIR"]).resolve() == developer.resolve(),
+                    "DEVELOPER_DIR differs from selected Xcode", Failure)
+            developer = developer.resolve()
+            discovery.env["DEVELOPER_DIR"] = str(developer)
+            xcode_version = discovery.command(["xcodebuild", "-version"], "xcode-version", 10).decode().strip()
+            require(xcode_version == profile["xcode_version"], "Installed Xcode version/build differs", Failure)
+            sdk = discovery.command(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "sdk-version", 10).decode().strip()
+            inventory = json.loads(inventory_with_diagnostics(discovery, context))
+            selection = select_runtime(inventory, sdk, runtime_line=profile["runtime_version"],
+                                       device_type=profile["device_type"])
+            selection.update({"developer_dir": str(developer), "xcode_version": xcode_version})
+            controller.write_json(preflight / "selection.json", selection)
+            wait_for_runtime_image(discovery, selection, inventory, context)
+            # Complete the selected runtime's cache initialization before boot.
+            # Without --force this is a no-op for a ready cache; the existing
+            # preflight deadline still bounds any queued or required work.
+            discovery.command(["xcrun", "simctl", "runtime", "dyld_shared_cache", "update",
+                               selection["runtime"]], "runtime-cache", 60)
+            installed = discovery.command([sys.executable, str(root / "scripts/install-xcodegen.py")], "install-xcodegen", 70).decode().strip()
+            xcodegen = root / ".build/tools/xcodegen-2.46.0/xcodegen/bin/xcodegen"
+            require(installed == str(xcodegen) and xcodegen.resolve() == xcodegen and os.access(xcodegen, os.X_OK),
+                    "Installer returned an unexpected executable", Failure)
+            hashes["xcodegen"] = controller.sha(bounded_read(xcodegen, 64 * controller.MIB))
+            context["tool_hashes"] = hashes
+            envelope = make_envelope(root, work, expected, context["workflow_sha256"], host, source, selection, developer, xcodegen, hashes)
+            envelope["runtime_readiness"] = context["runtime_readiness"]
+            controller.write_json(work / "hosted-grant-envelope.json", envelope)
+            discovery.check()
+        require(outer_end - clock() >= 1980, "Insufficient full controller and retention budget", Deadline)
+        controller.validate_grant(envelope["controller_grant"], now=controller.utc_now(), script_root=root)
+        runner = HostedRecoveryRun(envelope["controller_grant"], clock=clock, disk_usage=disk_usage)
+        code = runner.execute()
+        context["controller_exit_code"] = code
+        context["primary_error"] = runner.record.get("primary_error") or runner.record.get("finalization_error")
+        context["cleanup_errors"] = runner.record.get("cleanup_errors", [])
+    except BaseException as error:
+        primary = {"type": type(error).__name__, "message": str(error)}
+        code = error.exit_code if isinstance(error, controller.RunFailure) else 1
+        context["primary_error"] = context.get("primary_error") or primary
+    if runner is not None:
+        context["controller_exit_code"] = runner.record.get("exit_code", context.get("controller_exit_code"))
+        context["primary_error"] = runner.record.get("primary_error") or context.get("primary_error")
+        context["cleanup_errors"] = runner.record.get("cleanup_errors", context.get("cleanup_errors", []))
+        if runner.record.get("resource_cap_crossing") is not None:
+            context["resource_cap_crossing"] = runner.record["resource_cap_crossing"]
+    if discovery:
+        context.setdefault("cleanup_errors", []).extend(discovery.cleanup_errors)
+    if context.get("primary_error") or context.get("cleanup_errors"):
+        code = code or 1
+    context["identity_audit"] = audit.snapshot()
+    failure_precedence = None
+    if work is not None:
+        try:
+            with Alarm(min(outer_end, clock() + 180), clock) as alarm:
+                from recovery_retention import package_evidence
+                def retention_guard():
+                    alarm.check()
+                    require(disk_usage(work).free >= profile["abort_free_bytes"], "Retention disk abort floor reached")
+                    alarm.check()
+                retention_guard()
+                controller.write_json(work / "preflight/adapter-result.json", context)
+                report = package_evidence(work, upload, context, retention_guard, collector=runner.collector if runner else None)
+                retention_guard()
+                failure_precedence = report.get("failure_precedence")
+                if failure_precedence:
+                    code = code or 1  # Diagnostic classification can never make a run pass.
+                if not report.get("complete") or report.get("status") != "COMPLETE":
+                    code = code or 1
+        except BaseException as error:
+            code = code or (error.exit_code if isinstance(error, controller.RunFailure) else 1)
+            primary = primary or {"type": type(error).__name__, "message": str(error)}
+    if clock() >= outer_end:
+        code = 124
+    return {"exit_code": code, "status": "COMPLETE" if code == 0 else "INCOMPLETE",
+            "primary_error": failure_precedence["primary_error"] if failure_precedence else context.get("primary_error") or primary,
+            "secondary_errors": failure_precedence["secondary_errors"] if failure_precedence else [],
+            "upload_root": str(upload) if work is not None else None,
+            "identity_audit": audit.snapshot()}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile-sha256", required=True)
+    args = parser.parse_args(argv)
+    result = run_hosted(args.profile_sha256)
+    controller.emit_summary(result)
+    return result["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

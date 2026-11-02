@@ -1,0 +1,35 @@
+{
+  "configurations": [
+    {
+      "id": "8270F002-469F-46FB-8CBD-13F46CD87A42",
+      "name": "Default",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "targetForVariableExpansion": {
+      "containerPath": "container:RoomInventory.xcodeproj",
+      "identifier": "2AD8579CB9D29A8382682E00",
+      "name": "RoomInventory"
+    }
+  },
+  "testTargets": [
+    {
+      "parallelizable": false,
+      "target": {
+        "containerPath": "container:RoomInventory.xcodeproj",
+        "identifier": "85B96E7D68D1A469B715579F",
+        "name": "RoomInventoryTests"
+      }
+    },
+    {
+      "parallelizable": false,
+      "target": {
+        "containerPath": "container:RoomInventory.xcodeproj",
+        "identifier": "03764F67987ECDC45F70D5BC",
+        "name": "RoomInventoryUITests"
+      }
+    }
+  ],
+  "version": 1
+}

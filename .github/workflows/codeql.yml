@@ -27,7 +27,7 @@ jobs:
           printf '%s\n' "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$DEVELOPER_DIR" "$xcode_version"
           test "$xcode_version" = $'Xcode 26.4.1\nBuild version 17E202'
       - name: Initialize Swift analysis
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: swift
           build-mode: manual
@@ -54,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize tooling analysis
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: ${{ matrix.language }}
           build-mode: none

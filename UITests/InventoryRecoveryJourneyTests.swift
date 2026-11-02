@@ -366,7 +366,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // A live four-property predicate resolves the same switch repeatedly.
         // Read state once from the snapshot also used for geometry, then make
         // only the separate hit test that a snapshot cannot provide.
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+        let readinessResult = try window.waitForProbe {
             if observation != nil || observationError != nil { return true }
             do {
                 observation = try window.probe(snapshot: observeForm, stateReady: { candidate in
@@ -392,8 +392,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 observationError = error
                 return true
             }
-        }, object: nil)
-        let readinessResult = XCTWaiter.wait(for: [ready], timeout: try window.remaining())
+        }
         let timely = (try? window.remaining()) != nil
         if readinessResult != .completed || !timely || observation == nil || observationError != nil {
             throw RecoveryJourneyFailure.assertion("OCR \(id) readiness",

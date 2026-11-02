@@ -310,6 +310,24 @@ and geometry through admission of the tap; a late observation cannot authorize
 an action. This avoids four independent remote property resolutions consuming
 the entire window. The exact post-activation value `1` remains required.
 
+The first readiness probe runs on the main run loop inside an active XCTest
+waiter, without the predicate expectation's initial polling delay. An unready
+probe schedules one later probe only after returning; probes cannot overlap.
+Leaving the waiter disables pending callbacks and invalidates the timer. The
+same ten-second window still covers fresh state, live hit testing, geometry and
+tap admission. Keeping the probe inside the waiter preserves
+[XCTest's nested query interruption](https://developer.apple.com/documentation/xctest/xctwaiter/result/interrupted);
+this is not a promise of termination at exactly 10.000
+seconds, because XCTest's watchdog has its own scheduling grace.
+
+In main run `41425796691`, the price switch was positively hittable immediately
+before readiness, but the first predicate probe started 1.032 seconds later.
+The application-root query then took 7.115 seconds, and the outer waiter
+interrupted the subsequent live switch query. Its returned `false` was not a
+completed negative hit test. Starting the fresh probe immediately removes the
+measured polling delay; it does not identify or eliminate the cause of slow
+native queries. Expired observations still fail without a tap or a retry.
+
 After the single tap returns, a separate ten-second monotonic window starts with
 an immediate application snapshot. State is read from exactly one switch with the
 expected identifier in that immutable snapshot; absent, wrong-type, wrong-value

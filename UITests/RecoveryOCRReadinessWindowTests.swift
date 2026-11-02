@@ -107,4 +107,135 @@ final class RecoveryOCRReadinessWindowTests: XCTestCase {
         }
         XCTAssertEqual(hitTests, 0)
     }
+
+    @MainActor
+    func testFirstProbeRunsInsideWaiterBeforePredicatePollingDelay() throws {
+        let start = ProcessInfo.processInfo.systemUptime
+        var used = 0.0
+        let window = RecoveryOCRReadinessWindow(clock: {
+            used + ProcessInfo.processInfo.systemUptime - start
+        })
+        used = 9.25 // Leave less than the predicate's one-second initial delay.
+        var calls = 0
+        var nested: XCTWaiter.Result?
+        let result = try window.waitForProbe {
+            XCTAssertTrue(Thread.isMainThread)
+            calls += 1
+            nested = XCTWaiter.wait(for: [XCTestExpectation(description: "pending native operation")], timeout: 3)
+            return true
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(nested, .interrupted)
+        XCTAssertEqual(result, .timedOut)
+    }
+
+    @MainActor
+    func testNextProbeCannotReenterOperationPumpingMainRunLoop() throws {
+        let window = RecoveryOCRReadinessWindow()
+        var calls = 0
+        var depth = 0
+        var maximumDepth = 0
+        let result = try window.waitForProbe {
+            calls += 1
+            depth += 1
+            maximumDepth = max(maximumDepth, depth)
+            defer { depth -= 1 }
+            if calls == 1 {
+                let completed = XCTestExpectation(description: "slow first probe")
+                let timer = Timer(timeInterval: 1.1, repeats: false) { _ in completed.fulfill() }
+                RunLoop.main.add(timer, forMode: .default)
+                defer { timer.invalidate() }
+                XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 3), .completed)
+                return false
+            }
+            return true
+        }
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(maximumDepth, 1)
+    }
+
+    @MainActor
+    func testWaiterExitCancelsPendingProbeTimer() throws {
+        var now = 0.0
+        let window = RecoveryOCRReadinessWindow(clock: { now })
+        now = 9.5
+        var calls = 0
+        XCTAssertEqual(try window.waitForProbe { calls += 1; return false }, .timedOut)
+        // Keep the injected window open: only teardown of the waiter can
+        // prevent its one-second timer from making a late call here.
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "pump canceled timer")], timeout: 1.05)
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testExpiredWindowDoesNotScheduleFirstProbe() {
+        var now = 0.0
+        let window = RecoveryOCRReadinessWindow(clock: { now })
+        now = 10
+        var calls = 0
+        XCTAssertThrowsError(try window.waitForProbe { calls += 1; return true }) {
+            XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+        }
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "pump rejected first probe")], timeout: 0.01)
+        XCTAssertEqual(calls, 0)
+    }
+
+    @MainActor
+    func testDeadlineAfterSchedulingClosesQueuedFirstProbe() {
+        var clockReads = 0
+        let window = RecoveryOCRReadinessWindow(clock: {
+            clockReads += 1
+            // Initialization and scheduling are timely; waiter admission is not.
+            return clockReads <= 2 ? 0 : 10
+        })
+        var calls = 0
+        XCTAssertThrowsError(try window.waitForProbe { calls += 1; return true }) {
+            XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+        }
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "pump closed first probe")], timeout: 0.01)
+        XCTAssertEqual(calls, 0)
+    }
+
+    @MainActor
+    func testLateProbeCannotFulfillReadinessOrScheduleAnotherProbe() throws {
+        for elapsed in [10.0, 10.001] {
+            var now = 0.0
+            let window = RecoveryOCRReadinessWindow(clock: { now })
+            now = 9.5
+            var calls = 0
+            let result = try window.waitForProbe {
+                calls += 1
+                now = elapsed
+                return true
+            }
+            XCTAssertEqual(result, .timedOut)
+            XCTAssertEqual(calls, 1)
+            XCTAssertThrowsError(try window.remaining())
+        }
+    }
+
+    @MainActor
+    func testCapturedObservationErrorStopsWaitWithoutAnotherQuery() throws {
+        enum InvalidSnapshot: Error { case duplicateTarget }
+        let window = RecoveryOCRReadinessWindow()
+        var calls = 0
+        var capturedError: Error?
+        let result = try window.waitForProbe {
+            do {
+                _ = try window.probe(snapshot: {
+                    calls += 1
+                    throw InvalidSnapshot.duplicateTarget
+                }, stateReady: { _ in XCTFail("Invalid snapshot reached state query"); return true },
+                   hittable: { XCTFail("Invalid snapshot reached hit test"); return true })
+                return false
+            } catch {
+                capturedError = error
+                return true
+            }
+        }
+        XCTAssertEqual(result, .completed)
+        XCTAssertTrue(capturedError is InvalidSnapshot)
+        XCTAssertEqual(calls, 1)
+    }
 }

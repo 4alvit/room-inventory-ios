@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bound passive StoreKit approval/refund observation to one ten-second monotonic window after a hosted approval arrived beyond the former five-second allowance; reject late matches and propagate cancellation without refreshing entitlements.
 - Update related CI action pins together and group future Dependabot action updates.
 - Collect bounded, redacted native diagnostics when Recovery device setup fails before UI execution, preserving the original failure and cleanup evidence.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.

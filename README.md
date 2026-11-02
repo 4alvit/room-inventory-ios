@@ -90,7 +90,13 @@ Select the `RoomInventory` scheme and a Simulator in Xcode. The scheme's **Run**
 action selects the local StoreKit configuration. The checked-in test plan selects
 the hosted and UI test targets; it does not configure a StoreKit environment.
 StoreKit tests observe live purchase approval and refund updates without refreshing
-entitlements while polling. Use only synthetic sample belongings and documents for
+entitlements while polling. They allow one absolute ten-second delivery window:
+hosted run `41529330332` observed a verified approval after approximately 5.30
+seconds, beyond the former five-second allowance. A match at or after the deadline
+still fails, and cancellation is not ignored. The late event appeared during
+failure diagnostics; this timing does not establish that the diagnostic entitlement
+read caused its delivery. Native CI must still validate passive observation.
+Use only synthetic sample belongings and documents for
 screenshots, fixtures and public bug reports. The first launch starts empty.
 
 For iPad layout coverage, run

@@ -650,6 +650,36 @@ or proof of what consumed the command budget. Error capture snapshots this pair
 in the command's `process_observation.resource_scan_at_failure` or the controller's
 `failure_resource_scan`, so later cleanup scans cannot rewrite the earlier state.
 
+The Recovery controller also retains fixed per-category `resource_scan_cost`
+aggregates in the owning command receipt, with a separate aggregate for work
+outside a command. These preserve counts and summed/maximum measured wall and
+controller user/system CPU time after the current/last spans have been replaced.
+Wall durations reuse the existing scan timestamps. Two optional
+`getrusage(RUSAGE_SELF)` observations bracket each `resource_size` invocation;
+there is no CPU observation per entry, new subprocess or additional receipt write.
+Missing, regressing or invalid measurements remain explicitly incomplete.
+Returned/failed counts describe the wrapped scan body before the final CPU probe.
+A control interruption in that probe can still fail the command after a recorded
+return; command errors, exit status and cleanup remain authoritative.
+
+These costs include cooperative pipe servicing and direct log validation nested
+inside that scan. Direct `tree_size` calls outside `resource_size` are not separate
+measured scans, so the aggregates are not total controller CPU usage. They do not
+measure native child CPU, host load, physical I/O or the reason a process waited.
+Counts and measurements never determine resource acceptance or scan cadence.
+The existing caps, full terminal accounting, ownership checks, deadlines and
+cleanup remain authoritative; diagnostic failure cannot replace an existing
+operational error.
+
+This instrumentation follows the historical diagnostic-source hosted run
+`41467655923`, where the first PhotosPicker presentation remained loading and
+its launch request preceded
+process creation by 20.740 seconds. Four completed resource-accounting sweeps
+overlapped the Photos wait and visited 83,849 metadata entries. That overlap does
+not establish contention or explain the delay. That historical packet retained no
+per-scan cost history or CPU measurements, so a passing instrumented journey
+alone would not prove a repair or qualify the ordinary release source.
+
 Each existing command receipt may add `process_observation`: the last observed
 selector state, stdout/stderr EOF only after an existing empty read/unregister,
 and the first retained observation of an integer child return code (`first_observed_exit`). Exit source is `poll`, `wait`,

@@ -672,6 +672,139 @@ def inventory_with_diagnostics(discovery, context, *, wall_clock=None):
         raise
 
 
+def controller_clock_anchor(clock, wall_clock=None):
+    """Bracket one wall-clock sample without changing controller deadlines."""
+    try:
+        before = clock()
+        wall = (wall_clock or time.time)()
+        after = clock()
+        if all(finite_number(v) for v in (before, wall, after)) and 0 <= after - before <= 1:
+            return {"before": before, "wall": wall, "after": after}
+    except Exception:
+        pass
+    return None
+
+
+def diagnose_controller_failure(discovery, runner, context, anchor, outer_end, *,
+                                execute_returned=False, wall_clock=None):
+    """One sanitized log read after a failed device command and terminal cleanup.
+
+    Terminal absence/reaping permits this read independently of historical cleanup
+    errors. Those errors and the original failure are never cleared or reclassified.
+    """
+    record = runner.record
+    if ("controller_native_log" in context or record.get("phase") != "device"
+            or record.get("test_count") != 0 or not record.get("primary_error")):
+        return
+    row = {"schema_version": 1, "status": "UNAVAILABLE", "complete": False,
+           "native_cause": "UNKNOWN", "raw_text_retained": False, "query_attempted": False,
+           "coverage": "returned_query_events_only", "reason": "preconditions_not_met"}
+    context["controller_native_log"] = row
+    parent_alarm, raw = discovery.alarm, None
+    try:
+        clock = parent_alarm.clock
+        now = clock()
+        log_require(finite_number(now) and finite_number(outer_end)
+                    and outer_end - now >= 14 + POLICY["retention_seconds"], "insufficient_remaining_budget")
+        # All preparation, the child and its cleanup, receipts and parsing share
+        # this bound. The original 180-second retention reserve remains untouched.
+        with Alarm(now + 14, clock) as alarm:
+            discovery.alarm = alarm
+            log_require(execute_returned is True and runner.cleanup_mode is True
+                        and runner.timer_enabled is False, "controller_cleanup_unfinished")
+            log_require(type(discovery.records) is list and 0 < len(discovery.records) <= 256,
+                        "discovery_groups_unconfirmed")
+            for prior in discovery.records:
+                alarm.check()
+                proof = prior.get("cleanup", {})
+                log_require(proof.get("group_state") == "absent" and proof.get("leader_reaped") is True
+                            and type(proof.get("returncode")) is int, "discovery_groups_unconfirmed")
+            commands, groups = record.get("commands"), runner.groups
+            log_require(type(commands) is list and type(groups) is list
+                        and 0 < len(groups) <= len(commands) <= 256, "owned_groups_unconfirmed")
+            spawned = [item for item in commands if item.get("pid") is not None]
+            log_require(len(spawned) == len(groups)
+                        and len({item.get("name") for item in spawned}) == len(spawned),
+                        "owned_groups_unconfirmed")
+            seen = set()
+            for entry in groups:
+                alarm.check()
+                command, process, state = entry["record"], entry["process"], entry["state"]
+                pid = command.get("pid")
+                log_require(type(pid) is int and pid > 0 and pid not in seen
+                            and command.get("pgid") == pid and process.pid == pid
+                            and sum(item is command for item in spawned) == 1,
+                            "owned_groups_unconfirmed")
+                seen.add(pid)
+                proof = command.get("cleanup", {})
+                for error in record.get("cleanup_errors", []):
+                    alarm.check()
+                    if error.get("command") == command.get("name") and "final_observation" in error:
+                        proof = error["final_observation"]
+                code = state.get("returncode")
+                log_require(state.get("group_state") == proof.get("group_state") == "absent"
+                            and state.get("leader_reaped") is True and proof.get("leader_reaped") is True
+                            and proof.get("pgid") == pid
+                            and type(code) is int and type(process.returncode) is int and process.returncode == code
+                            and proof.get("returncode") == code, "owned_groups_unconfirmed")
+            names = {"boot-device", "boot-status", "install-app", "install-runner",
+                     "authorize-runner-photos", "seed-sole-photo", "app-container", "runner-container"}
+            failed = [item for item in spawned if item.get("name") in names and item.get("primary_error")]
+            log_require(len(failed) == 1, "failed_device_command_unconfirmed")
+            command = failed[0]
+            args = command.get("args", [])
+            log_require(args[:2] == ["xcrun", "simctl"] and len(args) >= 4
+                        and args[3] == runner.device_id and command.get("post_command_accounting") is None
+                        and command["primary_error"] == record["primary_error"], "failed_device_command_unconfirmed")
+            finish_anchor = controller_clock_anchor(clock, wall_clock)
+            log_require(type(anchor) is dict and type(finish_anchor) is dict, "clock_window_unconfirmed")
+            for sample in (anchor, finish_anchor):
+                log_require(all(finite_number(sample.get(k)) for k in ("before", "wall", "after"))
+                            and 0 <= sample["after"] - sample["before"] <= 1, "clock_window_unconfirmed")
+            origin = (anchor["before"] + anchor["after"]) / 2
+            finish_origin = (finish_anchor["before"] + finish_anchor["after"]) / 2
+            log_require(abs((finish_anchor["wall"] - anchor["wall"]) - (finish_origin - origin)) <= 2,
+                        "clock_window_unconfirmed")
+            start, elapsed = command.get("start_elapsed"), command.get("elapsed_seconds")
+            limit, total = command.get("end_deadline_elapsed"), record.get("elapsed_seconds")
+            log_require(all(finite_number(v) for v in (runner.start, start, elapsed, limit, total))
+                        and 0 <= start < start + elapsed <= min(limit, total)
+                        and total <= POLICY["recovery_seconds"]
+                        and limit - start <= 300
+                        and runner.start <= anchor["before"] <= anchor["after"] <= runner.start + start
+                        and runner.start + total <= finish_anchor["before"], "clock_window_unconfirmed")
+            begin = anchor["wall"] + runner.start + start - origin
+            finish = begin + elapsed
+            date = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+0000")
+            row.update(command=command["name"], terminal_owned_groups=len(groups),
+                       window_start=dt.datetime.fromtimestamp(begin, dt.timezone.utc).isoformat(),
+                       window_end=dt.datetime.fromtimestamp(finish, dt.timezone.utc).isoformat())
+            discovery.check()
+            home = discovery.output / "controller-native-log-home"
+            home.mkdir(mode=0o700)
+            discovery.check()
+            log_require(alarm.end - clock() >= 10, "insufficient_observation_budget")
+            args = ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + str(home),
+                    "LANG=C", "LC_ALL=C", "/usr/bin/log", "show", "--style", "json", "--timezone", "UTC",
+                    "--no-pager", "--info", "--debug", "--start", date(math.floor(begin)),
+                    "--end", date(math.ceil(finish)), "--predicate", NATIVE_LOG_PREDICATE]
+            row["query_attempted"] = True
+            raw = discovery.command(args, "controller-native-log", 10, retain_output=False)
+            alarm.arm()
+            summary = sanitize_native_log(raw, begin, finish, discovery.check)
+            discovery.check()
+            row.update(summary, status="OBSERVED" if summary["signals"] else "NO_MATCHING_SIGNALS",
+                       complete=True, reason="complete_response")
+    except BaseException as error:
+        row.update(status="UNAVAILABLE", complete=False,
+                   reason=str(error) if isinstance(error, NativeLogUnavailable) else
+                   "interrupted" if not isinstance(error, Exception) else "query_or_parse_unavailable")
+    finally:
+        raw = None
+        # The old preflight context has ended; never rearm its expired timer.
+        discovery.alarm = parent_alarm
+
+
 def version(value):
     require(isinstance(value, str) and re.fullmatch(r"\d+\.\d+(?:\.\d+)?", value), "Invalid SDK/runtime version", Failure)
     return tuple(int(p) for p in value.split(".")) + ((0,) if value.count(".") == 1 else ())
@@ -942,6 +1075,7 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
     outer_end = start + 2100
     work, upload, runner, discovery = None, None, None, None
     context, primary, code = {}, None, 1
+    controller_anchor, execute_returned = None, False
     audit = IdentityAudit()
     try:
         with Alarm(start + 120, clock) as alarm:
@@ -1031,7 +1165,9 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
         require(outer_end - clock() >= 1980, "Insufficient full controller and retention budget", Deadline)
         controller.validate_grant(envelope["controller_grant"], now=controller.utc_now(), script_root=root)
         runner = HostedRecoveryRun(envelope["controller_grant"], clock=clock, disk_usage=disk_usage)
+        controller_anchor = controller_clock_anchor(clock)
         code = runner.execute()
+        execute_returned = True
         context["controller_exit_code"] = code
         context["primary_error"] = runner.record.get("primary_error") or runner.record.get("finalization_error")
         context["cleanup_errors"] = runner.record.get("cleanup_errors", [])
@@ -1045,6 +1181,15 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
         context["cleanup_errors"] = runner.record.get("cleanup_errors", context.get("cleanup_errors", []))
         if runner.record.get("resource_cap_crossing") is not None:
             context["resource_cap_crossing"] = runner.record["resource_cap_crossing"]
+        if discovery is not None:
+            try:
+                diagnose_controller_failure(discovery, runner, context, controller_anchor, outer_end,
+                                            execute_returned=execute_returned)
+            except BaseException:
+                context["controller_native_log"] = {"schema_version": 1, "status": "UNAVAILABLE",
+                                                    "complete": False, "native_cause": "UNKNOWN",
+                                                    "raw_text_retained": False, "query_attempted": False,
+                                                    "reason": "diagnostic_interrupted"}
     if discovery:
         context.setdefault("cleanup_errors", []).extend(discovery.cleanup_errors)
     if context.get("primary_error") or context.get("cleanup_errors"):

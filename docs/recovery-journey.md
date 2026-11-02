@@ -261,9 +261,14 @@ not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
 Opening the system Photos picker has one 30-second monotonic appearance window,
-starting after the single `import.photos` activation. The native existence wait
-receives only the remaining time, and a positive result returned at or after the
-deadline is rejected. The selector still requires a `Photo,` Image, followed by
+starting after the single `import.photos` activation. The first live existence
+probe runs on the active waiter's first run-loop turn. A negative query schedules
+the next probe one second after it returns, so native queries cannot overlap.
+Waiter teardown disables queued probes and cancels the pending timer. This avoids
+`waitForExistence`'s additional query after its timeout; an already active native
+query may still return late, and a positive result at or after the deadline is
+rejected. This is not a hard wall-clock cancellation of native work.
+The selector still requires a `Photo,` Image, followed by
 the existing exactly-one-photo, interaction and original-byte checks. There is
 no second picker launch or seed attempt, and the XCTest/controller limits do not
 increase. In run `41358495304`, PhotoKit had verified the sole fixture, but native
@@ -271,6 +276,15 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `41450416826`, two live existence queries completed without a match; the
+second took 26.7 seconds. The remote Photos view appeared late in that query.
+After the 30-second wait timed out, XCTest made another query and resolved the
+image approximately 13.3 seconds later. The deadline guard correctly rejected
+it before selection or OCR. Immediate polling removes the initial predicate
+delay and the wrapper's final query, but does not establish or repair the cause
+of the Photos service/AX latency. The live selector is retained: an earlier
+hosted run reached OCR even though `app.snapshot()` omitted the remote photo.
 
 
 In run `41249372436` the strict Photos selector found one `Photo,` Image, but
@@ -287,14 +301,32 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price. Each activation targets the trailing switch control in this
-English-only journey and waits at most ten seconds for its exact value to become
-`1`. It issues one tap, with no toggle retry. The later four-field observation,
-`Apply 2` check and selective-update artifact checks remain mandatory.
-Before activation, that exact point must lie inside the containing OCR Form's
-visible bounds, below its navigation bar and outside exposed navigation, tab-bar
-and keyboard frames and toolbar button bounds. An alert or unidentifiable form
-fails before tapping.
+model and price with one native `XCUIElement.tap()` per switch. The production
+row uses a separate visible localized label and the same bound native Toggle
+with `labelsHidden()`. The Toggle retains its original accessibility label;
+the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
+establish VoiceOver focus behavior, which requires separate validation.
+
+In this fixed English fixture, the native switch must have a narrow 40–80-point
+frame. Its entire frame must lie inside the containing OCR Form's visible bounds
+with a two-point inset, below its navigation bar, and must not intersect exposed
+navigation, tab-bar, keyboard or toolbar-button frames. An alert or
+unidentifiable form fails before tapping. XCTest chooses the native hit point;
+the recorded center is geometry evidence, not an instruction to tap that point.
+The test accepts the exact post-tap value `1` only within the original ten-second
+observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
+selective-update artifact checks remain mandatory.
+
+An isolated iOS 27.0 diagnostic using the production source at `fde75fa` exposed
+the original labeled Toggle as a 338×28-point row. Its one native tap at
+`(201, 362.3)` left Model unselected; a separate fresh-launch trailing tap at
+`(350, 362.3)` selected it. With only the label/control layout changed, the Toggle
+frame became 61×28 points. A fresh native tap at `(310, 353)` selected Model in
+the first post-tap snapshot, with the other three fields still unselected and
+`Apply 1` enabled. This demonstrates a concrete native target ambiguity and a
+successful narrow-control interaction. It does not establish the cause of
+hosted run `41438176940`, where a delivered trailing tap left the model at `0`,
+or replace full Recovery and layout acceptance.
 
 Toolbar obstruction checks use descendant button bounds. A local iOS 27.0 run
 on source `753be01` exposed an empty, transparent `Toolbar` spanning the underlying
@@ -302,13 +334,32 @@ item screen while the OCR sheet and its model switch were visibly unobscured.
 The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
-geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs and
+geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
+`activation=native_switch_tap`, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness
 and geometry through admission of the tap; a late observation cannot authorize
 an action. This avoids four independent remote property resolutions consuming
 the entire window. The exact post-activation value `1` remains required.
+
+The first readiness probe runs on the main run loop inside an active XCTest
+waiter, without the predicate expectation's initial polling delay. An unready
+probe schedules one later probe only after returning; probes cannot overlap.
+Leaving the waiter disables pending callbacks and invalidates the timer. The
+same ten-second window still covers fresh state, live hit testing, geometry and
+tap admission. Keeping the probe inside the waiter preserves
+[XCTest's nested query interruption](https://developer.apple.com/documentation/xctest/xctwaiter/result/interrupted);
+this is not a promise of termination at exactly 10.000
+seconds, because XCTest's watchdog has its own scheduling grace.
+
+In main run `41425796691`, the price switch was positively hittable immediately
+before readiness, but the first predicate probe started 1.032 seconds later.
+The application-root query then took 7.115 seconds, and the outer waiter
+interrupted the subsequent live switch query. Its returned `false` was not a
+completed negative hit test. Starting the fresh probe immediately removes the
+measured polling delay; it does not identify or eliminate the cause of slow
+native queries. Expired observations still fail without a tap or a retry.
 
 After the single tap returns, a separate ten-second monotonic window starts with
 an immediate application snapshot. State is read from exactly one switch with the
@@ -598,6 +649,36 @@ even when return/failure is known. These are wrapper spans, not per-entry timing
 or proof of what consumed the command budget. Error capture snapshots this pair
 in the command's `process_observation.resource_scan_at_failure` or the controller's
 `failure_resource_scan`, so later cleanup scans cannot rewrite the earlier state.
+
+The Recovery controller also retains fixed per-category `resource_scan_cost`
+aggregates in the owning command receipt, with a separate aggregate for work
+outside a command. These preserve counts and summed/maximum measured wall and
+controller user/system CPU time after the current/last spans have been replaced.
+Wall durations reuse the existing scan timestamps. Two optional
+`getrusage(RUSAGE_SELF)` observations bracket each `resource_size` invocation;
+there is no CPU observation per entry, new subprocess or additional receipt write.
+Missing, regressing or invalid measurements remain explicitly incomplete.
+Returned/failed counts describe the wrapped scan body before the final CPU probe.
+A control interruption in that probe can still fail the command after a recorded
+return; command errors, exit status and cleanup remain authoritative.
+
+These costs include cooperative pipe servicing and direct log validation nested
+inside that scan. Direct `tree_size` calls outside `resource_size` are not separate
+measured scans, so the aggregates are not total controller CPU usage. They do not
+measure native child CPU, host load, physical I/O or the reason a process waited.
+Counts and measurements never determine resource acceptance or scan cadence.
+The existing caps, full terminal accounting, ownership checks, deadlines and
+cleanup remain authoritative; diagnostic failure cannot replace an existing
+operational error.
+
+This instrumentation follows the historical diagnostic-source hosted run
+`41467655923`, where the first PhotosPicker presentation remained loading and
+its launch request preceded
+process creation by 20.740 seconds. Four completed resource-accounting sweeps
+overlapped the Photos wait and visited 83,849 metadata entries. That overlap does
+not establish contention or explain the delay. That historical packet retained no
+per-scan cost history or CPU measurements, so a passing instrumented journey
+alone would not prove a repair or qualify the ordinary release source.
 
 Each existing command receipt may add `process_observation`: the last observed
 selector state, stdout/stderr EOF only after an existing empty read/unregister,

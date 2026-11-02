@@ -2,6 +2,7 @@ import XCTest
 
 @MainActor
 final class LocalizationUITests: XCTestCase {
+    private let keyboardIntroductionAllowance = NameEntryKeyboardReadiness.ContinueAllowance()
     func testPreferredLanguagesAtLaunch() throws {
         continueAfterFailure = false
         for (preferences, expected) in [("(ru-RU,en-US)", "Добавить первый дом"), ("(en-GB,ru-RU)", "Add your first home"), ("(fr-FR,ru-RU,en-US)", "Добавить первый дом"), ("(fr-FR)", "Add your first home")] {
@@ -221,16 +222,79 @@ final class LocalizationUITests: XCTestCase {
         attachment.name = "ru-action-readiness-failure-accessibility"
         attachment.lifetime = .keepAlways
         add(attachment)
-        print("ROOM_LOCALIZATION_DIAGNOSTIC {\"phase\":\"action-readiness-failed\",\"caller_line\":\(line),\"exists\":\(observed["exists"] == true),\"enabled\":\(observed["enabled"] == true),\"hittable\":\(observed["hittable"] == true),\"ax_attachment_bytes\":\(data.count)}")
+        let exists = observed["exists"].map { String($0) } ?? "null"
+        let enabled = observed["enabled"].map { String($0) } ?? "null"
+        let hittable = observed["hittable"].map { String($0) } ?? "null"
+        print("ROOM_LOCALIZATION_DIAGNOSTIC {\"phase\":\"action-readiness-failed\",\"caller_line\":\(line),\"exists\":\(exists),\"enabled\":\(enabled),\"hittable\":\(hittable),\"ax_attachment_bytes\":\(data.count)}")
     }
 
     private func enterName(_ value: String, app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.textFields["entry.name"]
-        tap(field, file: file, line: line)
+        let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
+        let continueButton = introductions.element(boundBy: 0).buttons
+            .matching(NSPredicate(format: "label == %@", "Continue")).element(boundBy: 0)
+        let readiness = NameEntryKeyboardReadiness(allowance: keyboardIntroductionAllowance)
+        do {
+            try readiness.waitAndTapField(observe: {
+                var state = NameEntryKeyboardReadiness.Observation()
+                state.introductionCount = try readiness.perform { introductions.count }
+                guard state.introductionCount == 1 else { return state }
+                // The tutorial is a sibling of the keyboard. A root app
+                // snapshot can omit it, so query its exact observed owner.
+                let root = try readiness.perform { try introductions.element(boundBy: 0).snapshot() }
+                guard root.elementType == .other,
+                      root.identifier == NameEntryKeyboardReadiness.introductionID else { return state }
+                var pending: [any XCUIElementSnapshot] = [root]
+                var nodes: [any XCUIElementSnapshot] = []
+                while let node = pending.popLast() {
+                    _ = try readiness.perform { () }
+                    guard nodes.count < 256 else { throw NameEntryKeyboardReadiness.Failure.notReady }
+                    nodes.append(node)
+                    pending.append(contentsOf: node.children)
+                }
+                return NameEntryKeyboardReadiness.recognize(introductionCount: state.introductionCount,
+                    items: nodes.map { node in
+                        let kind: NameEntryKeyboardReadiness.Item.Kind = node.elementType == .button ? .button
+                            : node.elementType == .staticText ? .text : .other
+                        return .init(kind: kind, label: node.label, enabled: node.isEnabled)
+                    })
+            }, continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
+            entryNameCount: { app.textFields.matching(identifier: "entry.name").count },
+            fieldEnabled: { field.isEnabled }, fieldHittable: { field.isHittable }, tapField: { field.tap() },
+            evidence: { stage in
+                let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+                screenshot.name = "ru-keyboard-introduction-" + stage.rawValue
+                screenshot.lifetime = .keepAlways
+                self.add(screenshot)
+            })
+            emitNameEntryDiagnostic(readiness, result: "field_tapped")
+        } catch {
+            emitNameEntryDiagnostic(readiness, result: "readiness_failed")
+            var observed: [String: Bool] = [:]
+            if let count = readiness.entryNameCount { observed["exists"] = count > 0 }
+            if let enabled = readiness.fieldEnabled { observed["enabled"] = enabled }
+            if let hittable = readiness.fieldHittable { observed["hittable"] = hittable }
+            keepActionFailureEvidence(observed: observed, file: file, line: line)
+            XCTFail("Name entry or its exact keyboard introduction was not ready within the shared 10 seconds", file: file, line: line)
+            return
+        }
         field.typeText(value)
         tap(app.buttons["entry.save"])
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: field)
         XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed)
+    }
+
+    private func emitNameEntryDiagnostic(_ readiness: NameEntryKeyboardReadiness, result: String) {
+        var record = readiness.diagnostic
+        record["phase"] = "name-entry-keyboard-readiness"
+        record["result"] = result
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+              data.count <= 4_096, let text = String(data: data, encoding: .utf8) else { return }
+        print("ROOM_LOCALIZATION_DIAGNOSTIC " + text)
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "ru-name-entry-keyboard-readiness"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func openRecord(_ value: String, app: XCUIApplication) {

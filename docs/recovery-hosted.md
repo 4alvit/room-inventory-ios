@@ -502,3 +502,34 @@ reserve within 1,800 seconds. Each installation/export acknowledgement has one
 validation; late reads and non-completed waiters fail without advancing a barrier.
 These bounds are calibrated against observed hosted latency, and do not replace
 full successful Recovery acceptance.
+
+## Native device-setup failure diagnostics
+
+When the controller returns after a device-phase `simctl` failure before UI
+execution, the adapter may make one additional read of recorded native logs.
+The `controller_native_log` summary in `preflight/adapter-result.json` uses the
+same fixed CoreSimulator predicate, sanitization and byte/event limits described
+above. It covers the identified failed command's recorded time window, derived
+from checked wall-clock and monotonic anchors. Ambiguous timing or clock drift
+makes the observation unavailable.
+
+This path requires positive final ledger evidence that every spawned owned
+process group is absent and its leader reaped. It does not probe a possibly
+reused PID. Historical cleanup errors, including a permission error during a
+group probe, remain failures even when a later observation proves the group is
+absent. Observing native logs cannot establish that the Simulator shut down or
+turn an incomplete run into a successful one.
+
+The optional observation has a single 14-second absolute deadline, including
+preparation, its one ten-second `controller-native-log` command, process cleanup
+and parsing. It starts only when that whole allowance and the original
+180-second retention reserve fit inside the unchanged 2,100-second adapter
+envelope. No controller or native-command deadline is increased. A missing
+process-group proof, insufficient time, interrupted query or malformed response
+leaves an explicit unavailable summary while preserving the original failure.
+
+Raw messages and environment values are not retained. The observation does not
+retry the failed command, change permissions, restart a service or operate on a
+Simulator. Its `native_cause` remains `UNKNOWN` until the evidence supports a
+separate conclusion; a successful later run alone does not explain an earlier
+native timeout.

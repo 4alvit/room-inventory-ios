@@ -237,9 +237,8 @@ final class LocalizationUITests: XCTestCase {
         do {
             try readiness.waitAndTapField(observe: {
                 var state = NameEntryKeyboardReadiness.Observation()
-                state.entryNameCount = try readiness.perform { app.textFields.matching(identifier: "entry.name").count }
                 state.introductionCount = try readiness.perform { introductions.count }
-                guard state.entryNameCount == 1, state.introductionCount == 1 else { return state }
+                guard state.introductionCount == 1 else { return state }
                 // The tutorial is a sibling of the keyboard. A root app
                 // snapshot can omit it, so query its exact observed owner.
                 let root = try readiness.perform { try introductions.element(boundBy: 0).snapshot() }
@@ -253,13 +252,14 @@ final class LocalizationUITests: XCTestCase {
                     nodes.append(node)
                     pending.append(contentsOf: node.children)
                 }
-                return NameEntryKeyboardReadiness.recognize(entryNameCount: state.entryNameCount,
-                    introductionCount: state.introductionCount, items: nodes.map { node in
+                return NameEntryKeyboardReadiness.recognize(introductionCount: state.introductionCount,
+                    items: nodes.map { node in
                         let kind: NameEntryKeyboardReadiness.Item.Kind = node.elementType == .button ? .button
                             : node.elementType == .staticText ? .text : .other
                         return .init(kind: kind, label: node.label, enabled: node.isEnabled)
                     })
             }, continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
+            entryNameCount: { app.textFields.matching(identifier: "entry.name").count },
             fieldEnabled: { field.isEnabled }, fieldHittable: { field.isHittable }, tapField: { field.tap() },
             evidence: { stage in
                 let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -271,7 +271,7 @@ final class LocalizationUITests: XCTestCase {
         } catch {
             emitNameEntryDiagnostic(readiness, result: "readiness_failed")
             var observed: [String: Bool] = [:]
-            if let state = readiness.observation { observed["exists"] = state.entryNameCount > 0 }
+            if let count = readiness.entryNameCount { observed["exists"] = count > 0 }
             if let enabled = readiness.fieldEnabled { observed["enabled"] = enabled }
             if let hittable = readiness.fieldHittable { observed["hittable"] = hittable }
             keepActionFailureEvidence(observed: observed, file: file, line: line)

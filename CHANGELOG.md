@@ -25,6 +25,8 @@ acceptance and App Review remain separate requirements.
 
 ### Fixed
 
+- Give the final owned Simulator state query a bounded 26-second work allowance while retaining the outer deadline and mandatory cleanup proof.
+- Observe Recovery OCR selection immediately from one bounded snapshot after a single tap, avoiding delayed and repeated accessibility queries.
 - Bound backup-file reads before restoration, reject non-regular inputs, and keep cancelling the file picker silent.
 - Align automatic Simulator selection with the active SDK and support explicit runtime pins.
 - Stop before UI tests when app unit tests fail, preserving separate result bundles for both required phases.

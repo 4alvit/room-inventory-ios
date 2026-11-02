@@ -263,7 +263,7 @@ class OperationAllowanceTests(base.ControllerCase):
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
                          ["device-cleanup-before", "shutdown-owned-device", "device-final-state"])
-        self.assertEqual([c.kwargs["cap"] for c in calls], [24, 25, 15])
+        self.assertEqual([c.kwargs["cap"] for c in calls], [24, 25, 30])
         self.assertEqual(calls[1].args[0], ["xcrun", "simctl", "shutdown", run.device_id])
         self.assertEqual(calls[0].args[0], calls[2].args[0])
         self.assertEqual(calls[0].args[0], ["xcrun", "simctl", "list", "devices", "--json"])
@@ -343,6 +343,122 @@ class OperationAllowanceTests(base.ControllerCase):
                                      min(start + 24, run.outer_end) - run.start)
                     self.assertTrue(w.cleaned)
                 self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def cleanup_with_final_observation(self, work, *, states=("Shutdown",), final_udid=None):
+        with devices.World(module=C) as world:
+            run = world.run
+            world.clock.now = run.start + 880
+            run.guard = lambda force=False: run.tick()
+            emitted = set()
+
+            def read(fd):
+                name = run.record["commands"][-1]["name"]
+                if fd != 111 or name in emitted:
+                    return b""
+                emitted.add(name)
+                if name == "shutdown-owned-device":
+                    return b""
+                observations = ([{"udid": run.device_id, "state": "Booted"}]
+                                if name == "device-cleanup-before" else
+                                [{"udid": final_udid or run.device_id, "state": state}
+                                 for state in states])
+                return json.dumps({"devices": {"runtime": observations}}).encode()
+
+            def wait(timeout):
+                record = run.record["commands"][-1]
+                if record["name"] == "device-final-state":
+                    world.clock.now = run.start + record["start_elapsed"] + work
+                return 0
+
+            world.read_action = read
+            world.process.wait.side_effect = wait
+            run.cleanup()
+            return world
+
+    def test_single_final_inventory_accepts_slow_timely_shutdown_proof(self):
+        for work in (13, 20, 25.5):
+            with self.subTest(work=work):
+                world = self.cleanup_with_final_observation(work)
+                run = world.run
+                self.assertEqual([c["name"] for c in run.record["commands"]],
+                                 ["device-cleanup-before", "shutdown-owned-device", "device-final-state"])
+                final = run.record["commands"][-1]
+                self.assertEqual(final["args"], ["xcrun", "simctl", "list", "devices", "--json"])
+                self.assertEqual(final["end_deadline_elapsed"] - final["start_elapsed"], 30)
+                self.assertEqual(final["exit_code"], 0)
+                self.assertTrue(final["cleanup"]["success"])
+                self.assertTrue(final["cleanup"]["leader_reaped"])
+                self.assertEqual(final["cleanup"]["group_state"], "absent")
+                self.assertEqual(run.record["device_final_state"], "Shutdown")
+                self.assertEqual(run.record["cleanup_errors"], [])
+                self.assertEqual(sum(e[0] == "spawn" for e in world.events), 3)
+                self.assertEqual(run.phase_end, run.outer_end)
+                self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def test_final_inventory_rejects_exact_and_late_work_boundary_without_retry(self):
+        for work in (26, 26.5):
+            with self.subTest(work=work):
+                world = self.cleanup_with_final_observation(work)
+                run = world.run
+                final = run.record["commands"][-1]
+                self.assertEqual(final["primary_error"]["type"], "DeadlineFailure")
+                self.assertNotIn("device_final_state", run.record)
+                self.assertEqual([e["operation"] for e in run.record["cleanup_errors"]], ["final_state"])
+                self.assertEqual(sum(c["name"] == "device-final-state" for c in run.record["commands"]), 1)
+                self.assertTrue(final["cleanup"]["success"])
+                self.assertEqual(sum(e[0] == "spawn" for e in world.events), 3)
+
+    def test_final_inventory_still_requires_one_exact_owned_shutdown_state(self):
+        for states, udid in (((), None), (("Booted",), None),
+                             (("Shutdown", "Shutdown"), None),
+                             (("Shutdown",), "44444444-4444-4444-8444-444444444444")):
+            with self.subTest(states=states, udid=udid):
+                world = self.cleanup_with_final_observation(13, states=states, final_udid=udid)
+                run = world.run
+                self.assertEqual(run.record["commands"][-1]["exit_code"], 0)
+                self.assertNotIn("device_final_state", run.record)
+                self.assertEqual([e["operation"] for e in run.record["cleanup_errors"]], ["final_state"])
+                self.assertIn("shutdown not established", run.record["cleanup_errors"][0]["error"])
+                self.assertEqual(sum(e[0] == "spawn" for e in world.events), 3)
+
+    def test_final_inventory_insufficient_outer_admission_starts_no_child(self):
+        request = self.cleanup_requests()[2]
+        for remaining in (7.99, 4, 0):
+            with self.subTest(remaining=remaining), devices.World(module=C) as world:
+                run = world.run
+                run.cleanup_mode = True
+                run.phase_end = run.outer_end
+                world.clock.now = run.outer_end - remaining
+                run.guard = lambda force=False: run.tick()
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(*request.args, **request.kwargs)
+                self.assertEqual(run.record["commands"], [])
+                self.assertFalse(any(e[0] == "spawn" for e in world.events))
+                self.assertEqual(world.logs, [])
+
+    def test_observed_shutdown_does_not_clear_prior_group_permission_failure(self):
+        run = self.run_fixture(output=False)
+        run.device_id = "44444444-4444-4444-8444-444444444444"
+        observation = {"operation": "group_probe", "errno": 1, "error": "PermissionError"}
+        state = {"group_state": "absent", "leader_reaped": True, "returncode": 0,
+                 "observation_errors": [observation], "cleanup_deadline_monotonic": self.clock() + 4}
+        deadline = state["cleanup_deadline_monotonic"]
+        run.groups.append({"process": Mock(pid=43210, returncode=0), "state": state,
+                           "record": {"name": "prior-command", "cleanup": {"success": False}}})
+        prior_error = {"command": "prior-command", "operation": "owned_group", "error": "group_probe EPERM"}
+        run.record["cleanup_errors"].append(prior_error)
+        listing = json.dumps({"devices": {"runtime": [{"udid": run.device_id, "state": "Shutdown"}]}}).encode()
+        run.command = Mock(side_effect=[listing, listing])
+        with patch.object(C.os, "killpg", side_effect=AssertionError("No group signalling expected")) as signals:
+            run.cleanup()
+        self.assertEqual(run.record["device_final_state"], "Shutdown")
+        self.assertEqual([c.args[1] for c in run.command.call_args_list],
+                         ["device-cleanup-before", "device-final-state"])
+        self.assertIs(run.record["cleanup_errors"][0], prior_error)
+        self.assertFalse(run.record["cleanup_errors"][-1]["final_observation"]["success"])
+        self.assertEqual(state["observation_errors"], [observation])
+        self.assertEqual(state["cleanup_deadline_monotonic"], deadline)
+        signals.assert_not_called()
 
     def test_late_final_inventory_is_clipped_without_renewing_cleanup(self):
         requests = self.cleanup_requests()

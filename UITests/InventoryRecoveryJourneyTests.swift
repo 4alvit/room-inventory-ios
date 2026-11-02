@@ -450,10 +450,44 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
         app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: point.x - snapshot.frame.minX, dy: point.y - snapshot.frame.minY)).tap()
-        let selected = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND value == %@", "1"), object: toggle)
-        try ledger.require("OCR \(id) selected after one activation", XCTWaiter.wait(for: [selected], timeout: 10) == .completed)
-        try ledger.require("OCR \(id) selected value", actual: toggle.value as? String ?? "", expected: "1")
+        let selectionWindow = RecoveryOCRSelectionWindow()
+        var selectionObservation: RecoveryOCRSelectionWindow.Observation?
+        var selectionError: Error?
+        func observeSelection() -> Bool {
+            if selectionObservation?.selected == true || selectionError != nil { return true }
+            do {
+                selectionObservation = try selectionWindow.observe(identifier: "ocr.select.\(id)",
+                    snapshot: { try app.snapshot() }, children: { $0.children },
+                    isSwitch: { $0.elementType == .switch }, identifierOf: { $0.identifier },
+                    value: { $0.value as? String })
+                return selectionObservation?.selected == true
+            } catch {
+                selectionError = error
+                return true
+            }
+        }
+        // Probe immediately: XCTest's first predicate poll can spend a second
+        // of this allowance before starting an already slow remote query.
+        var selectionResult: XCTWaiter.Result?
+        if !observeSelection() {
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                observeSelection()
+            }, object: nil)
+            do {
+                selectionResult = XCTWaiter.wait(for: [selected], timeout: try selectionWindow.remaining())
+            } catch {
+                selectionError = error
+            }
+        }
+        let selectionTimely = (try? selectionWindow.remaining()) != nil
+        guard selectionTimely, selectionError == nil, selectionObservation?.selected == true,
+              selectionResult == nil || selectionResult == .completed else {
+            let observed = "matches=\(selectionObservation?.matches ?? 0); value=\(selectionObservation?.value ?? "<missing>"); wait=\(selectionResult.map { String(describing: $0) } ?? "immediate"); timely=\(selectionTimely); error=\(selectionError.map { String(describing: $0) } ?? "<none>")"
+            throw RecoveryJourneyFailure.assertion("OCR \(id) selected after one activation", observed,
+                "one selected target switch observed within 10 seconds")
+        }
+        try ledger.require("OCR \(id) selected after one activation", selectionObservation?.selected == true)
+        try ledger.require("OCR \(id) selected value", actual: selectionObservation?.value ?? "", expected: "1")
     }
 
     private func backToDashboard(_ app: XCUIApplication) throws {

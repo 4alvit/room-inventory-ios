@@ -310,6 +310,22 @@ and geometry through admission of the tap; a late observation cannot authorize
 an action. This avoids four independent remote property resolutions consuming
 the entire window. The exact post-activation value `1` remains required.
 
+After the single tap returns, a separate ten-second monotonic window starts with
+an immediate application snapshot. State is read from exactly one switch with the
+expected identifier in that immutable snapshot; absent, wrong-type, wrong-value
+or duplicate targets cannot establish selection. Snapshot traversal is bounded
+by the same deadline and 10,000-node limit. If selection has not appeared, later
+observations share the remaining window. No accepted observation triggers a
+second live value query, and neither polling nor an error renews the deadline.
+
+Run `41363140553` selected the model correctly, but its first post-tap predicate
+started 1.019 seconds into the ten-second window. Resolving `exists` consumed
+9.284 seconds; the selected value arrived 0.313 seconds after the deadline, and
+a second live value query was interrupted. The immediate snapshot removes that
+initial polling delay and repeated resolution. It does not establish the cause
+of slow accessibility queries or guarantee timely completion; observations at
+or beyond the deadline still fail, with the original diagnostic evidence retained.
+
 In CI run `40893851357`, attempt 1, the UI log first reported
 `OCR selection model: observed 0, expected 1` after the two generic element taps.
 Xcode then collected failure diagnostics; a 112,718,394-byte `system.logarchive/dsc`
@@ -784,14 +800,24 @@ Record free-space samples as discrete observations, not a claimed global
 minimum. A failed initial device-state query must still allow shutdown of the known
 owned UUID and a separate final-state query. The initial query allows up to 20
 seconds of child work plus four seconds for owned-process cleanup (24 total).
-Shutdown and final inventory retain their 25- and 15-second caps. These requested
-caps sum to 64 seconds; they are not a new cleanup reservation. Every command is
+Shutdown retains its 25-second cap. The final inventory allows 26 seconds of
+child work plus the same four seconds for owned-process cleanup (30 total).
+These requested caps sum to 79 seconds; they are not a new cleanup reservation. Every command is
 clipped to the original absolute outer deadline. If cleanup begins with only the
 60-second reserve and earlier commands consume their full caps, the final query
 has at most 11 seconds total (seven for child work), and may fail. Insufficient
 admission time prevents a new child; prior failures remain sticky. If cleanup
 cannot complete inside the remaining time, retain evidence, report the remaining
 exact owned resources and return nonzero without an automatic retry.
+
+In run `41363140553`, shutdown returned zero but the separate final inventory
+query exhausted its former 11-second work allowance with no output and no
+observed exit. More than 900 seconds remained in the outer budget. Its owned
+group cleanup recorded `EPERM`, so neither cleanup success nor final Shutdown
+was established. The larger final-query allowance addresses this local timeout
+without changing the outer deadline, repeating the query, or clearing that
+failure. A future run still has to prove timely exit, valid JSON for the exact
+owned device, Shutdown state and successful group cleanup.
 
 ## Offline evidence contract
 

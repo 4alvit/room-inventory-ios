@@ -1596,7 +1596,7 @@ class RecoveryRun:
                         pass
             try:
                 self.diagnostic_stage = "device_final_state"
-                listing = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-final-state", cap=15))
+                listing = json.loads(self.command(["xcrun", "simctl", "list", "devices", "--json"], "device-final-state", cap=30))
                 observed = [d for values in listing["devices"].values() for d in values if d.get("udid") == self.device_id]
                 require(len(observed) == 1 and observed[0].get("state") == "Shutdown", "Owned simulator shutdown not established")
                 self.record["device_final_state"] = "Shutdown"

@@ -65,6 +65,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         evidence = ledger
         activeRunID = sourceID
         app.launchEnvironment["UITEST_RUN_ID"] = sourceID
+        // Debug-only, bounded observations of touch routing and OCR selection.
+        // This does not change activation, waits or the acceptance assertions.
+        app.launchEnvironment["RECOVERY_TRACE_OCR"] = "1"
         app.launch()
 
         try checkpoint("source_empty_free", observations: emptyAndFree(app), app: app)

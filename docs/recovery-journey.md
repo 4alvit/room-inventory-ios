@@ -328,6 +328,38 @@ successful narrow-control interaction. It does not establish the cause of
 hosted run `41438176940`, where a delivered trailing tap left the model at `0`,
 or replace full Recovery and layout acceptance.
 
+Run `41458683460` passed Photos selection but failed after the native Model tap.
+Its snapshot exposed the same 61×28-point switch at `(309, 352)`. XCTest chose
+`(310, 353)` and synthesized one down/up pair there, 0.05 seconds apart; the
+application acknowledged the touch event. Ten subsequent snapshots still
+reported Model as `0`, and the failure image was identical to the pre-tap image.
+The controller completed ordinary failure cleanup and confirmed Shutdown. This
+establishes delivery to the application, not the leaf control's action or a
+selection-binding mutation. The successful isolated interaction at the same
+point means that proximity to the rounded corner alone does not establish the
+cause. The selection deadline and single-tap rule remain unchanged.
+
+The dedicated journey opts into Debug-only OCR interaction diagnostics with
+`RECOVERY_TRACE_OCR=1`. The app also requires `--ui-testing` and a valid UUID in
+`UITEST_RUN_ID`; Release builds contain no recorder or event hook. Records contain
+only result UUIDs, field identifiers, selection booleans, monotonic timestamps,
+and bounded touch/view metadata, never OCR strings, inventory contents or paths.
+The existing selection binding is forwarded once with its incoming SwiftUI
+Transaction, including unchanged-value writes. Separate observed-state records
+can show a subsequent reversion; they do not constitute a complete setter history.
+
+During the OCR sheet, a once-installed Debug event observer samples the existing
+touch/view association without another hit test or gesture recognizer. It forwards
+the original `UIApplication.sendEvent` once, then serializes the sampled metadata.
+An associated view is not proof that a particular control action ran. The recorder
+is bounded to 128 records and 8192 bytes per record, reserving space for state
+records after touch sampling reaches its own limit. Cap markers identify incomplete
+diagnostics; missing or undecodable records remain unknown, not evidence that no
+callback occurred. The static public `Logger.notice` messages are intended for the
+existing failure `system.logarchive`; their actual retention must be checked in the
+new run. Instrumentation can perturb timing and is diagnostic preparation, not a
+behavior fix or successful Recovery acceptance.
+
 Toolbar obstruction checks use descendant button bounds. A local iOS 27.0 run
 on source `753be01` exposed an empty, transparent `Toolbar` spanning the underlying
 item screen while the OCR sheet and its model switch were visibly unobscured.

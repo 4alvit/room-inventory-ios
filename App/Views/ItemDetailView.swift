@@ -217,7 +217,8 @@ struct OCRReviewSheet: View {
                                     Text(UIL10n.format("ocr.use.field", suggestion.field.title))
                                         .accessibilityHidden(true)
                                     Spacer()
-                                    Toggle(UIL10n.format("ocr.use.field", suggestion.field.title), isOn: $suggestion.isSelected)
+                                    Toggle(UIL10n.format("ocr.use.field", suggestion.field.title),
+                                           isOn: selectionBinding($suggestion.isSelected, field: suggestion.field))
                                         .labelsHidden()
                                         .accessibilityIdentifier("ocr.select.\(suggestion.field.rawValue)")
                                 }
@@ -244,6 +245,20 @@ struct OCRReviewSheet: View {
             }
             .disabled(applying).interactiveDismissDisabled(applying)
         }
+        #if DEBUG
+        .onAppear { RecoveryInteractionTrace.begin(result: result) }
+        .onDisappear { RecoveryInteractionTrace.end(resultID: result.id) }
+        .onChange(of: RecoveryInteractionTrace.Snapshot(result: result)) { previous, current in
+            RecoveryInteractionTrace.stateChanged(from: previous, to: current)
+        }
+        #endif
+    }
+    private func selectionBinding(_ binding: Binding<Bool>, field: OCRField) -> Binding<Bool> {
+        #if DEBUG
+        return RecoveryInteractionTrace.binding(binding, field: field, resultID: result.id)
+        #else
+        return binding
+        #endif
     }
     private func existing(_ field: OCRField) -> String? {
         switch field { case .model: item?.model; case .serialNumber: item?.serialNumber; case .purchasePrice: item?.purchasePrice; case .purchaseDate: item?.purchaseDate }

@@ -606,7 +606,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                try waitForDismissal(inline)
+                let dismissal = RecoveryFilesRenameReadiness()
+                try ledger.require("sheet dismissed", try dismissal.waitForDismissal { inlineFields.count })
             } else {
                 let field = app.alerts.textFields.firstMatch
                 try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))

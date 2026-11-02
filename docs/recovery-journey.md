@@ -415,8 +415,15 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. It waits for editing to end before opening the
-folder if Files has not already entered it. The earlier alert-based creation path remains available when that inline
+unique keyboard Done button. It observes the live inline-editor query until its
+count reaches zero within the original ten-second window, starting the first
+probe inside the active waiter without its initial polling delay. It does not
+resolve the disappearing indexed editor: in the main run `41519955826`, that
+native query remained pending even though Files reported navigation into the
+correct folder before the deadline. Interrupted, failed or late observations
+cannot prove dismissal. The exact folder title and open state remain required
+before saving. The journey opens the folder if Files has not already entered it.
+The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app

@@ -9,6 +9,7 @@
 - Start Photos appearance probes immediately inside the active waiter and cancel queued probes when it exits, retaining the 30-second deadline and rejecting late results.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
 - Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and the shared ten-second check for a unique, interactive field.
+- Observe Files inline-folder rename completion through the live editor query, retaining the ten-second deadline and exact destination-folder checks.
 
 ## [0.1.0] - development preview
 

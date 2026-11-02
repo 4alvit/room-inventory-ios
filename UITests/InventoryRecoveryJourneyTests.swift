@@ -127,8 +127,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
         let photos = app.images.matching(photoPredicate)
-        let photoAppeared = try photosAppearance.wait { remaining in
-            photos.firstMatch.waitForExistence(timeout: remaining)
+        let photoAppeared = try photosAppearance.waitForProbe {
+            photos.firstMatch.exists
         }
         try ledger.require("seeded photo appears", photoAppeared)
         ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)

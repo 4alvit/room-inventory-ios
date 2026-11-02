@@ -261,9 +261,14 @@ not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
 Opening the system Photos picker has one 30-second monotonic appearance window,
-starting after the single `import.photos` activation. The native existence wait
-receives only the remaining time, and a positive result returned at or after the
-deadline is rejected. The selector still requires a `Photo,` Image, followed by
+starting after the single `import.photos` activation. The first live existence
+probe runs on the active waiter's first run-loop turn. A negative query schedules
+the next probe one second after it returns, so native queries cannot overlap.
+Waiter teardown disables queued probes and cancels the pending timer. This avoids
+`waitForExistence`'s additional query after its timeout; an already active native
+query may still return late, and a positive result at or after the deadline is
+rejected. This is not a hard wall-clock cancellation of native work.
+The selector still requires a `Photo,` Image, followed by
 the existing exactly-one-photo, interaction and original-byte checks. There is
 no second picker launch or seed attempt, and the XCTest/controller limits do not
 increase. In run `41358495304`, PhotoKit had verified the sole fixture, but native
@@ -271,6 +276,15 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `41450416826`, two live existence queries completed without a match; the
+second took 26.7 seconds. The remote Photos view appeared late in that query.
+After the 30-second wait timed out, XCTest made another query and resolved the
+image approximately 13.3 seconds later. The deadline guard correctly rejected
+it before selection or OCR. Immediate polling removes the initial predicate
+delay and the wrapper's final query, but does not establish or repair the cause
+of the Photos service/AX latency. The live selector is retained: an earlier
+hosted run reached OCR even though `app.snapshot()` omitted the remote photo.
 
 
 In run `41249372436` the strict Photos selector found one `Photo,` Image, but

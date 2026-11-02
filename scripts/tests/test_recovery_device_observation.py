@@ -2,8 +2,9 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_recovery_device_service as device
 
@@ -68,7 +69,8 @@ class DeviceObservationTests(unittest.TestCase):
             raise AssertionError(scenario)
 
     def trace(self, scenario, *, enabled=True, module=C):
-        with device.World(module=module, count=200) as w:
+        with device.World(module=module, count=200) as w, patch.object(
+                module.resource, "getrusage", return_value=SimpleNamespace(ru_utime=1.0, ru_stime=1.0)) as cpu:
             self.configure(w, scenario)
             original_clock = w.clock
             def clock():
@@ -101,6 +103,7 @@ class DeviceObservationTests(unittest.TestCase):
                 "selector_close": w.selector.close.call_count, "register": w.selector.register.call_count,
                 "unregister": w.selector.unregister.call_count, "get_map": w.selector.get_map.call_count,
                 "wait": w.process.wait.call_count, "poll": w.process.poll.call_count,
+                "getrusage": cpu.call_count,
                 "stream_close": [s.close.call_count for s in w.logs],
                 "pipe_close": [w.process.stdout.close.call_count, w.process.stderr.close.call_count],
             }

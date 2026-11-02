@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import resource
 import selectors
 import shutil
 import signal
@@ -491,6 +492,7 @@ class RecoveryRun:
         self._device_scan_service = None
         self._device_scan_context = None
         self._active_xcresult_producer = None
+        self._scan_cost_command = None
         self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -584,6 +586,121 @@ class RecoveryRun:
     def observe_derived_service(self, target, event, *, index=None, value=None, preserve_primary=False):
         self.observe_scan_service(target, "derived_service", event, index=index, value=value,
                                   preserve_primary=preserve_primary)
+
+    def scan_cpu(self):
+        """Optional SELF CPU only; never sample children, paths or per-entry work."""
+        try:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            values = (usage.ru_utime, usage.ru_stime)
+            if all(type(value) in (int, float) and math.isfinite(value)
+                   and 0 <= value <= 2**53 for value in values):
+                return values
+        except BaseException as error:
+            if isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                raise
+        return None
+
+    def observe_scan_cost(self, event, *, category=None, bucket=None, span=None,
+                          cpu_start=None, cpu_end=None, failed=False, preserve_primary=False):
+        """Fixed aggregates; supplied wall spans retain their existing clock calls.
+
+        Costs include cooperative service and its nested direct log validation.
+        Direct tree_size calls are not separately measured by these aggregates.
+        Missing or saturated observations never authorize application progress.
+        """
+        try:
+            if event == "start":
+                target = self._scan_cost_command if self._scan_cost_command is not None else self.record
+                if "resource_scan_cost" not in target:
+                    target["resource_scan_cost"] = {
+                        "scope": "resource_size_inclusive",
+                        "direct_tree_size": "not_separately_measured",
+                        "categories": {name: {
+                            "started": 0, "returned": 0, "failed": 0,
+                            "wall_measured": 0, "wall_missing": 0,
+                            "cpu_measured": 0, "cpu_missing": 0,
+                            "wall_seconds": {"sum": 0.0, "max": 0.0},
+                            "self_user_seconds": {"sum": 0.0, "max": 0.0},
+                            "self_system_seconds": {"sum": 0.0, "max": 0.0},
+                            "capture_incomplete": False, "saturated": False,
+                        } for name in sorted(SCAN_CATEGORIES)},
+                        "capture_incomplete": False,
+                    }
+                aggregate = target["resource_scan_cost"]
+                if category not in SCAN_CATEGORIES:
+                    aggregate["capture_incomplete"] = True
+                    return None
+                bucket = aggregate["categories"][category]
+
+            if bucket is None:
+                return None
+
+            def increment(key):
+                limit = 2**31 - 1
+                value = bucket[key]
+                require(type(value) is int and 0 <= value <= limit, "Invalid scan cost count")
+                if value == limit:
+                    bucket["saturated"] = bucket["capture_incomplete"] = True
+                else:
+                    bucket[key] = value + 1
+
+            def seconds(key, value):
+                limit = 86400.0
+                stats = bucket[key]
+                require(all(type(v) in (int, float) and math.isfinite(v) and 0 <= v <= limit
+                            for v in (value, stats["sum"], stats["max"])), "Invalid scan cost duration")
+                if stats["sum"] + value > limit:
+                    bucket["saturated"] = bucket["capture_incomplete"] = True
+                stats["sum"] = round(min(limit, stats["sum"] + value), 6)
+                stats["max"] = round(max(stats["max"], value), 6)
+
+            if event == "start":
+                increment("started")
+                return bucket
+            require(event == "finish", "Invalid scan cost event")
+            increment("failed" if failed else "returned")
+            wall = span.get("duration_seconds") if type(span) is dict else None
+            if type(wall) in (int, float) and math.isfinite(wall) and 0 <= wall <= 86400:
+                seconds("wall_seconds", wall)
+                increment("wall_measured")
+            else:
+                increment("wall_missing")
+                bucket["capture_incomplete"] = True
+            if (cpu_start is not None and cpu_end is not None
+                    and all(end >= start and end - start <= 86400
+                            for start, end in zip(cpu_start, cpu_end))):
+                seconds("self_user_seconds", cpu_end[0] - cpu_start[0])
+                seconds("self_system_seconds", cpu_end[1] - cpu_start[1])
+                increment("cpu_measured")
+            else:
+                increment("cpu_missing")
+                bucket["capture_incomplete"] = True
+        except BaseException as error:
+            try:
+                if bucket is not None:
+                    bucket["capture_incomplete"] = True
+            except BaseException as secondary:
+                if (not preserve_primary and not isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))
+                        and isinstance(secondary, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                    raise
+            if not preserve_primary and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                raise
+        return bucket
+
+    def finish_scan_cost(self, bucket, span, cpu_start, *, failed, preserve_primary):
+        # Always attempt the second CPU sample, even when entry/work failed.
+        cpu_end, control = None, None
+        try:
+            cpu_end = self.scan_cpu()
+        except BaseException as error:
+            control = error
+        try:
+            self.observe_scan_cost("finish", bucket=bucket, span=span, cpu_start=cpu_start,
+                                   cpu_end=cpu_end, failed=failed,
+                                   preserve_primary=preserve_primary or control is not None)
+        finally:
+            if control is not None and not preserve_primary:
+                raise control
 
     def observe_device_service(self, target, event, *, index=None, value=None, preserve_primary=False):
         self.observe_scan_service(target, "device_service", event, index=index, value=value,
@@ -839,7 +956,33 @@ class RecoveryRun:
         self.tick()
 
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
-        span = self.observe_runtime("scan_start", value=category)
+        bucket, span, cpu_start, primary = None, None, None, None
+        try:
+            cpu_start = self.scan_cpu()
+            bucket = self.observe_scan_cost("start", category=category)
+            span = self.observe_runtime("scan_start", value=category)
+            return self._resource_size(category, root, cap, span, cap_metric=cap_metric, **kwargs)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            preserve = primary is not None and not isinstance(
+                primary, (_DeviceScanDeferred, _DerivedScanDeferred))
+            try:
+                self.finish_scan_cost(bucket, span, cpu_start, failed=primary is not None,
+                                      preserve_primary=preserve)
+            except BaseException as error:
+                try:
+                    if bucket is not None:
+                        bucket["capture_incomplete"] = True
+                except BaseException as secondary:
+                    if (not preserve and not isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))
+                            and isinstance(secondary, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                        raise
+                if not preserve and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                    raise
+
+    def _resource_size(self, category, root, cap, span, *, cap_metric, **kwargs):
         try:
             require("vanished_path_check" not in kwargs and "entry_observer" not in kwargs,
                     "Resource validation cannot be overridden", ConfigurationFailure)
@@ -977,6 +1120,15 @@ class RecoveryRun:
         write_json(self.output / "result.json", self.record)
 
     def command(self, args, name, *, cap=60, on_poll=None, allowed_codes=(0,), xcresult_producer=False):
+        previous = self._scan_cost_command
+        self._scan_cost_command = None  # Admission guard belongs to outside-command accounting.
+        try:
+            return self._command(args, name, cap=cap, on_poll=on_poll, allowed_codes=allowed_codes,
+                                 xcresult_producer=xcresult_producer)
+        finally:
+            self._scan_cost_command = previous
+
+    def _command(self, args, name, *, cap, on_poll, allowed_codes, xcresult_producer):
         """One owned process group, bounded pipe draining, sticky cleanup result."""
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
@@ -1014,6 +1166,7 @@ class RecoveryRun:
                   "child_completed_elapsed": None, "cleanup_completed_elapsed": None,
                   "post_command_accounting": None}
         self.record["commands"].append(record)
+        self._scan_cost_command = record
         self.flush()
         buffers, streams = [bytearray(), bytearray()], []
         process, entry, primary = None, None, None

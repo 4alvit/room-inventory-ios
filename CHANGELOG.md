@@ -8,6 +8,7 @@
 - Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
 - Start Photos appearance probes immediately inside the active waiter and cancel queued probes when it exits, retaining the 30-second deadline and rejecting late results.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
+- Handle the identified iOS keyboard introduction during Russian name-entry UI tests with one real Continue action and a bounded check that the form becomes interactive.
 
 ## [0.1.0] - development preview
 

@@ -62,6 +62,18 @@ edit / relaunch / export. It never edits global simulator language settings.
 Existing English iPad tests expect localized display dates and unchanged raw
 editor input. No notification extension or notification scheduling exists here.
 
+On a fresh Simulator, the system's first-use keyboard introduction can cover the
+name form. The name-entry test recognizes its observed
+`UIContinuousPathIntroductionView` container, exact introduction text and unique
+Continue button, together with the expected `entry.name` field. It permits one
+real Continue tap per test case, then requires the introduction to disappear and
+the field to be enabled and hittable before tapping and typing. Recognition,
+optional evidence, dismissal and field-tap admission share one ten-second
+monotonic window. Ambiguous or unrecognized prompts do not authorize dismissal.
+The test records whether it observed and dismissed the introduction; a run where
+it never appears validates only the ordinary path. Keyboard preferences remain
+unchanged, and the full create, edit, relaunch and CSV-export assertions still run.
+
 Apple references: [bundle language matching](https://developer.apple.com/documentation/foundation/bundle/preferredlocalizations),
 [Vision language detection](https://developer.apple.com/documentation/vision/vnrecognizetextrequest/automaticallydetectslanguage),
 [exported file type descriptions](https://developer.apple.com/documentation/UniformTypeIdentifiers/defining-file-and-data-types-for-your-app).

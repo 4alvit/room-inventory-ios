@@ -5,6 +5,7 @@
 - Update related CI action pins together and group future Dependabot action updates.
 - Collect bounded, redacted native diagnostics when Recovery device setup fails before UI execution, preserving the original failure and cleanup evidence.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.
+- Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
 
 ## [0.1.0] - development preview
 

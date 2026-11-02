@@ -213,8 +213,14 @@ struct OCRReviewSheet: View {
                     Section(UIL10n.text("Suggested values — select to apply")) {
                         ForEach($result.suggestions) { $suggestion in
                             VStack(alignment: .leading, spacing: 8) {
-                                Toggle(UIL10n.format("ocr.use.field", suggestion.field.title), isOn: $suggestion.isSelected)
-                                    .accessibilityIdentifier("ocr.select.\(suggestion.field.rawValue)")
+                                HStack {
+                                    Text(UIL10n.format("ocr.use.field", suggestion.field.title))
+                                        .accessibilityHidden(true)
+                                    Spacer()
+                                    Toggle(UIL10n.format("ocr.use.field", suggestion.field.title), isOn: $suggestion.isSelected)
+                                        .labelsHidden()
+                                        .accessibilityIdentifier("ocr.select.\(suggestion.field.rawValue)")
+                                }
                                 TextField(suggestion.field.title, text: $suggestion.value).textInputAutocapitalization(.never).autocorrectionDisabled()
                                     .accessibilityIdentifier("ocr.value.\(suggestion.field.rawValue)")
                                 if let old = existing(suggestion.field), !old.isEmpty { Text(UIL10n.format("ocr.current.value", old)).font(.caption).foregroundStyle(.secondary) }

@@ -403,10 +403,10 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         guard let observation else {
             throw RecoveryJourneyFailure.assertion("OCR \(id) readiness observation", "missing", "completed")
         }
-        // A SwiftUI labeled switch can expose the whole row as its frame.
-        // This English-only journey activates the trailing switch itself, not
-        // the center of that label/row. Never retry a toggle: a second tap can
-        // undo a delayed first activation and hide a real interaction failure.
+        // The visible label is separate from the native switch, whose frame
+        // must stay narrow in this fixed English fixture. Let XCTest choose its
+        // native hit point. Never retry a toggle: a second tap can undo a delayed
+        // first activation and hide a real interaction failure.
         let (snapshot, nodes, switches, navigation) = observation
         try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
             && switches.first?.form != nil && navigation.count == 1)
@@ -414,7 +414,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             throw RecoveryJourneyFailure.assertion("OCR form geometry", "missing", "identified")
         }
         let frame = target.element.frame
-        let point = CGPoint(x: frame.maxX - 20, y: frame.midY)
+        let center = CGPoint(x: frame.midX, y: frame.midY)
         let viewport = form.frame.intersection(snapshot.frame).insetBy(dx: 2, dy: 2)
         let chrome = nodes.filter {
             [.navigationBar, .tabBar, .keyboard].contains($0.element.elementType)
@@ -425,19 +425,20 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             throw RecoveryJourneyFailure.assertion("OCR geometry chrome bound", "exceeded", "64 controls / 16 toolbars")
         }
         // Hittable alone proves only that some point can receive input. The
-        // actual trailing point must be in this OCR form, below its navigation
+        // entire switch frame must be in this OCR form, below its navigation
         // bar, and outside keyboards, tab bars and toolbar buttons. SwiftUI can
         // expose a transparent, full-screen Toolbar container with no controls;
         // that semantic container's bounds do not describe a painted obstruction.
-        let covered = chrome.contains { !$0.element.frame.isEmpty && $0.element.frame.contains(point) }
-        let checks = ["switch_size": frame.width >= 40 && frame.height >= 20,
-                      "inside_form": !viewport.isNull && !viewport.isEmpty && viewport.contains(point),
-                      "below_navigation": point.y > navigation.element.frame.maxY,
+        let covered = chrome.contains { !$0.element.frame.isEmpty && $0.element.frame.intersects(frame) }
+        let checks = ["switch_size": frame.width >= 40 && frame.width <= 80 && frame.height >= 20,
+                      "inside_form": !viewport.isNull && !viewport.isEmpty && viewport.contains(frame),
+                      "below_navigation": frame.minY > navigation.element.frame.maxY,
                       "outside_chrome": !covered,
                       "no_alert": !nodes.contains { $0.element.elementType == .alert }]
         func rectangle(_ frame: CGRect) -> [CGFloat] { [frame.minX, frame.minY, frame.width, frame.height] }
         let geometry: [String: Any] = ["field": id, "basis": "single_application_snapshot",
-            "point": [point.x, point.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
+            "activation": "native_switch_tap", "checked_region": "entire_switch_frame",
+            "center": [center.x, center.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
             "navigation": rectangle(navigation.element.frame), "checks": checks,
             "chrome": chrome.map { ["type": $0.element.elementType.rawValue, "frame": rectangle($0.element.frame)] },
             "toolbar_containers": toolbars.map { rectangle($0.element.frame) }]
@@ -445,10 +446,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
            data.count <= 16_384, let text = String(data: data, encoding: .utf8) {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
-        try ledger.require("OCR \(id) switch point is unobscured", checks.values.allSatisfy { $0 })
+        try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
         _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
-        app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: point.x - snapshot.frame.minX, dy: point.y - snapshot.frame.minY)).tap()
+        toggle.tap()
         let selectionWindow = RecoveryOCRSelectionWindow()
         var selectionObservation: RecoveryOCRSelectionWindow.Observation?
         var selectionError: Error?

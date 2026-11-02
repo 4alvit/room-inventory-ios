@@ -287,14 +287,32 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price. Each activation targets the trailing switch control in this
-English-only journey and waits at most ten seconds for its exact value to become
-`1`. It issues one tap, with no toggle retry. The later four-field observation,
-`Apply 2` check and selective-update artifact checks remain mandatory.
-Before activation, that exact point must lie inside the containing OCR Form's
-visible bounds, below its navigation bar and outside exposed navigation, tab-bar
-and keyboard frames and toolbar button bounds. An alert or unidentifiable form
-fails before tapping.
+model and price with one native `XCUIElement.tap()` per switch. The production
+row uses a separate visible localized label and the same bound native Toggle
+with `labelsHidden()`. The Toggle retains its original accessibility label;
+the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
+establish VoiceOver focus behavior, which requires separate validation.
+
+In this fixed English fixture, the native switch must have a narrow 40–80-point
+frame. Its entire frame must lie inside the containing OCR Form's visible bounds
+with a two-point inset, below its navigation bar, and must not intersect exposed
+navigation, tab-bar, keyboard or toolbar-button frames. An alert or
+unidentifiable form fails before tapping. XCTest chooses the native hit point;
+the recorded center is geometry evidence, not an instruction to tap that point.
+The test accepts the exact post-tap value `1` only within the original ten-second
+observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
+selective-update artifact checks remain mandatory.
+
+An isolated iOS 27.0 diagnostic using the production source at `fde75fa` exposed
+the original labeled Toggle as a 338×28-point row. Its one native tap at
+`(201, 362.3)` left Model unselected; a separate fresh-launch trailing tap at
+`(350, 362.3)` selected it. With only the label/control layout changed, the Toggle
+frame became 61×28 points. A fresh native tap at `(310, 353)` selected Model in
+the first post-tap snapshot, with the other three fields still unselected and
+`Apply 1` enabled. This demonstrates a concrete native target ambiguity and a
+successful narrow-control interaction. It does not establish the cause of
+hosted run `41438176940`, where a delivered trailing tap left the model at `0`,
+or replace full Recovery and layout acceptance.
 
 Toolbar obstruction checks use descendant button bounds. A local iOS 27.0 run
 on source `753be01` exposed an empty, transparent `Toolbar` spanning the underlying
@@ -302,7 +320,8 @@ item screen while the OCR sheet and its model switch were visibly unobscured.
 The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
-geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs and
+geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
+`activation=native_switch_tap`, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness

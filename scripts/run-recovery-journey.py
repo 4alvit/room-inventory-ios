@@ -495,6 +495,8 @@ class RecoveryRun:
         self.owns_output = False
         self.device_id = None
         self.collector = None
+        self._offline_collection = None
+        self._offline_collection_attempted = False
         self.groups = []
         self.last_resource_check = float("-inf")
         self.last_samples = []
@@ -1079,23 +1081,32 @@ class RecoveryRun:
                 "Stale xcresult producer binding", ConfigurationFailure)
         return ACTIVE_XCRESULT_CAP, "producing"
 
-    def guard(self, force=False):
+    def guard(self, force=False, *, full_resources=False):
         self.tick()
         # Cleanup still enforces time but must remain possible after disk abort.
         if self.cleanup_mode:
             return
+        if self._offline_collection is not None:
+            self.validate_offline_collection()
         free = min(self.disk_usage(self.output.parent).free, self.disk_usage(self.device_base).free)
         require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
         if force or self.clock() - self.last_resource_check >= 2:
             original_limit, original_lifecycle = self.original_xcresult_budget()
             sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
-                      "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,)),
-                      # DerivedData is a live disk budget, not a logical copy/input bound.
-                      # Keep logical sizes visible without charging sparse reservations.
-                      "derived_data": self.resource_size("derived_data", self.derived, DERIVED_CAP,
-                                                         cap_metric="allocated")}
-            if self.device_root:
-                sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
+                      "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,))}
+            # Only the explicitly sealed, shutdown collection scope may omit
+            # repeated traversal of these roots. No cached size is called fresh.
+            # Entry and exit always request the full uncached census.
+            if self._offline_collection is None or full_resources:
+                sample["derived_data"] = self.resource_size("derived_data", self.derived, DERIVED_CAP,
+                                                            cap_metric="allocated")
+                if self.device_root:
+                    sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
+            else:
+                sample["sealed_offline_resources"] = {
+                    "entry_sample": self._offline_collection["entry_sample"],
+                    "live_input_seal_sha256": self.collector.seal_sha256,
+                    "omitted_categories": ["derived_data", "device"]}
             for name, root, limit in [
                 ("original_xcresult", self.output / "original.xcresult", original_limit),
                 ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP),
@@ -1145,6 +1156,20 @@ class RecoveryRun:
         """One owned process group, bounded pipe draining, sticky cleanup result."""
         self.diagnostic_stage = "precommand"
         require(self.command_deadline is None, "Nested commands are unsupported", ConfigurationFailure)
+        if self._offline_collection is not None and not self.cleanup_mode:
+            self.validate_offline_collection()
+            text_args = [str(arg) for arg in args]
+            copy = str(self.collector.xc_copy)
+            reader = (name.startswith("xcresult-") and cap == 40 and
+                      text_args in [["xcrun", "xcresulttool", "get", "test-results", kind,
+                                     "--path", copy, "--compact"] for kind in ("summary", "tests")]
+                      + [["xcrun", "xcresulttool", "export", "attachments", "--path", copy,
+                          "--output-path", str(self.collector.root / "xcresult/attachments")]])
+            verifier = (name == "verify-artifacts" and cap == 30 and text_args ==
+                        [sys.executable, str(self.repo / "scripts/verify-recovery-journey.py"),
+                         str(self.collector.root / "collection.json"), "--expected-commit", self.grant["source_commit"]])
+            require((reader or verifier) and on_poll is None and not xcresult_producer and allowed_codes == (0,),
+                    "Unexpected command in sealed offline collection", ConfigurationFailure)
         require(self._active_xcresult_producer is None and type(xcresult_producer) is bool,
                 "Stale or invalid xcresult producer", ConfigurationFailure)
         if xcresult_producer:
@@ -1527,8 +1552,9 @@ class RecoveryRun:
                     self.observe_derived_service(record, "barrier_reached")
                     if device_root is not None:
                         self.observe_device_service(record, "barrier_reached")
-                    # Group absence does not make simulator/DerivedData roots
-                    # quiescent. Always complete a fresh, uncached full guard.
+                    # Fresh accounting is mandatory. Only an explicitly sealed
+                    # offline scope omits device/DerivedData here; its entry and
+                    # exit separately require uncached full censuses.
                     self.guard(force=True)
                     self.tick()
                     self.observe_derived_service(record, "barrier_completed")
@@ -1679,9 +1705,111 @@ class RecoveryRun:
                   "config_sha256": sha(json.dumps(self.grant, sort_keys=True).encode()), "xctestrun_sha256": self.xctestrun_sha,
                   "simulator_udid": self.device_id, "app_bundle_id": BUNDLE, "runner_bundle_id": RUNNER_BUNDLE}
         (self.output / "evidence").mkdir()
-        self.collector = Collector(config, guard=self.guard,
-                                   run=lambda args: self.command(["xcrun", "xcresulttool", *args], "xcresult-" + str(len(self.record["commands"])), cap=40))
+        self.collector = Collector(config, guard=self.guard, run=self.read_collected_result)
         self.collector.begin_installation()
+
+    def validate_offline_collection(self):
+        scope = self._offline_collection
+        require(scope is not None and self.record.get("phase") == "collect"
+                and not self.cleanup_mode and self.phase_end == scope["phase_deadline"]
+                and self.collector is scope["collector"]
+                and self.collector.seal_sha256 == scope["seal_sha256"],
+                "Invalid sealed offline collection scope", ConfigurationFailure)
+        self.validate_device_resource_root(self.device_root, scope["device_binding"])
+        self.validate_derived_resource_root(self.derived, scope["derived_binding"])
+        current_roots = (self.output, self.collector.root, self.collector.xc_original, self.collector.xc_copy)
+        require(tuple(path for path, _ in scope["roots"]) == current_roots,
+                "Sealed collection path rebound", ConfigurationFailure)
+        for path, expected in scope["roots"]:
+            require(owned_directory_identity(path) == expected, "Sealed collection root replaced",
+                    ResourceAccountingFailure)
+        self.tick()
+
+    def begin_offline_collection(self, copied):
+        require(not self._offline_collection_attempted and self._offline_collection is None,
+                "Offline collection already attempted", ConfigurationFailure)
+        self._offline_collection_attempted = True
+        require(self.record.get("phase") == "collect" and self.command_deadline is None,
+                "Offline collection requires collection phase", ConfigurationFailure)
+        ui = [entry for entry in self.record["commands"] if entry["name"] == "ui-test"]
+        require(len(ui) == 1 and ui[0].get("exit_code") == 0 and ui[0].get("primary_error") is None
+                and ui[0].get("cleanup", {}).get("success") is True
+                and ui[0]["cleanup"].get("group_state") == "absent"
+                and ui[0]["cleanup"].get("leader_reaped") is True
+                and not self.record["cleanup_errors"]
+                and all(entry["state"].get("group_state") == "absent"
+                        and entry["state"].get("leader_reaped") is True for entry in self.groups),
+                "UI process group not successfully closed")
+        require(Path(copied) == self.collector.xc_copy and self.collector.live_seal is not None,
+                "Offline collection requires this collector's sealed inputs", ConfigurationFailure)
+        self.validate_device_resource_root(self.device_root, self._owned_device_identity)
+        self.validate_derived_resource_root(self.derived, self._owned_derived_identity)
+        self.collector.verify_live_seal()
+        self.record["offline_collection"] = {"status": "SHUTTING_DOWN", "device": self.device_id,
+            "device_root": str(self.device_root), "live_input_seal_sha256": self.collector.seal_sha256}
+        self.command(["xcrun", "simctl", "shutdown", self.device_id], "collection-shutdown", cap=25)
+        raw = self.command(["xcrun", "simctl", "list", "devices", "--json"], "collection-device-state", cap=24)
+        states = [d for values in json.loads(raw)["devices"].values() for d in values
+                  if d.get("udid") == self.device_id]
+        require(len(states) == 1 and states[0].get("state") == "Shutdown",
+                "Owned Simulator shutdown not confirmed before collection")
+        self.collector.verify_live_seal()
+        self.guard(force=True, full_resources=True)
+        self._offline_collection = {"collector": self.collector, "seal_sha256": self.collector.seal_sha256,
+            "device_binding": self._owned_device_identity, "derived_binding": self._owned_derived_identity,
+            "roots": [(path, owned_directory_identity(path)) for path in
+                      (self.output, self.collector.root, self.collector.xc_original, Path(copied))],
+            "entry_sample": len(self.last_samples) - 1, "reader_index": 0, "phase_deadline": self.phase_end}
+        self.validate_offline_collection()
+        self.record["offline_collection"].update(status="READING", shutdown_state="Shutdown",
+            entry_sample=self._offline_collection["entry_sample"])
+        self.flush()
+
+    def read_collected_result(self, args):
+        self.validate_offline_collection()
+        scope = self._offline_collection
+        copy = str(self.collector.xc_copy)
+        allowed = [["get", "test-results", "summary", "--path", copy, "--compact"],
+                   ["get", "test-results", "tests", "--path", copy, "--compact"],
+                   ["export", "attachments", "--path", copy, "--output-path",
+                    str(self.collector.root / "xcresult/attachments")]]
+        index = scope["reader_index"]
+        require(index < len(allowed) and args == allowed[index], "Unexpected or repeated offline reader",
+                ConfigurationFailure)
+        scope["reader_index"] += 1
+        return self.command(["xcrun", "xcresulttool", *args],
+                            "xcresult-" + str(len(self.record["commands"])), cap=40)
+
+    def finish_offline_collection(self):
+        # Each independent final check is attempted. A failed content check must
+        # not silently skip the full device/DerivedData budget check, or vice versa.
+        errors = []
+        final_sample = None
+        def final_census():
+            nonlocal final_sample
+            self.guard(force=True, full_resources=True)
+            final_sample = len(self.last_samples) - 1
+        for check in (self.validate_offline_collection, self.collector.verify_live_seal,
+                      lambda: require(self.collector._snapshot(self.collector.xc_original,
+                          self.collector.xc_limit, self.collector.xc_files) == self.collector.xc_before,
+                          "Original xcresult changed after collection"),
+                      final_census):
+            try:
+                check()
+            except BaseException as error:
+                errors.append(error)
+        self.record["offline_collection"].update(status="FAILED" if errors else "CLOSED",
+            final_sample=final_sample,
+            final_errors=[f"{type(e).__name__}: {e}" for e in errors])
+        self._offline_collection = None
+        try:
+            self.flush()
+        except BaseException as error:
+            errors.append(error)
+            self.record["offline_collection"].update(status="FAILED",
+                final_errors=[f"{type(e).__name__}: {e}" for e in errors])
+        if errors:
+            raise errors[0]
 
     def test_and_collect(self):
         self.phase("test")
@@ -1710,17 +1838,31 @@ class RecoveryRun:
             self.phase("collect")
             copied = self.collector.capture_xcresult(self.xcresult)
             if test_error is None:
-                collected = self.collector.collect(copied)
-                self.record["collection"] = str(collected)
-                self.command([sys.executable, self.repo / "scripts/verify-recovery-journey.py", collected,
-                              "--expected-commit", self.grant["source_commit"]], "verify-artifacts", cap=30)
+                self.collector.seal_live_inputs()
+                self.begin_offline_collection(copied)
+                collection_error = None
+                try:
+                    collected = self.collector.collect(copied)
+                    self.record["collection"] = str(collected)
+                    self.command([sys.executable, self.repo / "scripts/verify-recovery-journey.py", collected,
+                                  "--expected-commit", self.grant["source_commit"]], "verify-artifacts", cap=30)
+                except BaseException as error:
+                    collection_error = error
+                try:
+                    self.finish_offline_collection()
+                except BaseException as error:
+                    if collection_error is None:
+                        raise
+                    self.record["collection_finalization_error"] = {"type": type(error).__name__, "message": str(error)}
+                if collection_error is not None:
+                    raise collection_error
         except BaseException as error:
             if test_error is None:
                 raise
             self.record["preservation_error"] = {"type": type(error).__name__, "message": str(error)}
         if test_error:
             raise test_error
-        self.guard(force=True)
+        self.tick()  # finish_offline_collection already performed the final full census.
 
     def cleanup(self):
         self.diagnostic_stage = "cleanup"

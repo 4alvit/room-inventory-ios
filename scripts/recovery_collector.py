@@ -252,6 +252,9 @@ class Collector:
         self.barriers, self.origins, self.nonces = [], [], set()
         self.xc_original = self.xc_copy = self.xc_before = None
         self.readers_started = False
+        self.seal_attempted = False
+        self.live_seal = None
+        self.seal_sha256 = None
         self.folder = "Recovery-" + self.ids["journey_run_id"]
         self.bridge = self.runner / "Documents/RecoveryJourneyBridge" / self.ids["journey_run_id"]
         self._write("source-binding.json", canonical({**self.ids, **{k: config[k] for k in (
@@ -865,46 +868,23 @@ class Collector:
         check(len(mapping) == 34 and len(set(mapping.values())) == 34, "UI captures are not distinct")
         return ledger_path, mapping
 
-    def collect(self, verified_xcresult):
-        check(self.xc_copy is not None and Path(verified_xcresult) == self.xc_copy, "readers require this collector's verified xcresult copy")
-        check(not self.readers_started, "xcresult readers already attempted")
-        check(self._snapshot(self.xc_original, self.xc_limit, self.xc_files) == self.xc_before,
-              "original xcresult changed before readers")
-        check(self._snapshot(self.xc_copy, self.xc_limit, self.xc_files) == self.xc_copy_before,
-              "verified xcresult copy changed before readers")
-        self.readers_started = True
-        primary, post_errors = None, []
-        try:
-            ledger, attachments = self._read_ui(self.xc_copy)
-        except Exception as error:
-            primary = error
-        # Verification failures must not replace the reader's original failure.
-        for label, path in [("original", self.xc_original), ("copy", self.xc_copy)]:
-            try:
-                after = self._snapshot(path, self.xc_limit, self.xc_files)
-                self._write(f"xcresult/{label}-after-readers.json", canonical(after))
-                if label == "original":
-                    check(after == self.xc_before, "reader changed original xcresult")
-            except Exception as error:
-                post_errors.append(f"{label}: {type(error).__name__}: {error}")
-        if primary is not None or post_errors:
-            report = {"primary_reader_error": None if primary is None else f"{type(primary).__name__}: {primary}",
-                      "post_reader_verification_errors": post_errors[:]}
-            try:
-                self._write("xcresult/reader-errors.json", canonical(report))
-            except Exception as error:
-                post_errors.append(f"error receipt: {type(error).__name__}: {error}")
-            if primary is not None and not post_errors:
-                raise primary
-            message = (f"Primary reader failure: {type(primary).__name__}: {primary}; " if primary is not None else "")
-            raise CollectorError(message + "Post-reader verification: " + "; ".join(post_errors)) from primary
+    def seal_live_inputs(self):
+        """Capture once while the owned app/Files containers are still live.
+
+        This is not shutdown authority. The controller must separately confirm
+        owned Simulator shutdown and its full resource census before readers.
+        """
+        check(not self.seal_attempted and not self.readers_started, "live input seal already attempted")
+        self.seal_attempted = True
+        check(self.xc_copy is not None, "capture xcresult before sealing live inputs")
         check(self.poll_bridge() == 6 and len(self.origins) == 3, "incomplete live export barriers")
         check(export_observation_view({"exports": self._exports(), "saved": self._files()}) ==
               export_observation_view(self.barriers[-1]["snapshot"]), "exports changed after final barrier")
-        artifacts = {}
+        artifacts, namespaces = {}, {}
         for label, run_key in [("source", "source_run_id"), ("target", "target_run_id")]:
             source = self.app / "tmp/RoomInventoryUITests" / self.ids[run_key]
             before = self._snapshot(source, 8 * MIB, 100)
+            namespaces[label] = before
             _, _, _ = self._copy_tree(source, "namespaces/" + label, before, 8 * MIB, 100)
             self._write("namespaces/" + label + "-manifest.json", canonical(before))
             artifacts[label + "_inventory"] = "namespaces/" + label + "/inventory.json"
@@ -933,11 +913,92 @@ class Collector:
                                     "generated_path": "tmp/InventoryExports/" + origin["generated"],
                                     **{k: meta[k] for k in ("device_id", "inode", "created_at_ns", "bytes", "sha256")},
                                     "saved_path": self.folder + "/" + PurePosixPath(origin["saved"]).name})
-        fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
+        fixture, fixture_meta = self._read(Path(self.config["fixture_path"]), 8 * MIB)
         self._write("artifacts/fixture.png", fixture)
         artifacts["fixture"] = "artifacts/fixture.png"
         self._write("bridge/origins.json", canonical(self.origins))
         self._write("collection-receipt.json", canonical({"schema_version": 1, **self.ids, "exports_before": [], "exports_after": receipt_entries}))
+        roots = {str(path): identity(self._plain(path).stat()) for path in
+                 (self.simulator, self.app, self.runner, self.root, self.xc_original, self.xc_copy)}
+        captured = {name: self._snapshot(self.root / name, 64 * MIB, 1000)
+                    for name in ("artifacts", "namespaces", "bridge")}
+        files = {name: self._read(self.root / name, MIB)[1]
+                 for name in ("source-binding.json", "collection-receipt.json")}
+        seal = {"schema_version": 1, **self.ids, "simulator_udid": self.config["simulator_udid"],
+                "source_commit": self.config["source_commit"], "roots": roots,
+                "namespaces": namespaces, "fixture": fixture_meta, "artifacts": artifacts,
+                "captured": captured, "files": files}
+        raw = canonical(seal)
+        check(len(raw) <= 8 * MIB, "live input seal byte limit")
+        self._write("live-input-seal.json", raw)
+        self.live_seal, self.seal_sha256 = seal, sha(raw)
+        self.verify_live_seal()
+        return self.seal_sha256
+
+    def verify_live_seal(self):
+        """Compare only; never recapture or repair a sealed input."""
+        check(self.live_seal is not None and self.seal_sha256 is not None, "live inputs not sealed")
+        seal = self.live_seal
+        raw, _ = self._read(self.root / "live-input-seal.json", 8 * MIB)
+        check(sha(raw) == self.seal_sha256 and canonical(seal) == raw, "live input seal changed")
+        for path, expected in seal["roots"].items():
+            check(identity(self._plain(path).stat()) == expected, "sealed root replaced")
+        check(self.poll_bridge() == 6 and len(self.origins) == 3, "incomplete live export barriers")
+        check(export_observation_view({"exports": self._exports(), "saved": self._files()}) ==
+              export_observation_view(self.barriers[-1]["snapshot"]), "exports changed after final barrier")
+        for label, run_key in (("source", "source_run_id"), ("target", "target_run_id")):
+            source = self.app / "tmp/RoomInventoryUITests" / self.ids[run_key]
+            check(self._snapshot(source, 8 * MIB, 100) == seal["namespaces"][label],
+                  "sealed source namespace changed")
+        _, fixture = self._read(Path(self.config["fixture_path"]), 8 * MIB)
+        check(fixture == seal["fixture"], "sealed fixture changed")
+        for name, expected in seal["captured"].items():
+            check(self._snapshot(self.root / name, 64 * MIB, 1000) == expected, "sealed capture changed")
+        for name, expected in seal["files"].items():
+            check(self._read(self.root / name, MIB)[1] == expected, "sealed receipt changed")
+        return self.seal_sha256
+
+    def collect(self, verified_xcresult):
+        check(self.xc_copy is not None and Path(verified_xcresult) == self.xc_copy, "readers require this collector's verified xcresult copy")
+        check(not self.readers_started, "xcresult readers already attempted")
+        check(self._snapshot(self.xc_original, self.xc_limit, self.xc_files) == self.xc_before,
+              "original xcresult changed before readers")
+        check(self._snapshot(self.xc_copy, self.xc_limit, self.xc_files) == self.xc_copy_before,
+              "verified xcresult copy changed before readers")
+        self.verify_live_seal()
+        self.readers_started = True
+        primary, post_errors = None, []
+        try:
+            ledger, attachments = self._read_ui(self.xc_copy)
+        except BaseException as error:
+            primary = error
+        # Verification failures must not replace the reader's original failure.
+        for label, path in [("original", self.xc_original), ("copy", self.xc_copy)]:
+            try:
+                after = self._snapshot(path, self.xc_limit, self.xc_files)
+                self._write(f"xcresult/{label}-after-readers.json", canonical(after))
+                if label == "original":
+                    check(after == self.xc_before, "reader changed original xcresult")
+            except BaseException as error:
+                post_errors.append(f"{label}: {type(error).__name__}: {error}")
+        try:
+            self.verify_live_seal()
+        except BaseException as error:
+            post_errors.append(f"sealed inputs: {type(error).__name__}: {error}")
+        if primary is not None or post_errors:
+            report = {"primary_reader_error": None if primary is None else f"{type(primary).__name__}: {primary}",
+                      "post_reader_verification_errors": post_errors[:]}
+            try:
+                self._write("xcresult/reader-errors.json", canonical(report))
+            except BaseException as error:
+                post_errors.append(f"error receipt: {type(error).__name__}: {error}")
+            if primary is not None:
+                # Keep the exact exception type/object (notably DeadlineFailure)
+                # so controller classification and exit status stay authoritative.
+                # Secondary failures are separately retained above.
+                raise primary
+            raise CollectorError("Post-reader verification: " + "; ".join(post_errors))
+        artifacts = self.live_seal["artifacts"]
         document = {"schema_version": 1, "source_commit": self.config["source_commit"],
                     "source_run_id": self.ids["source_run_id"], "target_run_id": self.ids["target_run_id"],
                     "ui_evidence": ledger, "ui_attachments": attachments, "artifacts": artifacts,

@@ -552,7 +552,9 @@ filesystems before creating a device or building. During work, free space below
 8 GiB aborts. Periodic full resource walks become due two seconds after the
 previous successfully completed full accounting. During work every guard call
 still checks the deadline and free-space floors, including calls before another
-periodic walk is due. Forced accounting always performs a full uncached walk.
+periodic walk is due. Forced accounting performs a full uncached walk except
+inside the explicit sealed offline collection scope described below, which keeps
+live output checks and brackets readers with full entry/exit censuses.
 A completion timestamp is published only after all root walks, sample persistence
 and a final deadline check succeed; failed, interrupted or late accounting does
 not advance it. This prevents a long walk from immediately triggering another
@@ -939,8 +941,9 @@ rounded to six decimals within 0–86,400 seconds; an invalid or backwards sampl
 is null and marks capture incomplete. A null first sample is not replaced by a
 later completion. The incomplete flag stays set after a bad sample; a later valid
 last value does not prove a monotonic history. `terminal_barrier.reached` marks reaching the operational call
-boundary; `completed` marks return from its full guard and following deadline
-tick. Neither means command cleanup or the whole run succeeded. Cleanup-mode
+boundary; `completed` marks return from the applicable guard and following deadline
+tick. For sealed offline readers the sample explicitly identifies omitted device
+and DerivedData categories; these are covered by the required entry/exit censuses. Neither means command cleanup or the whole run succeeded. Cleanup-mode
 commands omit this aggregate: their time-only guard is not a full barrier.
 
 All integer counters saturate at 2,147,483,647. Saturation sets both `saturated`
@@ -954,10 +957,42 @@ the existing indented receipt and adds no history, scans, flushes, clock calls,
 threads or native work. Aggregates survive the existing terminal guard and cleanup
 without being reset, and are saved only by existing receipt writes.
 
+### Sealed offline result collection
+
+After the single UI command succeeds and its owned process group is confirmed
+absent with its leader reaped, the collector captures the final live inputs.
+It requires all six bridge barriers and three origins, compares the final Files
+and generated-export view with the last barrier, and copies both namespaces,
+the six export payloads and the exact fixture. Existing generated-file metadata
+checks and the narrower saved-file metadata comparison remain unchanged. The
+one-use `live-input-seal.json` binds the run, device, roots, source manifests and
+captured bytes; a failed or changed seal cannot be repaired by recapturing.
+
+Before native result readers, the controller shuts down only the owned Simulator
+UUID, confirms exactly one matching `Shutdown` inventory entry, rechecks the seal,
+and completes an uncached device and DerivedData census. Only this explicit
+collection scope may omit repeated device/DerivedData traversals during readers.
+Its resource samples label those omitted categories and refer to the entry census;
+they do not claim fresh device sizes. Root identities, free space, total output,
+original and copied xcresult, attachments and logs remain checked. The three
+ordered readers accept only the verified copy, never the original or a live
+container. Each retains its 40-second cap; collection retains 240 seconds and the
+whole run retains 1800 seconds, including shutdown and the final census.
+
+After readers and offline artifact verification, the source/captured content and
+original xcresult are checked again and a full uncached resource census is
+mandatory. Final checks are attempted even when a reader fails; a secondary
+failure cannot replace the primary error. No reader retry or live recapture is
+allowed. Failed UI runs still attempt original xcresult preservation and normal
+owned cleanup. This phase change addresses repeated live resource traversal
+observed during result collection; it does not prove the prior native reader
+hung, guarantee hosted latency, or accept any previously failed run.
+
 ### Owned cleanup
 
-After evidence collection, terminate only the app/test runner and groups launched
-by this attempt, shut down its exact simulator UDID, and confirm shutdown and all
+After evidence collection (or any earlier failure), terminate only the app/test
+runner and groups launched by this attempt, shut down its exact simulator UDID
+if it is not already shut down, and confirm shutdown and all
 owned group leaders reaped. Preserve the dedicated device and evidence for review;
 do not delete the device, DerivedData or its Files folder during this first run.
 No changes to existing QA devices, accepted source/candidate/evidence, global

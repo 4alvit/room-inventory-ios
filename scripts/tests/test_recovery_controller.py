@@ -1541,6 +1541,8 @@ class XctestrunTests(ControllerCase):
                 run.xctestrun_sha = controller.sha(run.xctestrun.read_bytes())
                 run.pin_sources = Mock()
                 run.guard = Mock()
+                run.begin_offline_collection = Mock()
+                run.finish_offline_collection = Mock()
                 run.collector = Mock()
                 copied = run.output / "verified.xcresult"
                 collected = run.output / "collection.json"
@@ -1580,11 +1582,16 @@ class XctestrunTests(ControllerCase):
                         run.test_and_collect()
                     self.assertIs(caught.exception, failure)
                     run.collector.collect.assert_not_called()
+                    run.begin_offline_collection.assert_not_called()
+                    run.finish_offline_collection.assert_not_called()
                     run.guard.assert_not_called()
                 else:
                     run.test_and_collect()
+                    run.collector.seal_live_inputs.assert_called_once_with()
+                    run.begin_offline_collection.assert_called_once_with(copied)
+                    run.finish_offline_collection.assert_called_once_with()
                     run.collector.collect.assert_called_once_with(copied)
-                    run.guard.assert_called_once_with(force=True)
+                    run.guard.assert_not_called()
                 names = [call.args[1] for call in run.command.call_args_list]
                 self.assertEqual(names, ["ui-test"] if failed else ["ui-test", "verify-artifacts"])
                 self.assertEqual(run.record["test_count"], 1)

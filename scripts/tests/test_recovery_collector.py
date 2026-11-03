@@ -651,7 +651,7 @@ class InstallationHandshakeTests(unittest.TestCase):
         original_link = C.os.link
         def durable(source, destination, **options):
             for name in ("preinstallation.json", "initial.json", "installation-request.json",
-                         "installation-receipt.json", "installation-ack.json"):
+                         "installation-discovery.json", "installation-receipt.json", "installation-ack.json"):
                 self.assertTrue((collector.root / "bridge" / name).is_file())
             self.assertEqual(collector.app, state.app)
             self.assertEqual(collector.runner, state.runner)
@@ -702,8 +702,47 @@ class InstallationHandshakeTests(unittest.TestCase):
             state.collector.poll_bridge()
         self.assertFalse((state.bridge / "installation-ack.json").exists())
 
+    def test_request_published_after_initial_census_binds_relocated_aut(self):
+        state = self.install(self.fixture()); collector = state.collector
+        old_app = state.app
+        application_root = old_app.parent
+        original_entries = collector._entries
+        censuses, request_bytes = [], []
+
+        def entries(path, budget):
+            result = original_entries(path, budget)
+            if path == application_root:
+                censuses.append(result)
+            return result
+
+        def first_launch_during_request_discovery():
+            if len(censuses) == 1 and not request_bytes:
+                state.app = application_root / "AFTERFIRSTLAUNCH"
+                old_app.rename(state.app)
+                request_bytes.append(self.request(state))
+
+        # The real first list is complete before _plain(request) calls guard.
+        # No fake root list: the AUT actually moves and the runner publishes.
+        state.guard_hook = first_launch_during_request_discovery
+        with patch.object(collector, "_entries", side_effect=entries):
+            self.assertEqual(collector.poll_bridge(), 0)
+        self.assertEqual(len(censuses), 2)
+        self.assertIn(old_app, censuses[0]); self.assertNotIn(state.app, censuses[0])
+        self.assertNotIn(old_app, censuses[1]); self.assertIn(state.app, censuses[1])
+        self.assertEqual(collector.app, state.app)
+        self.assertEqual(collector.installation_state, "accepted")
+        discovery = C.parse((collector.root / "bridge/installation-discovery.json").read_bytes())
+        self.assertEqual(discovery["request"], C.parse(request_bytes[0]))
+        self.assertEqual(discovery["request_sha256"], C.sha(request_bytes[0]))
+        self.assertEqual([discovery[key] for key in ("initial_root_count", "post_request_root_count",
+                                                    "added_root_count", "removed_root_count")], [2, 2, 1, 1])
+        self.assertEqual(discovery["matches"]["app"], {
+            "count": 1, "classification": "unique", "paths_truncated": False,
+            "relative_paths": [state.app.relative_to(state.sim).as_posix()]})
+        self.assertTrue((state.bridge / "installation-ack.json").is_file())
+
     def test_missing_or_duplicate_bundle_identity_cannot_select_an_aut(self):
-        for mode in ("missing", "duplicate", "wrong-runner"):
+        for mode in ("missing", "duplicate", "wrong-runner", "duplicate-runner"):
             with self.subTest(mode=mode):
                 state = self.install(self.fixture()); self.request(state)
                 if mode == "missing": (state.app / C.MCM).unlink()
@@ -711,10 +750,112 @@ class InstallationHandshakeTests(unittest.TestCase):
                     (state.runner / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": "foreign.runner"}))
                 else:
                     duplicate = state.app.parent / "DUPLICATE"; duplicate.mkdir()
-                    (duplicate / C.MCM).write_bytes((state.app / C.MCM).read_bytes())
+                    source = state.runner if mode == "duplicate-runner" else state.app
+                    (duplicate / C.MCM).write_bytes((source / C.MCM).read_bytes())
                 with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous"):
                     state.collector.poll_bridge()
                 self.assertFalse((state.bridge / "installation-ack.json").exists())
+                discovery = C.parse((state.collector.root / "bridge/installation-discovery.json").read_bytes())
+                role = "runner" if "runner" in mode else "app"
+                count = 2 if "duplicate" in mode else 0
+                self.assertEqual(discovery["matches"][role]["count"], count)
+                self.assertEqual(discovery["matches"][role]["classification"], "duplicate" if count else "missing")
+
+    def test_unique_runner_must_still_own_the_validated_request(self):
+        state = self.install(self.fixture()); raw = self.request(state)
+        foreign = state.app.parent / "FOREIGN"
+        bridge = foreign / "Documents/RecoveryJourneyBridge" / state.config["journey_run_id"]
+        bridge.mkdir(parents=True)
+        (foreign / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": "unrelated.bundle"}))
+        (state.bridge / "installation-request.json").rename(bridge / "installation-request.json")
+        with self.assertRaisesRegex(C.CollectorError, "outside expected runner"):
+            state.collector.poll_bridge()
+        self.assertFalse((bridge / "installation-ack.json").exists())
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        discovery = C.parse((state.collector.root / "bridge/installation-discovery.json").read_bytes())
+        self.assertEqual(discovery["request_sha256"], C.sha(raw))
+        self.assertEqual(discovery["request_runner"], foreign.relative_to(state.sim).as_posix())
+        self.assertEqual(discovery["matches"]["runner"]["count"], 1)
+
+    def test_post_request_census_keeps_entry_limit_and_guard(self):
+        from contextlib import contextmanager
+        from itertools import repeat
+        for mode in ("entries", "deadline"):
+            with self.subTest(mode=mode):
+                state = self.install(self.fixture()); self.request(state)
+                root = state.app.parent; original = C.os.scandir; calls = []
+                entry = SimpleNamespace(path=str(root / "entry"), is_symlink=lambda: False)
+                @contextmanager
+                def scandir(path):
+                    if path == root:
+                        calls.append(path)
+                        if len(calls) == 2:
+                            if mode == "deadline":
+                                state.guard_hook = lambda: (_ for _ in ()).throw(TimeoutError("original deadline"))
+                            yield repeat(entry, 2001)
+                            return
+                    with original(path) as values: yield values
+                error, message = (C.CollectorError, "entry count limit") if mode == "entries" else (TimeoutError, "original deadline")
+                with patch.object(C.os, "scandir", side_effect=scandir):
+                    with self.assertRaisesRegex(error, message): state.collector.poll_bridge()
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(state.collector.pins, {})
+                self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_changed_request_during_fresh_census_cannot_ack(self):
+        state = self.install(self.fixture()); raw = self.request(state)
+        original = state.collector._entries; censuses = []
+        def entries(path, budget):
+            result = original(path, budget)
+            if path == state.app.parent:
+                censuses.append(path)
+                if len(censuses) == 2:
+                    (state.bridge / "installation-request.json").write_bytes(raw + b" ")
+            return result
+        with patch.object(state.collector, "_entries", side_effect=entries):
+            with self.assertRaisesRegex(C.CollectorError, "request changed during capture"):
+                state.collector.poll_bridge()
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+        with self.assertRaisesRegex(C.CollectorError, "consumed or failed"): state.collector.poll_bridge()
+
+    def test_reused_nonce_never_starts_post_request_census(self):
+        state = self.install(self.fixture()); raw = self.request(state)
+        state.collector.nonces.add(C.parse(raw)["nonce"])
+        with patch.object(state.collector, "_entries", wraps=state.collector._entries) as entries:
+            with self.assertRaisesRegex(C.CollectorError, "reused installation nonce"):
+                state.collector.poll_bridge()
+        self.assertEqual(sum(call.args[0] == state.app.parent for call in entries.call_args_list), 1)
+        self.assertFalse((state.collector.root / "bridge/installation-discovery.json").exists())
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_discovery_caps_paths_but_preserves_full_duplicate_count(self):
+        state = self.install(self.fixture()); self.request(state)
+        for index in range(18):
+            path = state.app.parent / ("DUPLICATE-" + str(index))
+            path.mkdir(); (path / C.MCM).write_bytes((state.app / C.MCM).read_bytes())
+        with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous"):
+            state.collector.poll_bridge()
+        raw = (state.collector.root / "bridge/installation-discovery.json").read_bytes()
+        discovery = C.parse(raw); matches = discovery["matches"]["app"]
+        self.assertEqual(matches["count"], 19)
+        self.assertEqual(len(matches["relative_paths"]), 16)
+        self.assertTrue(matches["paths_truncated"])
+        self.assertLessEqual(len(raw), 65536)
+        self.assertNotIn(str(state.root).encode(), raw)
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
+
+    def test_discovery_write_failure_preserves_exception_and_no_ack(self):
+        state = self.install(self.fixture()); self.request(state)
+        (state.app / C.MCM).unlink()
+        original = state.collector._write; failure = TimeoutError("original controller deadline")
+        def write(relative, data):
+            if relative == "bridge/installation-discovery.json": raise failure
+            return original(relative, data)
+        with patch.object(state.collector, "_write", side_effect=write):
+            with self.assertRaises(TimeoutError) as caught: state.collector.poll_bridge()
+        self.assertIs(caught.exception, failure)
+        self.assertIn("installation discovery counts: app=0, runner=1", failure.__notes__)
+        self.assertFalse((state.bridge / "installation-ack.json").exists())
 
     def test_prior_data_and_changed_fixture_are_not_blessed_as_installation(self):
         for mode in ("namespace", "exports", "fixture", "scenario-request"):

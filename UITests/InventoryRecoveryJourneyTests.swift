@@ -551,25 +551,87 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             ? String(observedTitle.dropLast(actionsSuffix.count)) : observedTitle
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
+        guard let homeName = ledger.expected["home_name"] else {
+            throw RecoveryJourneyFailure.assertion("export return home", "missing", "run-bound home")
+        }
         try tap(saveButton, app: app)
-        let dismissal = ElementDismissalReadiness()
-        try ledger.require("sheet dismissed", try dismissal.waitForDismissal { saveButtons.count })
-        if app.buttons["Close"].exists && app.buttons["Close"].isHittable { try tap(app.buttons["Close"], app: app) }
-        try ledger.require("export returned to dashboard", app.buttons["inventory.exportMenu"].isHittable)
+        let returning = ExportReturnReadiness(homeName: homeName)
+        var returnSucceeded = false
+        do {
+            defer {
+                var record = returning.diagnostic
+                record["role"] = role.rawValue
+                record["result"] = returnSucceeded ? "returned" : "failed"
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_EXPORT_RETURN_V2 " + text)
+                }
+            }
+            // Each probe takes one immutable app snapshot. Remote Files nodes may
+            // be omitted, so their absence is never our return condition. Unique
+            // positive anchors identify the screen; the run-bound home also
+            // needs current native hittability. firstMatch avoids exhaustive
+            // remote traversal after snapshot uniqueness checks;
+            // these observations are sequential, not an atomic hierarchy snapshot.
+            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", homeName + ", ")).firstMatch
+            let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
+                .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close"))
+                .firstMatch
+            returnSucceeded = try returning.waitForReturn(observe: {
+                let root = try app.snapshot()
+                var nodes: [ExportReturnReadiness.Element] = []
+                var pending = root.children.reversed().map { ($0, Optional<Int>.none) }
+                while let (node, parent) = pending.popLast() {
+                    guard nodes.count < 10_000 else { throw ExportReturnReadiness.Failure.invalidObservation }
+                    let kind: ExportReturnReadiness.Kind
+                    switch node.elementType {
+                    case .button: kind = .button
+                    case .staticText: kind = .text
+                    case .navigationBar: kind = .navigationBar
+                    case .alert: kind = .alert
+                    default: kind = .other
+                    }
+                    let index = nodes.count
+                    nodes.append(.init(kind: kind, identifier: node.identifier, label: node.label,
+                                       enabled: node.isEnabled, frame: node.frame, parent: parent))
+                    pending.append(contentsOf: node.children.reversed().map { ($0, Optional(index)) })
+                }
+                return .init(frame: root.frame, elements: nodes)
+            }, isHittable: { target in
+                switch target {
+                case .home: return home.isHittable
+                case .shareClose: return close.isHittable
+                }
+            }, close: { close.tap() })
+        }
+        try ledger.require("sheet dismissed", returnSucceeded)
+        try ledger.require("export returned to dashboard", returnSucceeded)
         try bridge.synchronize(role: role, phase: .after, test: self)
         try checkpoint(checkpointName, observations: ["save_name": observedName, "folder": observedFolder], app: app)
     }
 
     private func enterFilesFolder(_ folder: String, create: Bool, app: XCUIApplication) throws {
-        if try filesFolderIsOpen(folder, app: app) {
-            try ledger.require("existing target folder expected", !create)
-            return
-        }
         let localTitle = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
-        for _ in 0..<5 {
-            if try filesFolderIsOpen(localTitle, app: app) { break }
-            let local = fileItem(localTitle, app: app)
-            if local.exists && local.isHittable {
+        // A cold document service can still be starting after the presentation
+        // tap returns. An empty sheet is not evidence that Back is the next step.
+        var state = try waitForFilesNavigationState(folder, localTitle: localTitle,
+                                                    app: app, initial: true)
+        var navigationActions = 0
+        navigation: while true {
+            switch state {
+            case .targetFolder:
+                try ledger.require("existing target folder expected", !create)
+                return
+            case .localRoot:
+                break navigation
+            case .localEntry, .browse, .back:
+                guard navigationActions < 5 else {
+                    throw RecoveryJourneyFailure.assertion("bounded Files navigation", "exhausted", "local location within five actions")
+                }
+            }
+            switch state {
+            case .localEntry:
+                let local = fileItem(localTitle, app: app)
                 if !firstFilesTapCaptured {
                     firstFilesTapCaptured = true
                     ledger.captureFirstFilesTap("before", localTitle: localTitle, app: app)
@@ -582,12 +644,16 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 } else {
                     try tap(local, app: app)
                 }
-                continue
+            case .browse:
+                try tap(app.buttons["Browse"], app: app)
+            case .back:
+                try tap(filesBackButton(app: app), app: app)
+            case .targetFolder, .localRoot:
+                throw RecoveryJourneyFailure.assertion("Files navigation action", "folder state", "navigation control")
             }
-            let browse = app.buttons["Browse"]
-            if browse.exists && browse.isHittable { try tap(browse, app: app); continue }
-            let back = app.navigationBars.buttons.matching(NSPredicate(format: "label == 'Back' OR label == 'Locations' OR label == 'Browse'")).firstMatch
-            try tap(back, app: app)
+            navigationActions += 1
+            state = try waitForFilesNavigationState(folder, localTitle: localTitle,
+                                                   app: app, initial: false)
         }
         try ledger.require("local Files location selected", filesFolderIsOpen(localTitle, app: app))
         if create {
@@ -609,8 +675,29 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                let dismissal = ElementDismissalReadiness()
-                try ledger.require("sheet dismissed", try dismissal.waitForDismissal { inlineFields.count })
+                let creation = FilesNavigationReadiness(timeout: 10)
+                let began = ProcessInfo.processInfo.systemUptime
+                var folderReady = false
+                do {
+                    defer {
+                        let record: [String: Any] = [
+                            "schema_version": 1, "phase": "inline_creation", "folder": folder,
+                            "allowance_seconds": 10,
+                            "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                            "result": folderReady ? "ready" : "failed"
+                        ]
+                        if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                           data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                            print("ROOM_FILES_CREATION_V1 \(text)")
+                        }
+                    }
+                    let titles = filesFolderTitles(folder, app: app)
+                    folderReady = try creation.waitForTargetFolder(
+                        titleCount: { titles.count },
+                        enabled: { titles.firstMatch.isEnabled },
+                        hittable: { titles.firstMatch.isHittable })
+                }
+                try ledger.require("newly created run folder ready", folderReady)
             } else {
                 let field = app.alerts.textFields.firstMatch
                 try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))
@@ -627,6 +714,58 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         if try !filesFolderIsOpen(folder, app: app) { try tap(fileItem(folder, app: app), app: app, scroll: true) }
         try ledger.require("run folder title appeared", filesFolderTitles(folder, app: app).element(boundBy: 0).waitForExistence(timeout: 5))
         try ledger.require("run folder opened", filesFolderIsOpen(folder, app: app))
+    }
+
+    private func filesBackButton(app: XCUIApplication) -> XCUIElement {
+        app.navigationBars.buttons.matching(NSPredicate(
+            format: "label == 'Back' OR label == 'Locations' OR label == 'Browse'")).firstMatch
+    }
+
+    private func waitForFilesNavigationState(_ folder: String, localTitle: String,
+                                            app: XCUIApplication, initial: Bool) throws -> FilesNavigationReadiness.State {
+        let allowance: TimeInterval = initial ? 30 : 10
+        let readiness = FilesNavigationReadiness(timeout: allowance)
+        let began = ProcessInfo.processInfo.systemUptime
+        var selected: FilesNavigationReadiness.State?
+        defer {
+            let record: [String: Any] = [
+                "schema_version": 1, "phase": initial ? "presentation" : "navigation",
+                "allowance_seconds": allowance,
+                "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                "result": selected == nil ? "failed" : "ready",
+                "state": selected.map { String(describing: $0) } as Any? ?? NSNull()
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_FILES_NAVIGATION_V1 \(text)")
+            }
+        }
+        func interactive(_ element: XCUIElement) throws -> Bool {
+            guard try readiness.perform({ element.exists }) else { return false }
+            guard try readiness.perform({ element.isEnabled }) else { return false }
+            return try readiness.perform { element.isHittable }
+        }
+        func folderOpen(_ title: String) throws -> Bool {
+            let titles = filesFolderTitles(title, app: app)
+            let count = try readiness.perform { titles.count }
+            guard count <= 1 else {
+                throw RecoveryJourneyFailure.assertion("unique Files folder title", String(count), "at most one: \(title)")
+            }
+            guard count == 1 else { return false }
+            return try interactive(titles.element(boundBy: 0))
+        }
+        let state = try readiness.waitForState {
+            // Live queries include the remote document service. app.snapshot()
+            // alone can omit its controls and cannot prove that it is absent.
+            if try folderOpen(folder) { return .targetFolder }
+            if try folderOpen(localTitle) { return .localRoot }
+            if try interactive(self.fileItem(localTitle, app: app)) { return .localEntry }
+            if try interactive(app.buttons["Browse"]) { return .browse }
+            if try interactive(self.filesBackButton(app: app)) { return .back }
+            return nil
+        }
+        selected = state
+        return state
     }
 
     private func filesFolderTitles(_ title: String, app: XCUIApplication) -> XCUIElementQuery {

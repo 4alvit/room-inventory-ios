@@ -38,7 +38,7 @@ class RecoveryJourneyVerifierTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.fixture = (ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.png").read_bytes()
+        self.fixture = (ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.data").read_bytes()
         self.assertEqual(len(self.fixture), 74736)
         self.assertEqual(hashlib.sha256(self.fixture).hexdigest(), "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181")
         self.filename = ORIGINAL.lower() + ".png"
@@ -82,11 +82,51 @@ class RecoveryJourneyVerifierTests(unittest.TestCase):
                                       "observations": observations, "assertions": [{"name": "reported checkpoint", "actual": "present", "expected": "present", "passed": True}], "attachments": refs})
         self.manifest = {"schema_version": 1, "source_commit": PIN, "source_run_id": SOURCE, "target_run_id": TARGET,
                          "ui_evidence": "ui-evidence.json", "ui_attachments": self.ui_attachments,
-                         "artifacts": self.paths, "collection_receipt": "collection-receipt.json"}
+                         "artifacts": self.paths, "collection_receipt": "collection-receipt.json",
+                         "startup_evidence": {name: "bridge/" + name + ".json" for name in
+                                              ("installation-request", "installation-ack", "photos-seed", "photos-isolation")}}
         for role in ["fixture", "source_original", "target_original"]: self.write(self.paths[role], self.fixture)
+        self.prepare_startup()
         self.regenerate()
         self.save_json("collection.json", self.manifest)
         self.save_json("ui-evidence.json", self.ui)
+
+    def prepare_startup(self):
+        ids = {"journey_run_id": JOURNEY, "source_run_id": SOURCE, "target_run_id": TARGET}
+        self.installation = {"schema_version": 1, "phase": "installation", **ids,
+                             "simulator_udid": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+                             "app_bundle_id": "com.alvit.roominventory",
+                             "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner",
+                             "nonce": "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"}
+        self.save_json("bridge/installation-request.json", self.installation)
+        request_sha = hashlib.sha256((self.root / "bridge/installation-request.json").read_bytes()).hexdigest()
+        self.save_json("bridge/installation-ack.json", {**self.installation, "request_sha256": request_sha, "success": True})
+        auth = {"before_raw": 3, "after_raw": 3, "requested": False, "callback_raw": None,
+                "prompt_seen": False, "prompt_accepted": False, "prompt_runner": "", "prompt_text": "", "prompt_button": ""}
+        common = {"schema_version": 1, "status": "passed", **ids,
+                  "simulator_udid": self.installation["simulator_udid"], "runner_bundle_id": self.installation["runner_bundle_id"],
+                  "installation_request_sha256": request_sha, "fixture_filename": "SyntheticRecoveryReceipt.png",
+                  "fixture_bytes": 74736, "fixture_sha256": hashlib.sha256(self.fixture).hexdigest(),
+                  "authorization": auth, "read_write_authorized": True,
+                  "before_bytes": 74736, "before_sha256": hashlib.sha256(self.fixture).hexdigest(),
+                  "after_bytes": 74736, "after_sha256": hashlib.sha256(self.fixture).hexdigest(),
+                  "change_completed": True, "finished_within_deadline": True, "elapsed_seconds": 1.5}
+        created = "fixture-owned/L0/001"
+        empty = hashlib.sha256(b"").hexdigest()
+        final = hashlib.sha256(created.encode()).hexdigest()
+        self.seed = {**common, "phase": "photos_seed", "deadline_seconds": 86,
+                     "bundle_resource_filename": "SyntheticRecoveryReceipt.data",
+                     "initial_asset_count": 0, "initial_asset_ids": [], "initial_asset_ids_sha256": empty,
+                     "final_asset_count": 1, "final_asset_ids": [created], "final_asset_ids_sha256": final,
+                     "created_asset_id": created, "existing_fixture_count": 0, "mutation_attempts": 1, "change_requested": True}
+        self.save_json("bridge/photos-seed.json", self.seed)
+        self.isolation = {**common, "phase": "photos_isolation", "deadline_seconds": 20,
+                          "seed_receipt_sha256": hashlib.sha256((self.root / "bridge/photos-seed.json").read_bytes()).hexdigest(),
+                          "initial_asset_count": 1, "initial_asset_ids_sha256": final,
+                          "fixture_asset_id": created, "removed_asset_count": 0, "removed_asset_ids_sha256": empty,
+                          "change_requested": False, "confirmation_seen": False, "confirmation_accepted": False,
+                          "confirmation_text": "", "final_asset_count": 1}
+        self.save_json("bridge/photos-isolation.json", self.isolation)
 
     def write(self, path, data):
         target = self.root / path
@@ -159,6 +199,51 @@ class RecoveryJourneyVerifierTests(unittest.TestCase):
         blob = self.encode_zip(files)
         for role in ["target_zip", "target_generated_zip"]: self.write(self.paths[role], blob)
         self.refresh_receipt()
+
+    def test_startup_receipts_required_for_otherwise_complete_evidence(self):
+        for name in ("installation-request", "installation-ack", "photos-seed", "photos-isolation"):
+            path = self.root / ("bridge/" + name + ".json")
+            raw = path.read_bytes(); path.unlink()
+            with self.subTest(name=name): self.reject("Cannot read " + name)
+            path.write_bytes(raw)
+        del self.manifest["startup_evidence"]
+        self.save_json("collection.json", self.manifest)
+        self.reject("collection manifest")
+
+    def test_forged_installation_ack_cannot_support_seed(self):
+        path = self.root / "bridge/installation-ack.json"
+        value = json.loads(path.read_bytes()); value["success"] = False
+        self.save_json("bridge/installation-ack.json", value)
+        self.reject("acknowledgement differs")
+
+    def test_seed_failures_cannot_be_hidden_by_complete_ui_evidence(self):
+        original = copy.deepcopy(self.seed)
+        for change in ({"status": "failed", "error": "late callback"}, {"elapsed_seconds": 86},
+                       {"mutation_attempts": 2}, {"created_asset_id": "another"}, {"after_sha256": "0" * 64},
+                       {"installation_request_sha256": "0" * 64}, {"initial_asset_count": 1},
+                       {"change_completed": False}, {"bundle_resource_filename": "processed.png"}):
+            with self.subTest(change=change):
+                self.save_json("bridge/photos-seed.json", {**original, **change})
+                with self.assertRaises(VERIFIER.EvidenceError): self.verify()
+        self.save_json("bridge/photos-seed.json", original)
+
+    def test_isolation_must_link_seed_bytes_asset_and_inventory(self):
+        original = copy.deepcopy(self.isolation)
+        for change in ({"seed_receipt_sha256": "0" * 64}, {"fixture_asset_id": "another"},
+                       {"initial_asset_ids_sha256": "0" * 64}, {"removed_asset_ids_sha256": "0" * 64},
+                       {"elapsed_seconds": 20}, {"after_bytes": 0}):
+            with self.subTest(change=change):
+                self.save_json("bridge/photos-isolation.json", {**original, **change})
+                with self.assertRaises(VERIFIER.EvidenceError): self.verify()
+        self.save_json("bridge/photos-isolation.json", original)
+
+    def test_seed_bytes_have_own_bound_and_reject_symlink(self):
+        path = self.root / "bridge/photos-seed.json"
+        raw = path.read_bytes()
+        path.write_bytes(raw + b" " * 65536)
+        self.reject("Startup receipt byte bound")
+        path.unlink(); other = self.root / "alias.json"; other.write_bytes(raw); path.symlink_to(other)
+        self.reject("Symlink")
 
     def test_valid_collected_artifacts_do_not_claim_ui_execution(self):
         result = self.verify()

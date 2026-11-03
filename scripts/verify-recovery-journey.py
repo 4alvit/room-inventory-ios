@@ -13,6 +13,7 @@ import binascii
 import csv
 import hashlib
 import io
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -20,6 +21,11 @@ import stat
 import sys
 import uuid
 import zipfile
+
+# Load the adjacent, source-pinned pure receipt validators, never a search-path module.
+_RECEIPTS_SPEC = importlib.util.spec_from_file_location("recovery_receipts", Path(__file__).with_name("recovery_collector.py"))
+RECEIPTS = importlib.util.module_from_spec(_RECEIPTS_SPEC)
+_RECEIPTS_SPEC.loader.exec_module(RECEIPTS)
 
 FIXTURE_SHA256 = "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181"
 FIXTURE_BYTES = 74736
@@ -298,12 +304,49 @@ def verify_receipt(receipt, journey, source_id, target_id, payloads):
     require(timestamps == sorted(timestamps), "Recorded generated export times are not ordered")
 
 
+def verify_startup(collection, mapping, journey, source_id, target_id, fixture):
+    names = {"installation-request", "installation-ack", "photos-seed", "photos-isolation"}
+    keys(mapping, names, "startup evidence")
+    require(mapping == {name: "bridge/" + name + ".json" for name in names}, "Startup evidence paths differ")
+    raw = {name: collection.read(mapping[name], name) for name in names}
+    require(all(len(data) <= (65536 if name == "photos-seed" else 16384) for name, data in raw.items()),
+            "Startup receipt byte bound")
+    values = {name: parse_json(data, name) for name, data in raw.items()}
+    request = values["installation-request"]
+    ids = {"journey_run_id": journey, "source_run_id": source_id, "target_run_id": target_id}
+    keys(request, {"schema_version", "phase", *ids, "simulator_udid", "app_bundle_id", "runner_bundle_id", "nonce"},
+         "installation request")
+    require(type(request["schema_version"]) is int and request["schema_version"] == 1
+            and request["phase"] == "installation" and all(request[k] == v for k, v in ids.items())
+            and request["app_bundle_id"] == "com.alvit.roominventory"
+            and request["runner_bundle_id"] == "com.alvit.roominventory.uitests.xctrunner", "Installation identity differs")
+    identifier(request["simulator_udid"], "installation simulator")
+    identifier(request["nonce"], "installation nonce")
+    request_sha = digest(raw["installation-request"])
+    ack = values["installation-ack"]
+    require(ack == {**request, "request_sha256": request_sha, "success": True}
+            and ack.get("success") is True and type(ack.get("schema_version")) is int,
+            "Installation acknowledgement differs")
+    seed, isolation = values["photos-seed"], values["photos-isolation"]
+    try:
+        expected = lambda phase: RECEIPTS.photos_receipt_identity(
+            ids, request["simulator_udid"], request["runner_bundle_id"], request_sha, FIXTURE_SHA256, phase)
+        RECEIPTS.validate_photos_seed(seed, expected("photos_seed"), fixture)
+        RECEIPTS.validate_photos_isolation(isolation, expected("photos_isolation"), fixture,
+                                           seed, digest(raw["photos-seed"]))
+    except RECEIPTS.CollectorError as error:
+        raise EvidenceError(str(error)) from error
+    return {"seed_receipt_sha256": digest(raw["photos-seed"]), "isolation_receipt_sha256": digest(raw["photos-isolation"]),
+            "created_asset_id": seed["created_asset_id"], "seed_elapsed_seconds": seed["elapsed_seconds"],
+            "isolation_elapsed_seconds": isolation["elapsed_seconds"], "final_asset_count": 1}
+
+
 def verify_collection(manifest: Path, expected_commit: str):
     require(re.fullmatch(r"[0-9a-f]{40}", expected_commit) is not None, "Expected commit must be a full lowercase SHA")
     collection = Collection(manifest)
     raw = collection.read(manifest.name, "collection manifest")
     document = parse_json(raw, "collection manifest")
-    keys(document, {"schema_version", "source_commit", "source_run_id", "target_run_id", "ui_evidence", "ui_attachments", "artifacts", "collection_receipt"}, "collection manifest")
+    keys(document, {"schema_version", "source_commit", "source_run_id", "target_run_id", "ui_evidence", "ui_attachments", "artifacts", "collection_receipt", "startup_evidence"}, "collection manifest")
     require(type(document["schema_version"]) is int and document["schema_version"] == 1, "Unsupported collection schema")
     require(document["source_commit"] == expected_commit, "Collection commit does not match caller-pinned source")
     source_id = identifier(document["source_run_id"], "source_run_id")
@@ -318,6 +361,7 @@ def verify_collection(manifest: Path, expected_commit: str):
     fixture = payloads["fixture"]
     require(len(fixture) == FIXTURE_BYTES and digest(fixture) == FIXTURE_SHA256
             and fixture.startswith(b"\x89PNG\r\n\x1a\n"), "Fixture is not the pinned real synthetic PNG")
+    startup = verify_startup(collection, document["startup_evidence"], journey, source_id, target_id, fixture)
     source = parse_json(payloads["source_inventory"], "source inventory")
     target = parse_json(payloads["target_inventory"], "target inventory")
     original, path, row = validate_inventory(source, expected, original_name, final)
@@ -343,7 +387,7 @@ def verify_collection(manifest: Path, expected_commit: str):
     return {"status": "PASS_OFFLINE_ARTIFACT_CONSISTENCY", "source_commit": expected_commit,
             "journey_run_id": journey, "source_run_id": source_id, "target_run_id": target_id,
             "ui_execution": "NOT_INDEPENDENTLY_VERIFIED", "reported_ui_outcome": ui["outcome"],
-            "recorded_checkpoints": len(STEPS), "files": collection.hashes, "zip_members": zips,
+            "recorded_checkpoints": len(STEPS), "photos_startup": startup, "files": collection.hashes, "zip_members": zips,
             "limitations": ["A matching JSON event log and screenshots do not independently prove UI actions or a passed XCTest run. Bind this result to the actual xcresult and its source SHA separately.",
                             "The collector asserts that the explicitly mapped files came from the stated source and target namespaces and two UI exports; this verifier does not access a simulator or establish capture chronology.",
                             "PDF checks establish bounded structural presence, not rendering or semantic text correctness. Separate visual/PDF text evidence is required.",

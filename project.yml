@@ -59,6 +59,8 @@ targets:
     sources:
       - path: AppTests
       - path: UITests/Support/RecoveryPhotosFixture.swift
+      - path: UITests/Fixtures/SyntheticRecoveryReceipt.data
+        buildPhase: resources
       - path: App/RoomInventory.storekit
         buildPhase: resources
     dependencies:
@@ -73,6 +75,9 @@ targets:
     platform: iOS
     sources:
       - path: UITests
+        excludes: ["Fixtures/SyntheticRecoveryReceipt.data"]
+      - path: UITests/Fixtures/SyntheticRecoveryReceipt.data
+        buildPhase: resources
     dependencies:
       - target: RoomInventory
     settings:

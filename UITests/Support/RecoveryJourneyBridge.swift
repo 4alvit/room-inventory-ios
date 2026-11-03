@@ -96,18 +96,24 @@ final class RecoveryJourneyBridge {
         }
         photosIsolationAttempted = true
         let receiptURL = directory.appendingPathComponent("photos-isolation.json")
-        guard try Self.entryType(receiptURL) == nil else { throw BridgeError.invalid("Photos receipt already exists") }
+        let seedURL = directory.appendingPathComponent("photos-seed.json")
+        guard try Self.entryType(receiptURL) == nil, try Self.entryType(seedURL) == nil else {
+            throw BridgeError.invalid("Photos receipt already exists")
+        }
+        let seeded = try seedPhotosFixture(receiptURL: seedURL, installationSHA: installationRequestSHA, test: test)
         var receipt: [String: Any] = [
             "schema_version": 1, "phase": "photos_isolation", "status": "failed",
             "journey_run_id": journeyID, "source_run_id": sourceID, "target_run_id": targetID,
             "simulator_udid": deviceID, "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner",
             "installation_request_sha256": installationRequestSHA,
+            "seed_receipt_sha256": seeded.receiptSHA,
             "fixture_filename": RecoveryPhotosFixture.filename, "fixture_bytes": RecoveryPhotosFixture.bytes,
             "fixture_sha256": RecoveryPhotosFixture.digest, "deadline_seconds": RecoveryPhotosFixture.seconds
         ]
         var primary: Error?
         do {
-            try RecoveryPhotosFixture.isolate(deviceID: deviceID, report: &receipt)
+            try RecoveryPhotosFixture.isolate(deviceID: deviceID, createdID: seeded.identifier,
+                                             expectedAssetIDs: seeded.assetIDs, report: &receipt)
             receipt["status"] = "passed"
         } catch {
             primary = error
@@ -123,6 +129,43 @@ final class RecoveryJourneyBridge {
         }
         if let primary { throw primary }
         photosIsolated = true
+    }
+
+    private func seedPhotosFixture(receiptURL: URL, installationSHA: String, test: XCTestCase) throws
+        -> (identifier: String, assetIDs: [String], receiptSHA: String) {
+        var receipt: [String: Any] = [
+            "schema_version": 1, "phase": "photos_seed", "status": "failed",
+            "journey_run_id": journeyID, "source_run_id": sourceID, "target_run_id": targetID,
+            "simulator_udid": deviceID, "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner",
+            "installation_request_sha256": installationSHA,
+            "fixture_filename": RecoveryPhotosFixture.filename,
+            "bundle_resource_filename": RecoveryPhotosFixture.bundleFilename,
+            "fixture_bytes": RecoveryPhotosFixture.bytes, "fixture_sha256": RecoveryPhotosFixture.digest,
+            "deadline_seconds": RecoveryPhotosFixture.seedSeconds
+        ]
+        var primary: Error?
+        var identifier: String?
+        do {
+            identifier = try RecoveryPhotosFixture.seed(deviceID: deviceID, report: &receipt)
+            receipt["status"] = "passed"
+        } catch {
+            primary = error
+            receipt["error"] = String(String(describing: error).prefix(512))
+        }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            guard data.count <= 65_536 else { throw BridgeError.invalid("Photos seed receipt byte bound") }
+            try Self.publish(data, at: receiptURL, nonce: UUID().uuidString)
+            Self.attach(data, name: "recovery-photos-seed.json", test: test)
+        } catch {
+            throw BridgeError.invalid("Photos seed: \(String(describing: primary)); receipt publication: \(error)")
+        }
+        if let primary { throw primary }
+        guard let identifier, let assetIDs = receipt["final_asset_ids"] as? [String] else {
+            throw BridgeError.invalid("Photos seed result missing")
+        }
+        return (identifier, assetIDs, SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
     }
 
     func synchronize(role: Role, phase: Phase, test: XCTestCase) throws {

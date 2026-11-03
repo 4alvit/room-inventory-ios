@@ -86,6 +86,136 @@ def export_observation_view(snapshot):
         name: saved_file_view(record) for name, record in snapshot["saved"]["entries"].items()}}}
 
 
+def photos_receipt_identity(ids, simulator_udid, runner_bundle_id, request_sha256, fixture_sha256, phase):
+    return {"schema_version": 1, "phase": phase, **ids, "simulator_udid": simulator_udid,
+            "runner_bundle_id": runner_bundle_id, "installation_request_sha256": request_sha256,
+            "fixture_filename": "SyntheticRecoveryReceipt.png", "fixture_sha256": fixture_sha256,
+            "deadline_seconds": 86 if phase == "photos_seed" else 20}
+
+
+def photos_ids_digest(identifiers):
+    return sha("\n".join(identifiers).encode())
+
+
+def validate_photos_receipt_identity(value, expected):
+    check(isinstance(value, dict) and type(value.get("schema_version")) is int
+          and type(value.get("deadline_seconds")) in (int, float)
+          and all(value.get(k) == v for k, v in expected.items()), "foreign Photos receipt")
+
+
+def validate_photos_authorization(authorization):
+    check(isinstance(authorization, dict) and set(authorization) == {
+        "before_raw", "after_raw", "requested", "callback_raw", "prompt_seen", "prompt_accepted",
+        "prompt_runner", "prompt_text", "prompt_button"}, "invalid Photos authorization evidence")
+    # PHAuthorizationStatus: notDetermined=0, authorized=3. Limited is not full access.
+    check(type(authorization["before_raw"]) is int and authorization["before_raw"] in (0, 3)
+          and type(authorization["after_raw"]) is int and authorization["after_raw"] == 3,
+          "Photos full authorization status differs")
+    requested = authorization["before_raw"] == 0
+    check(authorization["requested"] is requested
+          and type(authorization["prompt_seen"]) is bool and type(authorization["prompt_accepted"]) is bool
+          and authorization["prompt_seen"] == authorization["prompt_accepted"],
+          "Photos authorization interaction incomplete")
+    if requested:
+        check(type(authorization["callback_raw"]) is int and authorization["callback_raw"] == 3,
+              "Photos authorization callback is unconfirmed")
+    else:
+        check(authorization["callback_raw"] is None and not authorization["prompt_seen"],
+              "Unexpected request or interaction for preauthorized runner")
+    if authorization["prompt_seen"]:
+        check(authorization["prompt_runner"] == "RoomInventoryUITests-Runner"
+              and authorization["prompt_button"] == "Allow Full Access"
+              and isinstance(authorization["prompt_text"], str)
+              and 0 < len(authorization["prompt_text"].encode()) <= 2048
+              and authorization["prompt_runner"] in authorization["prompt_text"],
+              "Photos runner prompt or callback is unconfirmed")
+    else:
+        check(all(authorization[k] == ""
+              for k in ("prompt_runner", "prompt_text", "prompt_button")),
+              "Unexpected prompt evidence without interaction")
+
+
+def validate_photos_seed(value, expected, fixture):
+    validate_photos_receipt_identity(value, expected)
+    check(value.get("status") == "passed", "Photos seed failed: " + str(value.get("error", "missing status"))[:512])
+    fields = {*expected, "status", "bundle_resource_filename", "fixture_bytes", "read_write_authorized",
+              "authorization", "initial_asset_count", "initial_asset_ids", "initial_asset_ids_sha256",
+              "final_asset_count", "final_asset_ids", "final_asset_ids_sha256", "created_asset_id",
+              "existing_fixture_count", "mutation_attempts", "change_requested", "change_completed",
+              "before_bytes", "before_sha256", "after_bytes", "after_sha256",
+              "finished_within_deadline", "elapsed_seconds"}
+    check(set(value) == fields, "invalid Photos seed fields")
+    check(value["bundle_resource_filename"] == "SyntheticRecoveryReceipt.data", "Photos raw resource differs")
+    validate_photos_authorization(value["authorization"])
+    check(len(fixture) == 74736 and sha(fixture) == expected["fixture_sha256"], "Photos fixture source changed")
+    for key in ("fixture_bytes", "before_bytes", "after_bytes"):
+        check(type(value[key]) is int and value[key] == len(fixture), "Photos seed original byte count differs")
+    check(value["before_sha256"] == value["after_sha256"] == expected["fixture_sha256"], "Photos seed original hash differs")
+    for prefix, limit in (("initial", 63), ("final", 64)):
+        ids = value[prefix + "_asset_ids"]
+        count = value[prefix + "_asset_count"]
+        check(isinstance(ids, list) and type(count) is int and count == len(ids) and 0 <= count <= limit,
+              "Photos seed inventory count differs")
+        check(all(isinstance(i, str) and 0 < len(i.encode()) <= 256 and all(ord(c) >= 32 for c in i) for i in ids),
+              "invalid Photos seed asset identifier")
+        check(ids == sorted(set(ids)) and value[prefix + "_asset_ids_sha256"] == photos_ids_digest(ids),
+              "Photos seed inventory identity differs")
+    created = value["created_asset_id"]
+    check(isinstance(created, str) and 0 < len(created.encode()) <= 256 and all(ord(c) >= 32 for c in created),
+          "invalid Photos created identifier")
+    check(created not in value["initial_asset_ids"]
+          and value["final_asset_ids"] == sorted(value["initial_asset_ids"] + [created]),
+          "Photos seed must add exactly its new asset")
+    check(type(value["existing_fixture_count"]) is int and value["existing_fixture_count"] == 0
+          and type(value["mutation_attempts"]) is int and value["mutation_attempts"] == 1,
+          "Photos seed must perform exactly one fresh creation")
+    check(all(value[k] is True for k in ("read_write_authorized", "change_requested", "change_completed", "finished_within_deadline")),
+          "Photos seed callback or authorization unconfirmed")
+    elapsed = value["elapsed_seconds"]
+    check(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed < 86, "Photos seed deadline")
+
+
+def validate_photos_isolation(value, expected, fixture, seed, seed_sha256):
+    validate_photos_receipt_identity(value, expected)
+    check(value.get("status") == "passed", "Photos isolation failed: " + str(value.get("error", "missing status"))[:512])
+    fields = {*expected, "status", "seed_receipt_sha256", "fixture_bytes", "read_write_authorized", "authorization", "initial_asset_count",
+              "initial_asset_ids_sha256", "fixture_asset_id", "before_bytes", "before_sha256",
+              "removed_asset_count", "removed_asset_ids_sha256", "change_requested", "change_completed",
+              "confirmation_seen", "confirmation_accepted", "confirmation_text",
+              "final_asset_count", "after_bytes", "after_sha256", "finished_within_deadline", "elapsed_seconds"}
+    check(set(value) == fields, "invalid Photos isolation fields")
+    validate_photos_authorization(value["authorization"])
+    fixture_sha256 = expected["fixture_sha256"]
+    check(sha(fixture) == fixture_sha256, "Photos fixture source changed")
+    for key in ("fixture_bytes", "before_bytes", "after_bytes"):
+        check(type(value[key]) is int and value[key] == len(fixture), "Photos original byte count differs")
+    check(value["before_sha256"] == value["after_sha256"] == fixture_sha256, "Photos original hash differs")
+    counts = [value[k] for k in ("initial_asset_count", "removed_asset_count", "final_asset_count")]
+    check(all(type(n) is int for n in counts) and 1 <= counts[0] <= 64
+          and counts[1] == counts[0] - 1 and counts[2] == 1, "Photos inventory counts differ")
+    check(value["change_requested"] is (counts[1] > 0)
+          and all(value[k] is True for k in ("read_write_authorized", "change_completed", "finished_within_deadline")),
+          "Photos isolation callback or authorization unconfirmed")
+    check(type(value["confirmation_seen"]) is bool and type(value["confirmation_accepted"]) is bool
+          and value["confirmation_seen"] == value["confirmation_accepted"], "Photos confirmation incomplete")
+    check(isinstance(value["confirmation_text"], str) and len(value["confirmation_text"].encode()) <= 2048
+          and (bool(value["confirmation_text"]) == value["confirmation_seen"])
+          and (counts[1] > 0 or not value["confirmation_seen"]), "Photos confirmation receipt differs")
+    elapsed = value["elapsed_seconds"]
+    check(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed < 20, "Photos isolation deadline")
+    identifier = value["fixture_asset_id"]
+    check(isinstance(identifier, str) and 0 < len(identifier.encode()) <= 256
+          and all(ord(c) >= 32 for c in identifier), "invalid Photos fixture identifier")
+    for key in ("initial_asset_ids_sha256", "removed_asset_ids_sha256"):
+        check(isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key]), "invalid Photos inventory digest")
+    check(value["seed_receipt_sha256"] == seed_sha256 and value["fixture_asset_id"] == seed["created_asset_id"],
+          "Photos isolation is not bound to this seed")
+    check(value["initial_asset_count"] == seed["final_asset_count"]
+          and value["initial_asset_ids_sha256"] == seed["final_asset_ids_sha256"]
+          and value["removed_asset_ids_sha256"] == seed["initial_asset_ids_sha256"],
+          "Photos inventory changed between seed and isolation")
+
+
 class Collector:
     def __init__(self, config, *, guard, run):
         self.config = dict(config)
@@ -115,6 +245,8 @@ class Collector:
         self.installation_state = "unstarted"
         self.installation_files = {}
         self.installation_device = None
+        self.photos_seed_sha = None
+        self.photos_seed = None
         self.photos_isolation_sha = None
         self.photos_isolated = False
         self.barriers, self.origins, self.nonces = [], [], set()
@@ -449,88 +581,49 @@ class Collector:
         nonce = uuid_string(request["nonce"])
         check(nonce not in self.nonces, "reused bridge nonce")
 
+    def _photos_identity(self, phase):
+        return photos_receipt_identity(self.ids, self.config["simulator_udid"], self.config["runner_bundle_id"],
+                                       self.installation_files["installation-request.json"], self.config["fixture_sha256"], phase)
+
+    def _poll_photos_seed(self):
+        check(self.installation_state == "accepted", "Photos seed requires installation acknowledgement")
+        path = self._plain(self.bridge / "photos-seed.json")
+        if not path.exists():
+            check(self.photos_seed_sha is None, "Photos seed receipt disappeared")
+            return
+        raw, _ = self._read(path, 65536)
+        if self.photos_seed_sha is not None:
+            check(sha(raw) == self.photos_seed_sha, "Photos seed receipt changed")
+            check(self.photos_seed is not None, "Photos seed previously failed")
+            return
+        value = parse(raw)
+        expected = self._photos_identity("photos_seed")
+        validate_photos_receipt_identity(value, expected)
+        # Preserve a bound failure before validation; never convert it to success.
+        self._write("bridge/photos-seed.json", raw)
+        self.photos_seed_sha = sha(raw)
+        fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
+        validate_photos_seed(value, expected, fixture)
+        self.photos_seed = value
+
     def _poll_photos_isolation(self):
         path = self._plain(self.bridge / "photos-isolation.json")
         if not path.exists():
             check(self.photos_isolation_sha is None, "Photos isolation receipt disappeared")
             return
+        check(self.photos_seed is not None, "Photos seed missing before isolation")
         raw, _ = self._read(path, 16384)
         if self.photos_isolation_sha is not None:
             check(sha(raw) == self.photos_isolation_sha, "Photos isolation receipt changed")
             check(self.photos_isolated, "Photos isolation previously failed")
             return
         value = parse(raw)
-        expected = {"schema_version": 1, "phase": "photos_isolation", **self.ids,
-                    "simulator_udid": self.config["simulator_udid"],
-                    "runner_bundle_id": self.config["runner_bundle_id"],
-                    "installation_request_sha256": self.installation_files["installation-request.json"],
-                    "fixture_filename": "SyntheticRecoveryReceipt.png",
-                    "fixture_sha256": self.config["fixture_sha256"], "deadline_seconds": 20}
-        check(isinstance(value, dict) and type(value.get("schema_version")) is int
-              and all(value.get(k) == v for k, v in expected.items()), "foreign Photos isolation receipt")
-        # Preserve a bound failure receipt before propagating its error.
+        expected = self._photos_identity("photos_isolation")
+        validate_photos_receipt_identity(value, expected)
         self._write("bridge/photos-isolation.json", raw)
         self.photos_isolation_sha = sha(raw)
-        check(value.get("status") == "passed", "Photos isolation failed: " + str(value.get("error", "missing status"))[:512])
-        fields = {*expected, "status", "fixture_bytes", "read_write_authorized", "authorization", "initial_asset_count",
-                  "initial_asset_ids_sha256", "fixture_asset_id", "before_bytes", "before_sha256",
-                  "removed_asset_count", "removed_asset_ids_sha256", "change_requested", "change_completed",
-                  "confirmation_seen", "confirmation_accepted", "confirmation_text",
-                  "final_asset_count", "after_bytes", "after_sha256", "finished_within_deadline", "elapsed_seconds"}
-        check(set(value) == fields, "invalid Photos isolation fields")
-        authorization = value["authorization"]
-        check(isinstance(authorization, dict) and set(authorization) == {
-            "before_raw", "after_raw", "requested", "callback_raw", "prompt_seen", "prompt_accepted",
-            "prompt_runner", "prompt_text", "prompt_button"}, "invalid Photos authorization evidence")
-        # PHAuthorizationStatus: notDetermined=0, authorized=3. Limited is not full access.
-        check(type(authorization["before_raw"]) is int and authorization["before_raw"] in (0, 3)
-              and type(authorization["after_raw"]) is int and authorization["after_raw"] == 3,
-              "Photos full authorization status differs")
-        requested = authorization["before_raw"] == 0
-        check(authorization["requested"] is requested
-              and type(authorization["prompt_seen"]) is bool and type(authorization["prompt_accepted"]) is bool
-              and authorization["prompt_seen"] == authorization["prompt_accepted"],
-              "Photos authorization interaction incomplete")
-        if requested:
-            check(type(authorization["callback_raw"]) is int and authorization["callback_raw"] == 3,
-                  "Photos authorization callback is unconfirmed")
-        else:
-            check(authorization["callback_raw"] is None and not authorization["prompt_seen"],
-                  "Unexpected request or interaction for preauthorized runner")
-        if authorization["prompt_seen"]:
-            check(authorization["prompt_runner"] == "RoomInventoryUITests-Runner"
-                  and authorization["prompt_button"] == "Allow Full Access"
-                  and isinstance(authorization["prompt_text"], str)
-                  and 0 < len(authorization["prompt_text"].encode()) <= 2048
-                  and authorization["prompt_runner"] in authorization["prompt_text"],
-                  "Photos runner prompt or callback is unconfirmed")
-        else:
-            check(all(authorization[k] == ""
-                  for k in ("prompt_runner", "prompt_text", "prompt_button")),
-                  "Unexpected prompt evidence without interaction")
         fixture, _ = self._read(Path(self.config["fixture_path"]), 8 * MIB)
-        check(sha(fixture) == self.config["fixture_sha256"], "Photos fixture source changed")
-        for key in ("fixture_bytes", "before_bytes", "after_bytes"):
-            check(type(value[key]) is int and value[key] == len(fixture), "Photos original byte count differs")
-        check(value["before_sha256"] == value["after_sha256"] == self.config["fixture_sha256"], "Photos original hash differs")
-        counts = [value[k] for k in ("initial_asset_count", "removed_asset_count", "final_asset_count")]
-        check(all(type(n) is int for n in counts) and 1 <= counts[0] <= 64
-              and counts[1] == counts[0] - 1 and counts[2] == 1, "Photos inventory counts differ")
-        check(value["change_requested"] is (counts[1] > 0)
-              and all(value[k] is True for k in ("read_write_authorized", "change_completed", "finished_within_deadline")),
-              "Photos isolation callback or authorization unconfirmed")
-        check(type(value["confirmation_seen"]) is bool and type(value["confirmation_accepted"]) is bool
-              and value["confirmation_seen"] == value["confirmation_accepted"], "Photos confirmation incomplete")
-        check(isinstance(value["confirmation_text"], str) and len(value["confirmation_text"].encode()) <= 2048
-              and (bool(value["confirmation_text"]) == value["confirmation_seen"])
-              and (counts[1] > 0 or not value["confirmation_seen"]), "Photos confirmation receipt differs")
-        elapsed = value["elapsed_seconds"]
-        check(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed < 20, "Photos isolation deadline")
-        identifier = value["fixture_asset_id"]
-        check(isinstance(identifier, str) and 0 < len(identifier.encode()) <= 256
-              and all(ord(c) >= 32 for c in identifier), "invalid Photos fixture identifier")
-        for key in ("initial_asset_ids_sha256", "removed_asset_ids_sha256"):
-            check(isinstance(value[key], str) and re.fullmatch("[0-9a-f]{64}", value[key]), "invalid Photos inventory digest")
+        validate_photos_isolation(value, expected, fixture, self.photos_seed, self.photos_seed_sha)
         self.photos_isolated = True
 
     def poll_bridge(self):
@@ -543,6 +636,7 @@ class Collector:
             for name, digest in self.installation_files.items():
                 raw, _ = self._read(self.bridge / name, 16384)
                 check(sha(raw) == digest, "installation handshake changed after acknowledgement")
+            self._poll_photos_seed()
             self._poll_photos_isolation()
         if not self.bridge.exists():
             return len(self.barriers)
@@ -556,7 +650,7 @@ class Collector:
         for entry in entries:
             if entry.name.startswith("."):
                 continue  # In-progress atomic publication, never consumed.
-            if self.installation_state == "accepted" and (entry.name in self.installation_files or entry.name == "photos-isolation.json"):
+            if self.installation_state == "accepted" and (entry.name in self.installation_files or entry.name in ("photos-seed.json", "photos-isolation.json")):
                 continue  # Exact immutable bytes were checked above.
             match = re.fullmatch(r"(request|ack)-(0[1-6])\.json", entry.name)
             check(match is not None, "unexpected bridge file")
@@ -818,7 +912,9 @@ class Collector:
         document = {"schema_version": 1, "source_commit": self.config["source_commit"],
                     "source_run_id": self.ids["source_run_id"], "target_run_id": self.ids["target_run_id"],
                     "ui_evidence": ledger, "ui_attachments": attachments, "artifacts": artifacts,
-                    "collection_receipt": "collection-receipt.json"}
+                    "collection_receipt": "collection-receipt.json",
+                    "startup_evidence": {name: "bridge/" + name + ".json" for name in
+                                         ("installation-request", "installation-ack", "photos-seed", "photos-isolation")}}
         return self._write("collection.json", canonical(document))
 
 

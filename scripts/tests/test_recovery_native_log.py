@@ -3,6 +3,7 @@ from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
+import re
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -192,6 +193,87 @@ class NativeLogCase(unittest.TestCase):
         self.assertEqual(row["status"], "NO_MATCHING_SIGNALS")
         self.assertEqual(row["coverage"], "returned_query_events_only")
         self.assertEqual(row["native_cause"], "UNKNOWN")
+
+
+class QueryCandidateTests(unittest.TestCase):
+    """Check the emitted predicate's restricted grammar against sanitizer cases.
+
+    This models its fixed ASCII substring clauses, not the native log service.
+    No subprocess or native predicate evaluator is used.
+    """
+
+    def setUp(self):
+        self.source = ('process == "simctl" OR process == "com.apple.CoreSimulator.CoreSimulatorService" '
+                       'OR subsystem BEGINSWITH "com.apple.CoreSimulator"')
+        self.assertTrue(H.NATIVE_LOG_PREDICATE.startswith(f"({self.source}) AND ("))
+        self.assertTrue(H.NATIVE_LOG_PREDICATE.endswith(")"))
+        clauses = H.NATIVE_LOG_PREDICATE[len(self.source) + len("() AND ("):-1]
+        values = re.findall(r'eventMessage CONTAINS\[c\] ("(?:[^"\\]|\\.)*")', clauses)
+        self.assertEqual(clauses, " OR ".join("eventMessage CONTAINS[c] " + value for value in values))
+        self.candidates = [json.loads(value).lower() for value in values]
+        self.assertTrue(self.candidates)
+        self.assertTrue(all(re.fullmatch(r"[a-z. ]+", value) for value in self.candidates))
+
+    def candidate(self, item):
+        source = (item["processImagePath"].rsplit("/", 1)[-1]
+                  in ("simctl", "com.apple.CoreSimulator.CoreSimulatorService")
+                  or item["subsystem"].startswith("com.apple.CoreSimulator"))
+        return source and any(value in item["eventMessage"].lower() for value in self.candidates)
+
+    def signals(self, items):
+        return H.sanitize_native_log(json.dumps(items).encode(), 1000, 1086, lambda: None)["signals"]
+
+    def test_every_recognized_term_and_case_remains_a_query_candidate(self):
+        for term in H.NATIVE_LOG_TERMS:
+            for text in (term, term.upper(), term.title()):
+                with self.subTest(text=text):
+                    item = event(eventMessage=f"({text})")
+                    self.assertEqual(self.signals([item])[0]["terms"], [term])
+                    self.assertTrue(self.candidate(item))
+
+    def test_every_domain_survives_without_a_word_boundary_or_numeric_code(self):
+        for domain in H.NATIVE_LOG_DOMAINS:
+            with self.subTest(domain=domain):
+                item = event(eventMessage=f"prefix{domain}suffix")
+                signal = self.signals([item])[0]
+                self.assertEqual(signal["error_domains"], [domain])
+                self.assertEqual(signal["terms"], [])
+                self.assertTrue(self.candidate(item))
+
+    def test_numeric_only_signals_preserve_all_labels_separators_and_number_forms(self):
+        for label in ("Code", "code", "errno"):
+            for separator in ("=", " : ", "\t=\n"):
+                for value in ("0", "-999999", "000042", "\u0664\u0662"):
+                    with self.subTest(label=label, separator=separator, value=value):
+                        item = event(eventMessage=label + separator + value)
+                        signal = self.signals([item])[0]
+                        self.assertEqual(signal["numeric_codes"], [int(value)])
+                        self.assertEqual(signal["terms"], [])
+                        self.assertEqual(signal["error_domains"], [])
+                        self.assertTrue(self.candidate(item))
+
+    def test_all_three_source_categories_are_required_even_with_a_matching_message(self):
+        for process, subsystem in (("/bin/simctl", ""),
+                                   ("/bin/com.apple.CoreSimulator.CoreSimulatorService", ""),
+                                   ("/bin/other", "com.apple.CoreSimulator.Service")):
+            self.assertTrue(self.candidate(event(processImagePath=process, subsystem=subsystem)))
+        self.assertFalse(self.candidate(event(processImagePath="/bin/other", subsystem="unrelated")))
+
+    def test_conservative_candidates_do_not_change_authoritative_sanitizer_rules(self):
+        for text in ("preerrorpost", "CODE=42", "errno=1234567", "nsmacherrordomain"):
+            with self.subTest(text=text):
+                item = event(eventMessage=text)
+                self.assertTrue(self.candidate(item))
+                self.assertEqual(self.signals([item]), [])
+
+    def test_verbose_non_signal_rows_are_excluded_without_losing_retained_signals(self):
+        verbose = event(eventMessage="Thumbnail loaded with orientation and dimensions. " * 100)
+        relevant = [event(eventMessage=text) for text in ("CONNECTION INVALID", "NSMachErrorDomain", "errno=5")]
+        original = [verbose] * 128 + relevant
+        selected = [item for item in original if self.candidate(item)]
+        self.assertEqual(selected, relevant)
+        self.assertEqual(self.signals(selected), self.signals(original))
+        self.assertLess(len(json.dumps(selected)), len(json.dumps(original)) // 100)
 
 
 class ParserTests(unittest.TestCase):

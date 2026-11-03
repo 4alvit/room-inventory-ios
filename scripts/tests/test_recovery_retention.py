@@ -213,7 +213,7 @@ class RecoveryRetentionTests(unittest.TestCase):
         root = collector.runner / "Documents" / ("RecoveryFilesFirstTap-" + collector.ids["journey_run_id"])
         root.mkdir(parents=True)
         identity = {**collector.ids, "simulator_udid": collector.config["simulator_udid"]}
-        png = (ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.png").read_bytes()
+        png = (ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.data").read_bytes()
         for stage in ("before", "after"):
             document = {"schema_version": 1, **identity, "stage": stage}
             ax = {**document, "local_title": "On My iPhone", "selected_target": {"exists": True},

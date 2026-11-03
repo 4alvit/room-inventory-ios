@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Start the StoreKit reset observation window after session preparation, retaining the five-second limit and fresh checks of both transaction sources; record preparation phases for cold-service diagnostics.
 - Select the exact Recovery backup through unique typed Files scopes, with readiness and one direct tap inside the same ten-second window; retain replacement confirmation and all restored-content checks.
 - Give Recovery's cold keyboard setup one 30-second window, then type once into the already-autofocused name field and verify its exact echo within a separate ten-second window; retain mismatch diagnostics and verify successive home, room and item creation through relaunch.
 - Publish runner bridge messages with atomic exclusive rename, avoiding a temporary-link cleanup race while retaining overwrite refusal and strict collector metadata checks.

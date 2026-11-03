@@ -564,15 +564,15 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 record["result"] = returnSucceeded ? "returned" : "failed"
                 if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                    data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
-                    print("ROOM_EXPORT_RETURN_V1 " + text)
+                    print("ROOM_EXPORT_RETURN_V2 " + text)
                 }
             }
             // Each probe takes one immutable app snapshot. Remote Files nodes may
             // be omitted, so their absence is never our return condition. Unique
-            // positive anchors also need current native hittability. firstMatch
-            // avoids exhaustive remote traversal after snapshot uniqueness checks;
+            // positive anchors identify the screen; the run-bound home also
+            // needs current native hittability. firstMatch avoids exhaustive
+            // remote traversal after snapshot uniqueness checks;
             // these observations are sequential, not an atomic hierarchy snapshot.
-            let export = app.buttons.matching(identifier: "inventory.exportMenu").firstMatch
             let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", homeName + ", ")).firstMatch
             let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
                 .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close"))
@@ -599,7 +599,6 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 return .init(frame: root.frame, elements: nodes)
             }, isHittable: { target in
                 switch target {
-                case .exportMenu: return export.isHittable
                 case .home: return home.isHittable
                 case .shareClose: return close.isHittable
                 }

@@ -18,7 +18,7 @@ final class ExportReturnReadiness {
         let frame: CGRect
         let elements: [Element]
     }
-    enum Target: String { case exportMenu, home, shareClose }
+    enum Target: String { case home, shareClose }
     enum Decision: String { case pending, dashboard, share }
     enum Failure: Error { case expired, invalidObservation }
 
@@ -29,7 +29,6 @@ final class ExportReturnReadiness {
     private(set) var closeAttempted = false
     private(set) var observations = 0
     private(set) var lastDecision: Decision?
-    private(set) var lastExportHittable: Bool?
     private(set) var lastHomeHittable: Bool?
     private(set) var lastCloseHittable: Bool?
 
@@ -118,7 +117,6 @@ final class ExportReturnReadiness {
     func poll(observe: () throws -> Observation,
               isHittable: (Target) throws -> Bool,
               close: () throws -> Void) throws -> Bool {
-        lastExportHittable = nil
         lastHomeHittable = nil
         lastCloseHittable = nil
         let observation = try window.perform(observe)
@@ -139,9 +137,8 @@ final class ExportReturnReadiness {
             }
             return false // Closing a share is not proof of dashboard return.
         case .dashboard:
-            let exportHittable = try window.perform { try isHittable(.exportMenu) }
-            lastExportHittable = exportHittable
-            guard exportHittable else { return false }
+            // The snapshot identifies both anchors; one live content hit proves
+            // the run-bound home is interactable within the same allowance.
             let homeHittable = try window.perform { try isHittable(.home) }
             lastHomeHittable = homeHittable
             guard homeHittable else { return false }
@@ -162,7 +159,7 @@ final class ExportReturnReadiness {
             if let probeError { throw probeError }
             _ = try window.remaining()
             return result == .completed && lastDecision == .dashboard
-                && lastExportHittable == true && lastHomeHittable == true
+                && lastHomeHittable == true
         } catch is RecoveryOCRReadinessWindow.Failure {
             throw Failure.expired
         }
@@ -171,11 +168,11 @@ final class ExportReturnReadiness {
     /// Scalars only; unavailable observations stay null. Never resolves UI again.
     var diagnostic: [String: Any] {
         let elapsed = clock() - started
-        return ["schema_version": 1, "phase": "export-return-readiness", "deadline_seconds": 10,
+        return ["schema_version": 2, "phase": "export-return-readiness", "deadline_seconds": 10,
+                "native_hit_target": "home",
                 "elapsed_seconds": elapsed.isFinite ? elapsed as Any : NSNull(),
                 "observations": observations, "last_decision": lastDecision?.rawValue as Any? ?? NSNull(),
                 "close_attempted_once": closeAttempted,
-                "export_hittable": lastExportHittable as Any? ?? NSNull(),
                 "home_hittable": lastHomeHittable as Any? ?? NSNull(),
                 "close_hittable": lastCloseHittable as Any? ?? NSNull()]
     }

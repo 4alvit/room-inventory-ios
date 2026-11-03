@@ -33,7 +33,7 @@ final class ExportReturnReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testImmediateDashboardUsesOneSnapshotAndOrderedPositiveHits() throws {
+    func testImmediateDashboardUsesOneSnapshotAndOneHomeHit() throws {
         var now = 0.0
         let wait = ExportReturnReadiness(homeName: home, clock: { now })
         now = 9.25 // Less than XCTest's former one-second predicate delay remains.
@@ -44,7 +44,33 @@ final class ExportReturnReadinessTests: XCTestCase {
             return self.dashboard()
         }, isHittable: { hits.append($0); return true }, close: { XCTFail("Unexpected Close") }))
         XCTAssertEqual(snapshots, 1)
-        XCTAssertEqual(hits, [.exportMenu, .home])
+        XCTAssertEqual(hits, [.home])
+        XCTAssertFalse(wait.closeAttempted)
+        XCTAssertEqual(wait.diagnostic["schema_version"] as? Int, 2)
+        XCTAssertEqual(wait.diagnostic["native_hit_target"] as? String, "home")
+        XCTAssertNil(wait.diagnostic["export_hittable"])
+    }
+
+    @MainActor
+    func testSnapshotDelayLeavesBudgetForOneNativeHomeHit() throws {
+        var now = 0.0
+        let wait = ExportReturnReadiness(homeName: home, clock: { now })
+        var snapshots = 0
+        var hits = 0
+        XCTAssertTrue(try wait.waitForReturn(observe: {
+            snapshots += 1
+            now += 8.1
+            return self.dashboard()
+        }, isHittable: { _ in
+            // Every native hit costs the same time, including a redundant one.
+            // This closure also works with the previous two-target helper.
+            hits += 1
+            now += 1.3
+            return true
+        }, close: { XCTFail("Unexpected Close") }))
+        XCTAssertEqual(snapshots, 1)
+        XCTAssertEqual(hits, 1)
+        XCTAssertEqual(now, 9.4, accuracy: 0.000_001)
         XCTAssertFalse(wait.closeAttempted)
     }
 
@@ -100,15 +126,14 @@ final class ExportReturnReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testBothNativeHitsRequiredAndNoSecondHitAfterFirstNegative() throws {
-        for blocked in [ExportReturnReadiness.Target.exportMenu, .home] {
-            let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
-            var hits: [ExportReturnReadiness.Target] = []
-            XCTAssertFalse(try wait.poll(observe: { self.dashboard() }, isHittable: {
-                hits.append($0); return $0 != blocked
-            }, close: { XCTFail("Unexpected Close") }))
-            XCTAssertEqual(hits, blocked == .exportMenu ? [.exportMenu] : [.exportMenu, .home])
-        }
+    func testNonhittableHomeRejectsDashboardWithoutAnotherNativeHit() throws {
+        let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+        var hits: [ExportReturnReadiness.Target] = []
+        XCTAssertFalse(try wait.poll(observe: { self.dashboard() }, isHittable: {
+            hits.append($0); return false
+        }, close: { XCTFail("Unexpected Close") }))
+        XCTAssertEqual(hits, [.home])
+        XCTAssertEqual(wait.lastHomeHittable, false)
     }
 
     @MainActor
@@ -184,7 +209,7 @@ final class ExportReturnReadinessTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         XCTAssertEqual(snapshots, 2)
         XCTAssertEqual(closes, 1)
-        XCTAssertEqual(hits, [.shareClose, .exportMenu, .home])
+        XCTAssertEqual(hits, [.shareClose, .home])
     }
 
     @MainActor
@@ -235,7 +260,7 @@ final class ExportReturnReadinessTests: XCTestCase {
 
     @MainActor
     func testLateSnapshotOrHitCannotAuthorizeReturnOrClose() {
-        for stage in ["snapshot", "export", "home", "close"] {
+        for stage in ["snapshot", "home", "close"] {
             var now = 0.0
             let wait = ExportReturnReadiness(homeName: home, clock: { now })
             var closes = 0
@@ -243,8 +268,7 @@ final class ExportReturnReadinessTests: XCTestCase {
                 if stage == "snapshot" { now = 10 }
                 return stage == "close" ? self.share() : self.dashboard()
             }, isHittable: { target in
-                if (stage == "export" && target == .exportMenu)
-                    || (stage == "home" && target == .home)
+                if (stage == "home" && target == .home)
                     || (stage == "close" && target == .shareClose) { now = 10 }
                 return true
             }, close: { closes += 1 }))

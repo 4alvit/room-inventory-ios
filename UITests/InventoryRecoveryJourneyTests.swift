@@ -185,7 +185,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try checkpoint("target_empty_free", observations: emptyAndFree(app), app: app)
         try selectExport("export.restore", app: app)
         try enterFilesFolder(folder, create: false, app: app)
-        try selectRestoreBackup(folder: folder, app: app)
+        try selectRestoreBackup(folder: folder, journeyID: journeyID, app: app)
         let confirmation = app.alerts["Replace the current inventory?"]
         try ledger.require("replacement warning presented", confirmation.waitForExistence(timeout: 10))
         let warning = confirmation.staticTexts["Replace the current inventory?"].label
@@ -799,7 +799,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         return app.descendants(matching: .any).matching(predicate).firstMatch
     }
 
-    private func selectRestoreBackup(folder: String, app: XCUIApplication) throws {
+    private func selectRestoreBackup(folder: String, journeyID: String, app: XCUIApplication) throws {
         let filename = "backup-\(journeyID).roominventory"
         let began = ProcessInfo.processInfo.systemUptime
         let selection = FilesNavigationReadiness(timeout: 10)

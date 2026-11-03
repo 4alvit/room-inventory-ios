@@ -26,8 +26,11 @@ enum AutofocusedNameEntry {
         let fields = app.textFields.matching(identifier: "entry.name")
         let field = fields.element(boundBy: 0)
         let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
-        let continueButton = introductions.element(boundBy: 0).buttons
-            .matching(NSPredicate(format: "label == %@", "Continue")).element(boundBy: 0)
+        // Count and snapshot recognition below establish uniqueness before use.
+        // Stop resolution at that known owner/button instead of indexing all matches.
+        let introduction = introductions.firstMatch
+        let continueButton = introduction.buttons
+            .matching(NSPredicate(format: "label == %@", "Continue")).firstMatch
         var placeholder: String?
         var stage = "keyboard_setup"
         do {
@@ -37,7 +40,7 @@ enum AutofocusedNameEntry {
                 guard state.introductionCount == 1 else { return state }
                 // Use the same exact owner/marker/button recognition as Localization.
                 // A root application snapshot can omit this keyboard sibling.
-                let root = try readiness.perform { try introductions.element(boundBy: 0).snapshot() }
+                let root = try readiness.perform { try introduction.snapshot() }
                 guard root.elementType == .other,
                       root.identifier == NameEntryKeyboardReadiness.introductionID else { return state }
                 var pending: [any XCUIElementSnapshot] = [root]

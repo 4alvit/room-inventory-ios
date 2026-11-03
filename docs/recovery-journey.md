@@ -492,6 +492,18 @@ input cannot authorize Save; there is no generic Continue action, field-tap
 fallback, retyping or keyboard-visibility requirement. Generic item-editor
 fields still use their existing tap-based input.
 
+The autofocus adapter resolves the recognized owner and Continue button with
+`firstMatch` only after the same owner-count and snapshot-recognition guards.
+The snapshot still requires the exact owner identifier, exact marker and exactly
+one enabled Continue button; native hittability and the single tap remain gated
+by the setup deadline. The name-field query is unchanged. These are sequential
+observations, not an atomic UI snapshot. In attempt 2 of hosted run `41733453608`,
+indexed owner resolution took about 17.8 seconds while fetching the resolved
+owner snapshot took 0.08 seconds. Continue resolution took another 6.6 seconds;
+the setup watchdog cancelled the later tap lookup before event synthesis.
+Short-circuit resolution reduces traversal work without increasing either
+deadline. Its effect on hosted latency still requires a fresh passing run.
+
 In hosted run `41689555867`, the former shared ten-second waiter interrupted
 the first exact introduction-owner query before it returned a count. The native
 session records the watchdog interruption and cancelled query; the failure

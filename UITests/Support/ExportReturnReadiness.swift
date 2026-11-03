@@ -21,11 +21,30 @@ final class ExportReturnReadiness {
     enum Target: String { case home, shareClose }
     enum Decision: String { case pending, dashboard, share }
     enum Failure: Error { case expired, invalidObservation }
+    private enum Reason: String {
+        case filesControl, alert, shareIdentity, shareCloseNotReady
+        case dashboardIdentity, dashboardNotReady, homeLabel, dashboard, share
+        case homeNotHittable, closeNotHittable, closeAlreadyAttempted, awaitingReturnAfterClose
+    }
+    private struct Classification {
+        let decision: Decision
+        let reason: Reason
+        let counts: [String: Int]
+    }
+    private enum Stage: String { case snapshot, classification, homeHit, closeHit, close, finalCheck, waitReturn }
 
     private let window: RecoveryOCRReadinessWindow
     private let clock: () -> TimeInterval
     private let started: TimeInterval
+    private let diagnosticClock: () -> TimeInterval
+    private let diagnosticStarted: TimeInterval
     private let homeName: String
+    private var records: [[String: Any]] = []
+    private var omittedRecords = 0
+    private var countersSaturated = false
+    private var lastReason: Reason?
+    private var lastCounts: [String: Int]?
+    private var errorStage: Stage?
     private(set) var closeAttempted = false
     private(set) var observations = 0
     private(set) var lastDecision: Decision?
@@ -33,11 +52,16 @@ final class ExportReturnReadiness {
     private(set) var lastCloseHittable: Bool?
 
     init(homeName: String,
-         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         diagnosticClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.homeName = homeName
         self.clock = clock
         started = clock()
-        window = RecoveryOCRReadinessWindow(clock: clock)
+        self.diagnosticClock = diagnosticClock
+        diagnosticStarted = diagnosticClock()
+        // External Files/share transitions have their own finite allowance.
+        // OCR callers retain the shared primitive's ten-second default.
+        window = RecoveryOCRReadinessWindow(timeout: 30, clock: clock)
     }
 
     private static let shareOwnerIDs: Set<String> = [
@@ -53,6 +77,10 @@ final class ExportReturnReadiness {
 
     /// Pure classification; live native hit testing is still required below.
     static func decision(_ observation: Observation, homeName: String) throws -> Decision {
+        try classify(observation, homeName: homeName).decision
+    }
+
+    private static func classify(_ observation: Observation, homeName: String) throws -> Classification {
         let nodes = observation.elements
         guard !homeName.isEmpty, nodes.count <= 10_000,
               nodes.enumerated().allSatisfy({ index, node in
@@ -73,33 +101,46 @@ final class ExportReturnReadiness {
         let closes = nodes.indices.filter {
             nodes[$0].kind == .button && nodes[$0].identifier == "header.closeButton"
         }
-        // A positively observed Files control or alert always blocks actions.
-        // Conversely, its omission from an app-only snapshot proves nothing.
-        if nodes.contains(where: { $0.identifier == "DOCPicker.actionButton" || $0.kind == .alert }) {
-            return .pending
-        }
-        if !owners.isEmpty || !headers.isEmpty || !closes.isEmpty {
-            guard headers.count == 1, closes.count == 1,
-                  let header = headers.first, let close = closes.first,
-                  !owners.isEmpty, owners.allSatisfy({ below(header, $0) }),
-                  Set(owners.map { nodes[$0].identifier }).count == owners.count,
-                  below(close, header),
-                  nodes[close].label == "Close", nodes[close].enabled,
-                  visible(nodes[header].frame, in: observation.frame),
-                  visible(nodes[close].frame, in: nodes[header].frame) else { return .pending }
-            return .share
-        }
         let exports = nodes.indices.filter {
             nodes[$0].kind == .button && nodes[$0].identifier == "inventory.exportMenu"
         }
         let homes = nodes.indices.filter {
             nodes[$0].kind == .button && nodes[$0].label.hasPrefix(homeName + ", ")
         }
+        let files = nodes.filter { $0.identifier == "DOCPicker.actionButton" }.count
+        let alerts = nodes.filter { $0.kind == .alert }.count
+        let counts = ["nodes": nodes.count, "owners": owners.count, "headers": headers.count,
+                      "closes": closes.count, "exports": exports.count, "homes": homes.count,
+                      "files": files, "alerts": alerts]
+        func result(_ decision: Decision, _ reason: Reason) -> Classification {
+            Classification(decision: decision, reason: reason, counts: counts)
+        }
+        // A positively observed Files control or alert always blocks actions.
+        // Conversely, its omission from an app-only snapshot proves nothing.
+        if files > 0 { return result(.pending, .filesControl) }
+        if alerts > 0 { return result(.pending, .alert) }
+        if !owners.isEmpty || !headers.isEmpty || !closes.isEmpty {
+            guard headers.count == 1, closes.count == 1,
+                  let header = headers.first, let close = closes.first,
+                  !owners.isEmpty, owners.allSatisfy({ below(header, $0) }),
+                  Set(owners.map { nodes[$0].identifier }).count == owners.count,
+                  below(close, header) else { return result(.pending, .shareIdentity) }
+            guard nodes[close].label == "Close", nodes[close].enabled,
+                  visible(nodes[header].frame, in: observation.frame),
+                  visible(nodes[close].frame, in: nodes[header].frame) else {
+                return result(.pending, .shareCloseNotReady)
+            }
+            return result(.share, .share)
+        }
         guard exports.count == 1, homes.count == 1,
-              let export = exports.first, let home = homes.first,
-              nodes[export].enabled, nodes[home].enabled,
+              let export = exports.first, let home = homes.first else {
+            return result(.pending, .dashboardIdentity)
+        }
+        guard nodes[export].enabled, nodes[home].enabled,
               visible(nodes[export].frame, in: observation.frame),
-              visible(nodes[home].frame, in: observation.frame) else { return .pending }
+              visible(nodes[home].frame, in: observation.frame) else {
+            return result(.pending, .dashboardNotReady)
+        }
         var insideHome = Array(repeating: false, count: nodes.count)
         var exactHomeLabel = false
         for index in nodes.indices {
@@ -110,8 +151,8 @@ final class ExportReturnReadiness {
                 exactHomeLabel = true
             }
         }
-        guard exactHomeLabel else { return .pending }
-        return .dashboard
+        guard exactHomeLabel else { return result(.pending, .homeLabel) }
+        return result(.dashboard, .dashboard)
     }
 
     func poll(observe: () throws -> Observation,
@@ -119,31 +160,67 @@ final class ExportReturnReadiness {
               close: () throws -> Void) throws -> Bool {
         lastHomeHittable = nil
         lastCloseHittable = nil
-        let observation = try window.perform(observe)
-        observations += 1
-        let decision = try window.perform { try Self.decision(observation, homeName: homeName) }
-        lastDecision = decision
-        switch decision {
-        case .pending:
-            return false
-        case .share:
-            guard !closeAttempted else { return false }
-            let hittable = try window.perform { try isHittable(.shareClose) }
-            lastCloseHittable = hittable
-            guard hittable else { return false }
-            try window.perform {
-                closeAttempted = true // Consumed before an action that can throw.
-                try close()
+        let began = diagnosticClock()
+        var stage = Stage.snapshot
+        var durations: [String: Any] = [:]
+        var record: [String: Any] = ["result": "pending"]
+        func measured<Value>(_ next: Stage, _ operation: () throws -> Value) rethrows -> Value {
+            stage = next
+            let start = diagnosticClock()
+            defer { durations[next.rawValue] = Self.duration(from: start, to: diagnosticClock()) }
+            return try operation()
+        }
+        defer {
+            record["started_seconds"] = Self.duration(from: diagnosticStarted, to: began)
+            record["elapsed_seconds"] = Self.duration(from: began, to: diagnosticClock())
+            record["stage_seconds"] = durations
+            record["last_stage"] = stage.rawValue
+            if records.count < 32 { records.append(record) }
+            else if omittedRecords < 10_000 { omittedRecords += 1 }
+            else { countersSaturated = true }
+        }
+        do {
+            let observation = try measured(.snapshot) { try window.perform(observe) }
+            if observations < 10_000 { observations += 1 } else { countersSaturated = true }
+            let classification = try measured(.classification) {
+                try window.perform { try Self.classify(observation, homeName: homeName) }
             }
-            return false // Closing a share is not proof of dashboard return.
-        case .dashboard:
-            // The snapshot identifies both anchors; one live content hit proves
-            // the run-bound home is interactable within the same allowance.
-            let homeHittable = try window.perform { try isHittable(.home) }
-            lastHomeHittable = homeHittable
-            guard homeHittable else { return false }
-            _ = try window.remaining()
-            return true
+            lastDecision = classification.decision
+            lastReason = classification.reason
+            lastCounts = classification.counts
+            record["decision"] = classification.decision.rawValue
+            record["counts"] = classification.counts
+            defer { record["reason"] = lastReason?.rawValue }
+            switch classification.decision {
+            case .pending:
+                return false
+            case .share:
+                guard !closeAttempted else { lastReason = .closeAlreadyAttempted; return false }
+                let hittable = try measured(.closeHit) { try window.perform { try isHittable(.shareClose) } }
+                lastCloseHittable = hittable
+                guard hittable else { lastReason = .closeNotHittable; return false }
+                try measured(.close) {
+                    try window.perform {
+                        closeAttempted = true // Consumed before an action that can throw.
+                        try close()
+                    }
+                }
+                lastReason = .awaitingReturnAfterClose
+                return false // Closing a share is not proof of dashboard return.
+            case .dashboard:
+                // The snapshot identifies both anchors; one live content hit proves
+                // the run-bound home is interactable within the same allowance.
+                let homeHittable = try measured(.homeHit) { try window.perform { try isHittable(.home) } }
+                lastHomeHittable = homeHittable
+                guard homeHittable else { lastReason = .homeNotHittable; return false }
+                _ = try measured(.finalCheck) { try window.remaining() }
+                record["result"] = "ready"
+                return true
+            }
+        } catch {
+            errorStage = stage
+            record["result"] = "failed"
+            throw error // Diagnostics never replace the original native error.
         }
     }
 
@@ -161,17 +238,31 @@ final class ExportReturnReadiness {
             return result == .completed && lastDecision == .dashboard
                 && lastHomeHittable == true
         } catch is RecoveryOCRReadinessWindow.Failure {
+            if errorStage == nil { errorStage = .waitReturn }
             throw Failure.expired
         }
     }
 
-    /// Scalars only; unavailable observations stay null. Never resolves UI again.
+    private static func duration(from start: TimeInterval, to end: TimeInterval) -> Any {
+        let seconds = end - start
+        return start.isFinite && end.isFinite && seconds.isFinite && seconds >= 0
+            ? seconds as Any : NSNull()
+    }
+
+    /// Fixed categories and at most 32 records. No labels, paths or error text.
+    /// Timing uses a separate read-only clock, never the injected deadline clock.
+    /// Unavailable observations stay null. Never resolves UI again.
     var diagnostic: [String: Any] {
         let elapsed = clock() - started
-        return ["schema_version": 2, "phase": "export-return-readiness", "deadline_seconds": 10,
+        return ["schema_version": 3, "phase": "export-return-readiness", "deadline_seconds": 30,
                 "native_hit_target": "home",
                 "elapsed_seconds": elapsed.isFinite ? elapsed as Any : NSNull(),
                 "observations": observations, "last_decision": lastDecision?.rawValue as Any? ?? NSNull(),
+                "last_reason": lastReason?.rawValue as Any? ?? NSNull(),
+                "last_counts": lastCounts as Any? ?? NSNull(),
+                "error_stage": errorStage?.rawValue as Any? ?? NSNull(),
+                "timing_clock": "process_uptime", "records": records,
+                "omitted_records": omittedRecords, "counters_saturated": countersSaturated,
                 "close_attempted_once": closeAttempted,
                 "home_hittable": lastHomeHittable as Any? ?? NSNull(),
                 "close_hittable": lastCloseHittable as Any? ?? NSNull()]

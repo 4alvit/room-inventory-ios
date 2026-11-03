@@ -465,27 +465,43 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. It observes the live inline-editor query until its
-count reaches zero within the original ten-second window, starting the first
-probe inside the active waiter without its initial polling delay. It does not
-resolve the disappearing indexed editor: in the main run `41519955826`, that
-native query remained pending even though Files reported navigation into the
-correct folder before the deadline. Interrupted, failed or late observations
-cannot prove dismissal. The exact folder title and open state remain required
-before saving. The journey opens the folder if Files has not already entered it.
+unique keyboard Done button. A ten-second window then requires the exact new
+folder title to be unique, enabled and natively hittable. It does not query the
+inline editor after Files removes it. In run `41618087432`, resolving that
+disappearing editor exhausted the window even though Files had entered the new
+folder. The positive title check passed in PR run `41627999490` and actual-main
+run `41635226064`; in the latter it took 8.618 seconds. Interrupted, failed or
+late observations cannot establish readiness. The exact folder title and open
+state remain required before saving.
 The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
-Saving uses the same bounded live-query observer for the exact Save selector
-used by the tap. In run `41534245115`, inline rename passed, but the old
-element-bound Save absence predicate spent its allowance resolving a remote
-hierarchy and timed out. The native session recorded the host presentation's
-disappearance before the deadline; the later failure screenshot showed the
-dashboard. Neither observation proves that the exported file was committed.
-The journey still requires the dashboard to be interactive and the runner's
-after-export barrier to verify the actual saved bytes. A zero query count only
-proves that the matching UI control is absent; late counts and query failures
-do not authorize progress.
+After one real Save, return from the external Files service has a separate
+30-second monotonic allowance. Each serial probe classifies one immutable app
+snapshot. An observed Files action or alert blocks progress. A remaining share
+sheet may receive at most one enabled, geometrically valid, natively hittable
+Close action, identified under its unique owned header. Success requires unique,
+visible, enabled export and run-bound home anchors, the exact home text under
+that home, and a fresh native hit test of the home. Neither a missing remote
+Files node nor closing the share sheet establishes success. The after-export
+barrier must still verify the actual saved bytes.
+
+In actual-main run `41635226064`, the first three snapshots returned pending.
+The fourth was interrupted while resolving a remote AX element when the former
+ten-second allowance expired. Home and Close were never hit-tested. A later
+screenshot showed the dashboard, and a post-failure capture found a byte-equal
+saved ZIP. These establish neither the exact earlier pending reason nor timely
+return. Thirty seconds gives this external transition the same bounded readiness
+allowance as initial Files presentation; the ten-second OCR windows and overall
+XCTest/controller limits remain unchanged. It does not identify or eliminate the
+underlying native latency. Late results and native errors remain failures, and
+neither polling nor an error restarts the allowance.
+
+`ROOM_EXPORT_RETURN_V3` records bounded reasons/counts from those existing
+snapshots and the current native stage, without another accessibility query or
+private labels. This distinguishes a completed negative observation from a
+query interrupted before it returns. The complete save/export/restore journey,
+including all six byte-verification barriers, remains the acceptance gate.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app
 snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy

@@ -4,20 +4,26 @@ import XCTest
 /// Snapshot, hit testing and tap admission share one readiness allowance.
 struct RecoveryOCRReadinessWindow {
     enum Failure: Error, Equatable, CustomStringConvertible {
-        case expired
+        case expired, invalidAllowance
 
-        var description: String { "OCR readiness deadline expired" }
+        var description: String {
+            self == .expired ? "OCR readiness deadline expired" : "Invalid readiness allowance"
+        }
     }
 
     private let clock: () -> TimeInterval
     private let end: TimeInterval
+    private let validAllowance: Bool
 
-    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(timeout: TimeInterval = 10,
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.clock = clock
-        end = clock() + 10
+        validAllowance = timeout.isFinite && timeout > 0 && timeout <= 30
+        end = clock() + timeout
     }
 
     func remaining() throws -> TimeInterval {
+        guard validAllowance else { throw Failure.invalidAllowance }
         let value = end - clock()
         guard value > 0 else { throw Failure.expired }
         return value

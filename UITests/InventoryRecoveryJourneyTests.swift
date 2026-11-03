@@ -563,8 +563,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 record["role"] = role.rawValue
                 record["result"] = returnSucceeded ? "returned" : "failed"
                 if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
-                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
-                    print("ROOM_EXPORT_RETURN_V2 " + text)
+                   data.count <= 16_384, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_EXPORT_RETURN_V3 " + text)
                 }
             }
             // Each probe takes one immutable app snapshot. Remote Files nodes may

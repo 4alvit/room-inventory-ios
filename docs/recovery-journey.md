@@ -289,10 +289,10 @@ installation-only launch shares the existing XCTest/controller deadlines; it doe
 not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
-Opening the system Photos picker has one 30-second monotonic appearance window,
+Opening the system Photos picker has one 90-second monotonic appearance window,
 starting after the single `import.photos` activation. The first live existence
 probe runs on the active waiter's first run-loop turn. A negative query schedules
-the next probe one second after it returns, so native queries cannot overlap.
+the next probe 0.1 seconds after it returns, so native queries cannot overlap.
 Waiter teardown disables queued probes and cancels the pending timer. This avoids
 `waitForExistence`'s additional query after its timeout; an already active native
 query may still return late, and a positive result at or after the deadline is
@@ -305,6 +305,16 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `41663409152`, the former 30-second window began at 16:06:31.516 UTC.
+Six queries returned no match; the seventh was interrupted by the waiter's
+deadline. The failure screenshot at 16:07:06.503 still showed Loading. A later
+accessibility tree at 16:07:39.797 contained the real photo, 68.281 seconds after
+the wait began; it does not establish exactly when the photo first became ready.
+The 90-second allowance accommodates this observed first-use delay with bounded
+headroom, without claiming to repair its underlying cause or guarantee a future
+pass. It remains inside the same 720-second native test allowance and existing
+controller limits; no negative probe renews the deadline.
 
 In run `41450416826`, two live existence queries completed without a match; the
 second took 26.7 seconds. The remote Photos view appeared late in that query.

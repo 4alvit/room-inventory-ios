@@ -10,7 +10,7 @@
 - Keep the bounded diagnostic window when device-command cleanup overruns its deadline, recording the actual duration, clipping and clock-validation stage without changing command limits or failure status.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.
 - Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
-- Start Photos appearance probes immediately inside the active waiter, reduce idle time between negative probes and cancel queued probes when it exits, retaining the 30-second deadline and rejecting late results.
+- Allow up to 90 seconds for the first system Photos presentation after an observed delayed load, with immediate serialized probes, no renewed deadline and late-result rejection inside the existing overall test limits.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
 - Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and the shared ten-second check for a unique, interactive field.
 - Observe Files inline-folder rename and Save dismissal through live queries, retaining the ten-second deadline, exact destination-folder checks and exported-byte verification.

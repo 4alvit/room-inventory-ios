@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 
 /// The system Photos picker can present after its launch tap has returned.
-/// Keep its appearance wait within one monotonic, nonrenewable allowance.
+/// Allow cold first presentation within one monotonic, nonrenewable window.
 struct RecoveryPhotosAppearanceWindow {
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired
@@ -15,7 +15,7 @@ struct RecoveryPhotosAppearanceWindow {
 
     init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.clock = clock
-        end = clock() + 30
+        end = clock() + 90
     }
 
     func remaining() throws -> TimeInterval {

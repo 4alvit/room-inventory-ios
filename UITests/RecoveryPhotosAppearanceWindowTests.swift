@@ -6,15 +6,29 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
         now = 101
         XCTAssertTrue(try window.wait { remaining in
-            XCTAssertEqual(remaining, 29)
+            XCTAssertEqual(remaining, 89)
             now = 121
             return true
         })
-        XCTAssertEqual(try window.remaining(), 9)
+        XCTAssertEqual(try window.remaining(), 69)
+    }
+
+    func testColdFirstPresentationAtSixtyEightSecondsKeepsOriginalDeadline() throws {
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        XCTAssertFalse(try window.wait { _ in
+            now = 20
+            return false
+        })
+        XCTAssertTrue(try window.wait { _ in
+            now = 68
+            return true
+        })
+        XCTAssertEqual(try window.remaining(), 22)
     }
 
     func testExactOrLateSuccessfulQueryCannotAuthorizeSelection() {
-        for elapsed in [30.0, 30.001] {
+        for elapsed in [90.0, 90.001] {
             var now = 0.0
             let window = RecoveryPhotosAppearanceWindow(clock: { now })
             var selected = false
@@ -29,7 +43,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     func testExpiredWindowDoesNotStartAnotherQuery() {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 30
+        now = 90
         var queries = 0
         XCTAssertThrowsError(try window.wait { _ in queries += 1; return true }) {
             XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired)
@@ -41,11 +55,11 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
         XCTAssertFalse(try window.wait { remaining in
-            XCTAssertEqual(remaining, 30)
+            XCTAssertEqual(remaining, 90)
             now = 20
             return false
         })
-        XCTAssertEqual(try window.remaining(), 10)
+        XCTAssertEqual(try window.remaining(), 70)
     }
 
     func testQueryFailureIsPreservedAndCannotAuthorizeSelection() {
@@ -55,7 +69,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         var selected = false
         XCTAssertThrowsError(try {
             _ = try window.wait { _ in
-                now = 31
+                now = 91
                 throw QueryFailure.unavailable
             }
             selected = true
@@ -67,7 +81,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     func testFirstProbeStartsBeforePredicatePollingDelay() throws {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 29.5 // Less than the native predicate's initial one-second delay.
+        now = 89.5 // Less than the native predicate's initial one-second delay.
         var calls = 0
         XCTAssertTrue(try window.waitForProbe {
             XCTAssertTrue(Thread.isMainThread)
@@ -81,7 +95,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     func testNegativeProbeCanBeRetriedWithinRemainingFractionOfASecond() throws {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 29.25
+        now = 89.25
         var calls = 0
         XCTAssertTrue(try window.waitForProbe {
             calls += 1
@@ -98,7 +112,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         let window = RecoveryPhotosAppearanceWindow(clock: {
             used + ProcessInfo.processInfo.systemUptime - start
         })
-        used = 29.25
+        used = 89.25
         var calls = 0
         var nested: XCTWaiter.Result?
         XCTAssertThrowsError(try window.waitForProbe {
@@ -139,7 +153,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     func testTimedOutWaitCancelsPendingTimerAndHasNoFinalQuery() throws {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 29.5
+        now = 89.5
         var calls = 0
         XCTAssertFalse(try window.waitForProbe { calls += 1; return false })
         let callsAtReturn = calls
@@ -154,7 +168,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     func testExpiredWindowDoesNotQueueFirstProbe() {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 30
+        now = 90
         var calls = 0
         XCTAssertThrowsError(try window.waitForProbe { calls += 1; return true }) {
             XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired)
@@ -168,7 +182,7 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         var clockReads = 0
         let window = RecoveryPhotosAppearanceWindow(clock: {
             clockReads += 1
-            return clockReads <= 2 ? 0 : 30
+            return clockReads <= 2 ? 0 : 90
         })
         var calls = 0
         XCTAssertThrowsError(try window.waitForProbe { calls += 1; return true }) {
@@ -180,10 +194,10 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
 
     @MainActor
     func testExactOrLateProbeCannotAuthorizeSelectionOrStartAnotherQuery() {
-        for elapsed in [30.0, 30.001] {
+        for elapsed in [90.0, 90.001] {
             var now = 0.0
             let window = RecoveryPhotosAppearanceWindow(clock: { now })
-            now = 29.25
+            now = 89.25
             var calls = 0
             var selected = false
             XCTAssertThrowsError(try {

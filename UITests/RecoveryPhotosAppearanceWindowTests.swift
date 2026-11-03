@@ -92,17 +92,36 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     }
 
     @MainActor
-    func testNegativeProbeCanBeRetriedWithinRemainingFractionOfASecond() throws {
+    func testNegativeProbeLeavesAQuietIntervalBeforeNextQuery() throws {
+        @MainActor final class Observation {
+            var calls = 0
+            var quietIntervalObserved = false
+        }
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
-        now = 89.25
-        var calls = 0
+        now = 88
+        let observation = Observation()
+        var quietInterval: Timer?
+        defer { quietInterval?.invalidate() }
         XCTAssertTrue(try window.waitForProbe {
-            calls += 1
-            return calls == 2
+            observation.calls += 1
+            if observation.calls == 1 {
+                let timer = Timer(timeInterval: 0.5, repeats: false) { _ in
+                    MainActor.assumeIsolated {
+                        XCTAssertEqual(observation.calls, 1)
+                        observation.quietIntervalObserved = true
+                    }
+                }
+                quietInterval = timer
+                RunLoop.main.add(timer, forMode: .default)
+                return false
+            }
+            XCTAssertTrue(observation.quietIntervalObserved)
+            return observation.calls == 2
         })
-        XCTAssertEqual(calls, 2)
-        XCTAssertEqual(try window.remaining(), 0.75)
+        XCTAssertEqual(observation.calls, 2)
+        XCTAssertTrue(observation.quietIntervalObserved)
+        XCTAssertEqual(try window.remaining(), 2)
     }
 
     @MainActor

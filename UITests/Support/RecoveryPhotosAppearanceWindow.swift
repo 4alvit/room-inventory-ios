@@ -72,9 +72,10 @@ struct RecoveryPhotosAppearanceWindow {
             } else {
                 // Native queries may pump the run loop. Schedule only after
                 // this query returns so a second probe cannot overlap it.
-                // Leave room for another query within the original deadline
-                // when the remote Photos service answers slowly.
-                let next = Timer(timeInterval: 0.1, repeats: false) { [weak self] _ in
+                // Give the app and remote Photos service a quiet interval
+                // between full accessibility queries during cold presentation.
+                // This delay still consumes the original appearance window.
+                let next = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated { self?.poll() }
                 }
                 timer = next

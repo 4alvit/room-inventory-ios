@@ -304,7 +304,8 @@ still prove that later scenario launches preserve the final pinned containers.
 Opening the system Photos picker has one 90-second monotonic appearance window,
 starting after the single `import.photos` activation. The first live existence
 probe runs on the active waiter's first run-loop turn. A negative query schedules
-the next probe 0.1 seconds after it returns, so native queries cannot overlap.
+the next probe one second after it returns, so native queries cannot overlap
+and accessibility traversal leaves a quiet interval for presentation work.
 Waiter teardown disables queued probes and cancels the pending timer. This avoids
 `waitForExistence`'s additional query after its timeout; an already active native
 query may still return late, and a positive result at or after the deadline is
@@ -327,6 +328,17 @@ The 90-second allowance accommodates this observed first-use delay with bounded
 headroom, without claiming to repair its underlying cause or guarantee a future
 pass. It remains inside the same 720-second native test allowance and existing
 controller limits; no negative probe renews the deadline.
+
+Run `41721079406` still reached the 90-second deadline with the picker showing
+Loading. Its 80 query activities occupied 81.573 seconds of that window; the
+79 gaps totaled 8.423 seconds. These are wall-clock activity spans, not CPU
+measurements. The failure screenshot and accessibility attachment retained the
+unavailable picker, and session events show the remote picker continuing to
+present after the failure. Spacing negative probes by one second reduces the
+observer's repeated accessibility work. It does not establish that polling caused
+the delayed presentation or guarantee recovery; the exact-source hosted journey
+must still pass. The first probe remains immediate, and the same 90-second
+deadline rejects late results without another picker launch or a relaxed selector.
 
 In run `41450416826`, two live existence queries completed without a match; the
 second took 26.7 seconds. The remote Photos view appeared late in that query.

@@ -12,6 +12,7 @@
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
 - Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and the shared ten-second check for a unique, interactive field.
 - Observe Files inline-folder rename and Save dismissal through live queries, retaining the ten-second deadline, exact destination-folder checks and exported-byte verification.
+- Share immediate, bounded dismissal queries across OCR, item editors, name entry, privacy and Files tests, preserving the original ten-second limit and rejecting late or failed observations.
 
 ## [0.1.0] - development preview
 

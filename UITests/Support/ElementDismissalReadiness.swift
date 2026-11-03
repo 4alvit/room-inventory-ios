@@ -1,14 +1,14 @@
 import Foundation
 import XCTest
 
-/// Observe a live Files query after Done or Save, without resolving a vanished
-/// element. Navigation and exported bytes are verified separately by the caller.
+/// Observe a live query after a dismissal action without resolving a vanished
+/// element. The caller separately verifies the resulting UI and saved data.
 @MainActor
-final class RecoveryFilesDismissalReadiness {
+final class ElementDismissalReadiness {
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired
 
-        var description: String { "Files dismissal deadline expired" }
+        var description: String { "Element dismissal deadline expired" }
     }
 
     private let window: RecoveryOCRReadinessWindow

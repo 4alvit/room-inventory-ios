@@ -89,8 +89,10 @@ final class PrivacySupportUITests: XCTestCase {
         let done = app.buttons["privacy.done"]
         XCTAssertEqual(done.label, russian ? "Готово" : "Done")
         tap(done)
-        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: content)
-        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 10), .completed)
+        let dismissal = ElementDismissalReadiness()
+        XCTAssertTrue(try dismissal.waitForDismissal {
+            app.descendants(matching: .any).matching(identifier: "privacy.content").count
+        })
         XCTAssertTrue(entry.isHittable, "The dashboard must remain reachable after dismissal")
         reveal(addHome, in: dashboard, app: app, requiresHitTarget: true)
         XCTAssertTrue(addHome.exists, "Reading privacy information must not create inventory records")

@@ -275,8 +275,10 @@ final class RoomInventoryUITests: XCTestCase {
         tap(field)
         field.typeText(name)
         tap(app.buttons["entry.save"])
-        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: field)
-        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "Name entry did not finish saving")
+        let dismissal = ElementDismissalReadiness()
+        XCTAssertTrue(try dismissal.waitForDismissal {
+            app.textFields.matching(identifier: "entry.name").count
+        }, "Name entry did not finish saving")
     }
 
     private func record(_ name: String, in app: XCUIApplication) -> XCUIElement {

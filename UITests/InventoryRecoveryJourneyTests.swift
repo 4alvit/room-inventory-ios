@@ -84,7 +84,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             try typeIntoEmptyField(app.textFields["itemEditor.\(field)"], value: initial[field]!, app: app)
         }
         try tap(app.buttons["itemEditor.save"], app: app)
-        try waitForDismissal(app.buttons["itemEditor.save"])
+        try waitForDismissal(app.buttons.matching(identifier: "itemEditor.save"))
         try checkpoint("item_before_ocr", observations: readItem(initial, app: app), app: app)
         try closeItemEditor(app)
 
@@ -163,7 +163,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("Apply exactly two fields", actual: app.buttons["ocr.apply"].label, expected: "Apply 2")
         try checkpoint("ocr_selection_model_price", observations: selectedOCR, app: app)
         try tap(app.buttons["ocr.apply"], app: app)
-        try waitForDismissal(app.buttons["ocr.apply"])
+        try waitForDismissal(app.buttons.matching(identifier: "ocr.apply"))
 
         let recovered = ["model": "VISTA-420", "serial": "KEEP-SERIAL", "price": actualPrice,
                          "date": "2025-01-01", "notes": names["notes"]!]
@@ -270,7 +270,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let field = app.textFields["entry.name"]
         try typeIntoEmptyField(field, value: value, app: app)
         try tap(app.buttons["entry.save"], app: app)
-        try waitForDismissal(field)
+        try waitForDismissal(app.textFields.matching(identifier: "entry.name"))
     }
 
     private func openRecord(_ name: String, app: XCUIApplication) throws {
@@ -306,7 +306,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
 
     private func closeItemEditor(_ app: XCUIApplication) throws {
         try tap(app.buttons["itemEditor.cancel"], app: app)
-        try waitForDismissal(app.buttons["itemEditor.cancel"])
+        try waitForDismissal(app.buttons.matching(identifier: "itemEditor.cancel"))
     }
 
     private func readOCR(selected: Set<String>, expectedPrice: String?, app: XCUIApplication) throws -> [String: String] {
@@ -552,7 +552,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
         try tap(saveButton, app: app)
-        let dismissal = RecoveryFilesDismissalReadiness()
+        let dismissal = ElementDismissalReadiness()
         try ledger.require("sheet dismissed", try dismissal.waitForDismissal { saveButtons.count })
         if app.buttons["Close"].exists && app.buttons["Close"].isHittable { try tap(app.buttons["Close"], app: app) }
         try ledger.require("export returned to dashboard", app.buttons["inventory.exportMenu"].isHittable)
@@ -609,7 +609,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                let dismissal = RecoveryFilesDismissalReadiness()
+                let dismissal = ElementDismissalReadiness()
                 try ledger.require("sheet dismissed", try dismissal.waitForDismissal { inlineFields.count })
             } else {
                 let field = app.alerts.textFields.firstMatch
@@ -681,9 +681,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         target.tap()
     }
 
-    private func waitForDismissal(_ target: XCUIElement) throws {
-        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: target)
-        try ledger.require("sheet dismissed", XCTWaiter.wait(for: [gone], timeout: 10) == .completed)
+    private func waitForDismissal(_ query: XCUIElementQuery) throws {
+        let dismissal = ElementDismissalReadiness()
+        try ledger.require("sheet dismissed", try dismissal.waitForDismissal { query.count })
     }
 
     private func reveal(_ target: XCUIElement, app: XCUIApplication) throws {

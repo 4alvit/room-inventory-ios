@@ -399,6 +399,27 @@ The same label semantics are used by the ordinary UI tests. The existing bounded
 scrolling, live readiness, one activation and subsequent Files or import-picker
 assertions remain required; no export service is invoked directly.
 
+### Dismissal observations
+
+`ElementDismissalReadiness` observes the count of the original, typed UI query
+inside an active waiter. Its first probe has no initial predicate polling delay;
+later probes do not overlap. Only a zero count returned within the original
+ten-second monotonic window proves absence. An error or late result cannot
+authorize progress, and XCTest issues remain failures. The preceding action
+still happens once. The helper is shared by OCR Apply, editor Save/Cancel, name
+entry, privacy dismissal and the Files transitions below. Each caller retains
+its existing subsequent checks of navigation, saved values or exported bytes.
+
+In run `41550393558`, the OCR navigation controller reported `ViewDidDisappear`
+35 ms after the old dismissal waiter began. Its first predicate query started
+1.039 seconds into the ten-second allowance and successfully returned no matches
+after another 9.129 seconds, past the deadline. The subsequent failure screenshot
+showed the applied model and price with the other fields retained. That screenshot
+does not prove the complete persistence/export/restore journey. Immediate probing
+removes the observed initial scheduling delay; it neither extends the deadline
+nor guarantees that a slow accessibility query will finish in time. The cause of
+that native query's latency remains unknown.
+
 ### Files location titles
 
 The journey recognizes a Files location by its exact, unique, visible title

@@ -280,8 +280,10 @@ final class LocalizationUITests: XCTestCase {
         }
         field.typeText(value)
         tap(app.buttons["entry.save"])
-        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: field)
-        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed)
+        let dismissal = ElementDismissalReadiness()
+        XCTAssertTrue(try dismissal.waitForDismissal {
+            app.textFields.matching(identifier: "entry.name").count
+        })
     }
 
     private func emitNameEntryDiagnostic(_ readiness: NameEntryKeyboardReadiness, result: String) {

@@ -49,6 +49,12 @@ final class NameEntryKeyboardReadiness {
     private(set) var fieldTapAttempted = false
     private var fieldReady = false
     private var afterEvidenceRecorded = false
+    private var echoWaitStarted = false
+    private var echoMatched = false
+    private var echoObservationCount = 0
+    private var echoMismatchObserved = false
+    private var lastEchoMismatch: String?
+    private var lastEchoMismatchTruncated = false
 
     init(allowance: ContinueAllowance,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
@@ -127,19 +133,58 @@ final class NameEntryKeyboardReadiness {
                       fieldEnabled: @escaping () throws -> Bool,
                       fieldHittable: @escaping () throws -> Bool,
                       evidence: @escaping (EvidenceStage) throws -> Void) throws {
+        try waitUntil {
+            try self.poll(observe: observe, continueHittable: continueHittable,
+                tapContinue: tapContinue, entryNameCount: entryNameCount, fieldEnabled: fieldEnabled,
+                fieldHittable: fieldHittable, evidence: evidence)
+        }
+        guard fieldReady else { throw Failure.notReady }
+    }
+
+    /// Input has already happened once. Only read its echo, using the remainder
+    /// of the original window; nil and partial values do not authorize progress.
+    func waitForExactValue(_ expected: String, read: @escaping () throws -> String?) throws -> String {
+        guard fieldReady, !echoWaitStarted else { throw Failure.notReady }
+        echoWaitStarted = true
+        var matchedValue: String?
+        try waitUntil {
+            let value = try self.perform(read)
+            self.echoObservationCount += 1
+            if value == expected {
+                matchedValue = value
+                return true
+            }
+            self.echoMismatchObserved = true
+            self.lastEchoMismatch = value.map {
+                var bytes = Array($0.utf8.prefix(256))
+                // A valid string's byte prefix can cut only its final scalar.
+                // Dropping at most three bytes avoids a replacement character.
+                for _ in 0..<3 {
+                    if let prefix = String(bytes: bytes, encoding: .utf8) { return prefix }
+                    bytes.removeLast()
+                }
+                return String(decoding: bytes, as: UTF8.self)
+            }
+            self.lastEchoMismatchTruncated = value.map { $0.utf8.count > 256 } ?? false
+            return false
+        }
+        guard let matchedValue else { throw Failure.notReady }
+        echoMatched = true
+        return matchedValue
+    }
+
+    private func waitUntil(_ probe: @escaping () throws -> Bool) throws {
         var capturedError: Error?
         let result = try window.waitForProbe {
             do {
-                return try self.poll(observe: observe, continueHittable: continueHittable,
-                    tapContinue: tapContinue, entryNameCount: entryNameCount, fieldEnabled: fieldEnabled,
-                    fieldHittable: fieldHittable, evidence: evidence)
+                return try probe()
             } catch {
                 capturedError = error
                 return true
             }
         }
         if let capturedError { throw capturedError }
-        guard result == .completed, fieldReady else { throw Failure.notReady }
+        guard result == .completed else { throw Failure.notReady }
     }
 
     func waitAndTapField(observe: @escaping () throws -> Observation,
@@ -154,6 +199,18 @@ final class NameEntryKeyboardReadiness {
             tapContinue: tapContinue, entryNameCount: entryNameCount,
             fieldEnabled: fieldEnabled, fieldHittable: fieldHittable, evidence: evidence)
         try self.tapField(tapField)
+    }
+
+    /// Test-owned synthetic names only. This never queries the UI or clock.
+    var echoDiagnostic: [String: Any] {
+        ["schema_version": 1,
+         "allowance_seconds": 10,
+         "echo_wait_started": echoWaitStarted,
+         "timely_observation_count": echoObservationCount,
+         "matched": echoMatched,
+         "mismatch_observed": echoMismatchObserved,
+         "last_mismatching_value": lastEchoMismatch.map { $0 as Any } ?? NSNull(),
+         "last_mismatching_value_truncated": lastEchoMismatchTruncated]
     }
 
     var diagnostic: [String: Any] {

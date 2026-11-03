@@ -458,7 +458,14 @@ ten-second monotonic window covers the exact keyboard introduction, a unique
 enabled and hittable text field, an empty or placeholder value, one native
 `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
-equal to the requested name. The existing ledger assertions remain.
+equal to the requested name. After the one input action, immediate serialized
+read-only probes allow nil or partial values to settle within the remainder of
+that same window. A late exact value or a query error still fails; the wait does
+not repeat input or renew its deadline. The existing exact ledger assertion
+runs only after a timely match. On failure, `ROOM_NAME_ENTRY_ECHO_V1` records
+the stage, timely observation count and last mismatching synthetic name (or
+explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
+JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
 The first focused regression exposed the actual `UIContinuousPathIntroductionView`
 with the known sliding-text marker and one Continue button. The helper reuses

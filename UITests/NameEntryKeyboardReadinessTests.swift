@@ -343,4 +343,117 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertTrue(h.allowance.attempted)
     }
 
+    func testExactEchoIsProbedImmediatelyAfterOneInputWithoutAnotherQuery() throws {
+        let h = Harness()
+        XCTAssertTrue(try h.poll())
+        h.events.removeAll()
+        h.now = 9.25 // A delayed first poll would miss the original deadline.
+        try h.subject.perform { h.stage("type") }
+        let value = try h.subject.waitForExactValue("Test Home") {
+            h.stage("read")
+            return "Test Home"
+        }
+        XCTAssertEqual(value, "Test Home")
+        XCTAssertEqual(h.events, ["type", "read"])
+        XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, true)
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+            h.stage("unexpected-read")
+            return "Test Home"
+        })
+        XCTAssertEqual(h.events, ["type", "read"])
+    }
+
+    func testExactEchoWaitsThroughPartialAndNilValuesWithoutRepeatingInput() throws {
+        let h = Harness()
+        XCTAssertTrue(try h.poll())
+        h.events.removeAll()
+        h.now = 6
+        try h.subject.perform { h.stage("type") }
+        let values: [String?] = ["Test", nil, "Test Home"]
+        var reads = 0
+        let value = try h.subject.waitForExactValue("Test Home") {
+            h.stage("read")
+            h.now += 0.5
+            defer { reads += 1 }
+            return values[reads]
+        }
+        try h.subject.perform { h.stage("record-typed"); XCTAssertEqual(value, "Test Home") }
+        XCTAssertEqual(h.events, ["type", "read", "read", "read", "record-typed"])
+        XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 3)
+        XCTAssertEqual(h.subject.echoDiagnostic["mismatch_observed"] as? Bool, true)
+        XCTAssertTrue(h.subject.echoDiagnostic["last_mismatching_value"] is NSNull)
+    }
+
+    func testExactEchoAtOrAfterOriginalDeadlineIsRejectedWithoutFurtherQueries() throws {
+        for end in [10.0, 10.001] {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.75
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                h.now = end
+                return "Test Home"
+            }) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+            }
+            XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected-read") })
+            XCTAssertEqual(h.events, ["type", "read"])
+            XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 0)
+            XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+        }
+    }
+
+    func testExactEchoPreservesQueryErrorEvenWhenLateWithoutRepeatingInput() throws {
+        enum NativeFailure: Error { case read }
+        for late in [false, true] {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.75
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                if late { h.now = 10 }
+                throw NativeFailure.read
+            }) {
+                XCTAssertTrue($0 is NativeFailure)
+            }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("unexpected-read")
+                return "Test Home"
+            })
+            XCTAssertEqual(h.events, ["type", "read"])
+            XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 0)
+        }
+    }
+
+    func testUnmatchedEchoTimeoutRetainsBoundedLastValueForFailureDiagnostic() throws {
+        let cases = [(String(repeating: "\n", count: 1000), String(repeating: "\n", count: 256)),
+                     (String(repeating: "a", count: 255) + "😀", String(repeating: "a", count: 255))]
+        for (mismatch, expectedPrefix) in cases {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.5
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                return mismatch
+            })
+            var diagnostic = h.subject.echoDiagnostic
+            diagnostic["result"] = "failed"
+            diagnostic["stage"] = "echo"
+            let retained = try XCTUnwrap(diagnostic["last_mismatching_value"] as? String)
+            XCTAssertEqual(retained, expectedPrefix)
+            XCTAssertLessThanOrEqual(retained.utf8.count, 256)
+            XCTAssertEqual(diagnostic["last_mismatching_value_truncated"] as? Bool, true)
+            XCTAssertEqual(diagnostic["matched"] as? Bool, false)
+            XCTAssertEqual(diagnostic["timely_observation_count"] as? Int, 1)
+            XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: diagnostic).count, 4096)
+            XCTAssertEqual(h.events, ["type", "read"])
+        }
+    }
+
 }

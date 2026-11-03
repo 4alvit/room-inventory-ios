@@ -12,7 +12,7 @@ enum AutofocusedNameEntry {
     }
 
     enum Failure: Error {
-        case unexpectedField, missingValue, notEmpty, valueNotRetained
+        case unexpectedField, notEmpty, valueNotRetained
     }
 
     @discardableResult
@@ -65,12 +65,24 @@ enum AutofocusedNameEntry {
         let before = try readiness.perform { field.value as? String ?? "" }
         try readiness.perform { try recordInitial(before, placeholder) }
         guard before.isEmpty || before == placeholder else { throw Failure.notEmpty }
-        try readiness.perform { field.typeText(value) }
-        guard let after = try readiness.perform({ field.value as? String }) else {
-            throw Failure.missingValue
+        var stage = "input"
+        do {
+            try readiness.perform { field.typeText(value) }
+            stage = "echo"
+            let after = try readiness.waitForExactValue(value) { field.value as? String }
+            stage = "record_typed"
+            try readiness.perform { try recordTyped(after) }
+            guard after == value else { throw Failure.valueNotRetained }
+            return Observation(before: before, placeholder: placeholder, after: after)
+        } catch {
+            var diagnostic = readiness.echoDiagnostic
+            diagnostic["result"] = "failed"
+            diagnostic["stage"] = stage
+            if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]),
+               data.count <= 4096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_NAME_ENTRY_ECHO_V1 " + text)
+            }
+            throw error
         }
-        try readiness.perform { try recordTyped(after) }
-        guard after == value else { throw Failure.valueNotRetained }
-        return Observation(before: before, placeholder: placeholder, after: after)
     }
 }

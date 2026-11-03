@@ -1,8 +1,8 @@
 import XCTest
 import UIKit
 
-/// Dedicated controller-owned Simulator test. Seed SyntheticRecoveryReceipt.png;
-/// the runner verifies/isolates it before all inventory and file operations use UI.
+/// Dedicated controller-owned Simulator test. The runner seeds the exact bundled
+/// receipt into Photos and isolates it before inventory and file operations use UI.
 @MainActor
 final class InventoryRecoveryJourneyTests: XCTestCase {
     private var evidence: RecoveryJourneyEvidence?
@@ -24,7 +24,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     func testPhotosOCRExportRestoreIntoFreshNamespace() throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
-                          "Requires a fresh controller-owned Simulator seeded with the synthetic receipt in Photos.")
+                          "Requires a fresh controller-owned Simulator for the exact synthetic Photos receipt.")
         executionTimeAllowance = 720
         continueAfterFailure = false
         let journeyID = try requiredUUID("RECOVERY_JOURNEY_RUN_ID", environment)

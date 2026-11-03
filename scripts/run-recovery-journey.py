@@ -36,6 +36,19 @@ ACTIVE_XCRESULT_CAP = 512 * MIB
 CASE = "RoomInventoryUITests/InventoryRecoveryJourneyTests/testPhotosOCRExportRestoreIntoFreshNamespace"
 BUNDLE, RUNNER_BUNDLE = "com.alvit.roominventory", "com.alvit.roominventory.uitests.xctrunner"
 FIXTURE_SHA = "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181"
+FIXTURE_BYTES = 74_736
+FIXTURE_RESOURCE = "SyntheticRecoveryReceipt.data"
+
+
+def validate_raw_fixture(path):
+    """Reject processed or replaced fixture bytes before native PhotoKit setup."""
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size == FIXTURE_BYTES,
+            "Raw Photos fixture is not the expected regular file", ConfigurationFailure)
+    with path.open("rb") as stream:
+        raw = stream.read(FIXTURE_BYTES + 1)
+    require(len(raw) == FIXTURE_BYTES and sha(raw) == FIXTURE_SHA,
+            "Raw Photos fixture bytes changed", ConfigurationFailure)
 
 
 class RunFailure(Exception):
@@ -1578,7 +1591,7 @@ class RecoveryRun:
         for name, pin in [("run-recovery-journey.py", "controller_sha256"), ("recovery_collector.py", "collector_sha256")]:
             require(sha((self.repo / "scripts" / name).read_bytes()) == self.grant[pin], "Executable source pin changed", ConfigurationFailure)
         require(sha(Path(self.grant["xcodegen_path"]).read_bytes()) == self.grant["xcodegen_sha256"], "XcodeGen pin changed", ConfigurationFailure)
-        require(sha((self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png").read_bytes()) == FIXTURE_SHA, "Fixture pin changed", ConfigurationFailure)
+        validate_raw_fixture(self.repo / "UITests/Fixtures" / FIXTURE_RESOURCE)
         write_json(self.output / "source-pin.json", {"commit": head[0], "tree": head[1], "tree_listing_sha256": self.tree_sha, "grant": self.grant})
 
     def app_container(self, bundle, name):
@@ -1647,6 +1660,7 @@ class RecoveryRun:
                     "Built product bundle identifier differs", ConfigurationFailure)
             if bundle == RUNNER_BUNDLE:
                 validate_runner_photos_metadata(info)
+        validate_raw_fixture(self.runner / "PlugIns/RoomInventoryUITests.xctest" / FIXTURE_RESOURCE)
 
     def prepare_device(self):
         from recovery_collector import Collector
@@ -1656,12 +1670,11 @@ class RecoveryRun:
         for app, label in [(self.app, "app"), (self.runner, "runner")]:
             self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=90)
         self.command(["xcrun", "simctl", "privacy", self.device_id, "grant", "photos", RUNNER_BUNDLE], "authorize-runner-photos", cap=30)
-        self.command(["xcrun", "simctl", "addmedia", self.device_id, self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png"], "seed-sole-photo", cap=90)
         app_container = self.app_container(BUNDLE, "app-container")
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")
         config = {**self.ids, "app_container": app_container, "runner_container": runner_container,
                   "simulator_root": self.device_root, "evidence_root": self.output / "evidence",
-                  "fixture_path": self.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png", "fixture_sha256": FIXTURE_SHA,
+                  "fixture_path": self.repo / "UITests/Fixtures" / FIXTURE_RESOURCE, "fixture_sha256": FIXTURE_SHA,
                   "source_commit": self.grant["source_commit"], "source_tree_sha256": self.tree_sha,
                   "config_sha256": sha(json.dumps(self.grant, sort_keys=True).encode()), "xctestrun_sha256": self.xctestrun_sha,
                   "simulator_udid": self.device_id, "app_bundle_id": BUNDLE, "runner_bundle_id": RUNNER_BUNDLE}

@@ -28,15 +28,14 @@ class OperationAllowanceTests(base.ControllerCase):
         collector.capture_initial_exports.assert_not_called()
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
-                         ["boot-device", "boot-status", "install-app", "install-runner", "authorize-runner-photos", "seed-sole-photo"])
-        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 90, 90, 30, 90])
+                         ["boot-device", "boot-status", "install-app", "install-runner", "authorize-runner-photos"])
+        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 90, 90, 30])
         self.assertEqual(calls[1].args[0], ["xcrun", "simctl", "bootstatus", run.device_id, "-b"])
         self.boot_request = calls[1]
         self.assertEqual(calls[4].args[0], ["xcrun", "simctl", "privacy", run.device_id,
                                              "grant", "photos", C.RUNNER_BUNDLE])
-        self.assertEqual(calls[5].args[0][:4], ["xcrun", "simctl", "addmedia", run.device_id])
-        self.assertEqual(calls[5].args[0][4:], [run.repo / "UITests/Fixtures/SyntheticRecoveryReceipt.png"])
-        self.seed_request = calls[5]
+        self.assertFalse(any("addmedia" in call.args[0] for call in calls))
+        self.install_request = calls[2]
         self.permission_request = calls[4]
         installs = [c for c in calls if c.args[1].startswith("install-")]
         for call, app in zip(installs, (run.app, run.runner)):
@@ -119,9 +118,9 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertEqual(run.phase_end, run.start + 660)
                 self.assertFalse(any(e[0] == "spawn" for e in w.events))
 
-    def test_single_seed_allows_slow_import_and_requires_fresh_full_accounting(self):
+    def test_single_install_allows_slow_install_and_requires_fresh_full_accounting(self):
         self.install_requests()
-        request = self.seed_request
+        request = self.install_request
         for elapsed, work, scan_step in ((270, 80, 2), (620, 30, .25)):
             with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
                 run = w.run
@@ -153,9 +152,9 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
                 self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
 
-    def test_single_seed_rejects_late_completion_at_own_or_startup_limit(self):
+    def test_single_install_rejects_late_completion_at_own_or_startup_limit(self):
         self.install_requests()
-        request = self.seed_request
+        request = self.install_request
         for elapsed, work in ((270, 86), (620, 36)):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
@@ -173,7 +172,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertTrue(w.cleaned)
                 self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
 
-    def test_timely_seed_cannot_succeed_with_incomplete_terminal_accounting(self):
+    def test_timely_install_cannot_succeed_with_incomplete_terminal_accounting(self):
         self.install_requests()
         with devices.World(module=C, actual_guard=True, count=17) as w:
             run = w.run
@@ -189,7 +188,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 return info
             w.stat_action = inspect
             with self.assertRaises(C.DeadlineFailure):
-                run.command(*self.seed_request.args, **self.seed_request.kwargs)
+                run.command(*self.install_request.args, **self.install_request.kwargs)
             record = run.record["commands"][0]
             self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
             self.assertEqual(record["post_command_accounting"]["status"], "FAILED")
@@ -199,7 +198,7 @@ class OperationAllowanceTests(base.ControllerCase):
             self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
             self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
 
-    def test_single_seed_cannot_renew_startup_or_spawn_without_cleanup_time(self):
+    def test_single_install_cannot_renew_startup_or_spawn_without_cleanup_time(self):
         self.install_requests()
         for elapsed in (653, 656, 660):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
@@ -210,12 +209,12 @@ class OperationAllowanceTests(base.ControllerCase):
                 run.guard = lambda force=False: run.tick()
                 with self.assertRaises(C.DeadlineFailure):
                     run.phase("device")
-                    run.command(*self.seed_request.args, **self.seed_request.kwargs)
+                    run.command(*self.install_request.args, **self.install_request.kwargs)
                 self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
                 self.assertFalse(any(e[0] == "spawn" for e in w.events))
                 self.assertEqual(run.record["commands"], [])
 
-    def test_photos_permission_targets_only_owned_runner_before_single_seed(self):
+    def test_photos_permission_targets_only_owned_runner_before_photokit_setup(self):
         self.install_requests()
         # install_requests already exercises the real prepare_device builder.
         for value in ({}, {"NSPhotoLibraryUsageDescription": ""},

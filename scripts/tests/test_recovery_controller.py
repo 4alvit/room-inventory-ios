@@ -1501,6 +1501,10 @@ class XctestrunTests(ControllerCase):
             info = {"CFBundleIdentifier": bundle}
             if bundle == controller.RUNNER_BUNDLE:
                 info["NSPhotoLibraryUsageDescription"] = "Automated test runner control"
+                resource = app / "PlugIns/RoomInventoryUITests.xctest" / controller.FIXTURE_RESOURCE
+                resource.parent.mkdir(parents=True)
+                resource.write_bytes((Path(__file__).resolve().parents[2] / "UITests/Fixtures"
+                                      / controller.FIXTURE_RESOURCE).read_bytes())
             (app / "Info.plist").write_bytes(plistlib.dumps(info))
         run.command = Mock(return_value=b"")
 
@@ -1843,6 +1847,28 @@ class FailurePreservationTests(ControllerCase):
         self.assertEqual(run.record["status"], "FAIL")
         run.build.assert_not_called()
         self.popen.assert_not_called()
+
+
+class RawPhotosFixtureTests(unittest.TestCase):
+    def test_exact_unprocessed_resource_is_accepted(self):
+        source = Path(__file__).resolve().parents[2] / "UITests/Fixtures" / controller.FIXTURE_RESOURCE
+        controller.validate_raw_fixture(source)
+
+    def test_processed_truncated_extended_or_symbolic_resource_is_rejected(self):
+        source = Path(__file__).resolve().parents[2] / "UITests/Fixtures" / controller.FIXTURE_RESOURCE
+        raw = source.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, data in (("processed", bytes([raw[0] ^ 1]) + raw[1:]),
+                               ("truncated", raw[:-1]), ("extended", raw + b"x")):
+                path = root / name
+                path.write_bytes(data)
+                with self.subTest(name=name), self.assertRaises(controller.ConfigurationFailure):
+                    controller.validate_raw_fixture(path)
+            link = root / "link"
+            link.symlink_to(source)
+            with self.assertRaises(controller.ConfigurationFailure):
+                controller.validate_raw_fixture(link)
 
 
 if __name__ == "__main__":

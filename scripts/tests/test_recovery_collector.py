@@ -38,7 +38,7 @@ class RecoveryCollectorTests(unittest.TestCase):
         for path, bundle in [(self.app, self.app_id), (self.runner, self.runner_id)]:
             (path / C.MCM).write_bytes(plistlib.dumps({"MCMMetadataIdentifier": bundle}))
         self.config = {"app_container": self.app, "runner_container": self.runner, "simulator_root": self.sim,
-                       "evidence_root": self.evidence, "fixture_path": ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.png",
+                       "evidence_root": self.evidence, "fixture_path": ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.data",
                        "journey_run_id": fixtures.JOURNEY, "source_run_id": fixtures.SOURCE, "target_run_id": fixtures.TARGET,
                        "source_commit": fixtures.PIN, "source_tree_sha256": "a" * 64, "config_sha256": "b" * 64,
                        "xctestrun_sha256": "c" * 64, "simulator_udid": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
@@ -127,6 +127,13 @@ class RecoveryCollectorTests(unittest.TestCase):
             self.assertEqual(self.collector.poll_bridge(), index * 2 + 2)
         for label, run in [("source", fixtures.SOURCE), ("target", fixtures.TARGET)]:
             shutil.copytree(self.artifact_case.root / label, self.app / "tmp/RoomInventoryUITests" / run)
+        self.copy_startup_fixture_for_offline_verification()
+
+    def copy_startup_fixture_for_offline_verification(self):
+        # These artifact tests use capture_initial_exports instead of a live
+        # installation handshake. Supply their separately constructed receipts.
+        for relative in self.artifact_case.manifest["startup_evidence"].values():
+            self.collector._write(relative, (self.artifact_case.root / relative).read_bytes())
 
     def test_equal_zip_bytes_have_distinct_live_origins_and_verify_end_to_end_offline(self):
         self.journey()
@@ -222,6 +229,7 @@ class RecoveryCollectorTests(unittest.TestCase):
             drift = 3
             copy = self.collector.capture_xcresult(self.original)
             manifest = self.collector.collect(copy)
+        self.copy_startup_fixture_for_offline_verification()
         self.assertEqual(fixtures.VERIFIER.verify_collection(manifest, fixtures.PIN)["status"],
                          "PASS_OFFLINE_ARTIFACT_CONSISTENCY")
         self.assertEqual(self.collector.origins[1]["saved_metadata"]["ctime_ns"], original_ctime)
@@ -525,7 +533,7 @@ class InstallationHandshakeTests(unittest.TestCase):
         evidence = root / "evidence"
         fixture = root / "fixture.png"
         for path in (app, runner, evidence): path.mkdir(parents=True)
-        fixture.write_bytes(b"inert exact synthetic fixture control")
+        fixture.write_bytes((ROOT / "UITests/Fixtures/SyntheticRecoveryReceipt.data").read_bytes())
         config = {"app_container": app, "runner_container": runner, "simulator_root": sim,
                   "evidence_root": evidence, "fixture_path": fixture, "fixture_sha256": C.sha(fixture.read_bytes()),
                   "journey_run_id": "11111111-1111-4111-8111-111111111111",
@@ -573,9 +581,39 @@ class InstallationHandshakeTests(unittest.TestCase):
         (state.bridge / "installation-request.json").write_bytes(raw)
         return raw
 
+    def seed_receipt(self, state, initial_ids=None, **changes):
+        fixture = state.fixture.read_bytes()
+        initial_ids = sorted(initial_ids if initial_ids is not None else [f"default-{i}" for i in range(6)])
+        created = "synthetic-owned-asset/L0/001"
+        final_ids = sorted(initial_ids + [created])
+        value = {"schema_version": 1, "phase": "photos_seed", "status": "passed", **state.collector.ids,
+                 "simulator_udid": state.config["simulator_udid"], "runner_bundle_id": state.config["runner_bundle_id"],
+                 "installation_request_sha256": state.collector.installation_files["installation-request.json"],
+                 "fixture_filename": "SyntheticRecoveryReceipt.png", "bundle_resource_filename": "SyntheticRecoveryReceipt.data",
+                 "fixture_bytes": len(fixture), "fixture_sha256": C.sha(fixture), "deadline_seconds": 86,
+                 "authorization": {"before_raw": 3, "after_raw": 3, "requested": False, "callback_raw": None,
+                                   "prompt_seen": False, "prompt_accepted": False,
+                                   "prompt_runner": "", "prompt_text": "", "prompt_button": ""},
+                 "read_write_authorized": True, "initial_asset_count": len(initial_ids), "initial_asset_ids": initial_ids,
+                 "initial_asset_ids_sha256": C.sha("\n".join(initial_ids).encode()),
+                 "final_asset_count": len(final_ids), "final_asset_ids": final_ids,
+                 "final_asset_ids_sha256": C.sha("\n".join(final_ids).encode()), "created_asset_id": created,
+                 "existing_fixture_count": 0, "mutation_attempts": 1, "change_requested": True, "change_completed": True,
+                 "before_bytes": len(fixture), "before_sha256": C.sha(fixture),
+                 "after_bytes": len(fixture), "after_sha256": C.sha(fixture),
+                 "finished_within_deadline": True, "elapsed_seconds": 1.5}
+        value.update(changes)
+        raw = C.canonical(value)
+        (state.bridge / "photos-seed.json").write_bytes(raw)
+        return raw
+
     def photos_receipt(self, state, **changes):
         collector = state.collector
         fixture = state.fixture.read_bytes()
+        seed_path = state.bridge / "photos-seed.json"
+        if not seed_path.exists(): self.seed_receipt(state)
+        seed_raw = seed_path.read_bytes()
+        seed = C.parse(seed_raw)
         value = {"schema_version": 1, "phase": "photos_isolation", "status": "passed", **collector.ids,
                  "simulator_udid": state.config["simulator_udid"], "runner_bundle_id": state.config["runner_bundle_id"],
                  "installation_request_sha256": collector.installation_files["installation-request.json"],
@@ -584,9 +622,11 @@ class InstallationHandshakeTests(unittest.TestCase):
                  "authorization": {"before_raw": 3, "after_raw": 3, "requested": False, "callback_raw": None,
                                    "prompt_seen": False, "prompt_accepted": False,
                                    "prompt_runner": "", "prompt_text": "", "prompt_button": ""},
-                 "read_write_authorized": True, "initial_asset_count": 7, "initial_asset_ids_sha256": "a" * 64,
+                 "read_write_authorized": True, "initial_asset_count": seed["final_asset_count"],
+                 "seed_receipt_sha256": C.sha(seed_raw), "initial_asset_ids_sha256": seed["final_asset_ids_sha256"],
                  "fixture_asset_id": "synthetic-owned-asset/L0/001", "before_bytes": len(fixture),
-                 "before_sha256": C.sha(fixture), "removed_asset_count": 6, "removed_asset_ids_sha256": "b" * 64,
+                 "before_sha256": C.sha(fixture), "removed_asset_count": seed["initial_asset_count"],
+                 "removed_asset_ids_sha256": seed["initial_asset_ids_sha256"],
                  "change_requested": True, "change_completed": True, "confirmation_seen": True,
                  "confirmation_accepted": True, "confirmation_text": "Runner would like to delete 6 photos",
                  "final_asset_count": 1,
@@ -917,7 +957,115 @@ class InstallationHandshakeTests(unittest.TestCase):
 
     def test_photos_already_isolated_single_fixture_does_not_require_a_change(self):
         state = self.photos_state()
+        self.seed_receipt(state, initial_ids=[])
         self.photos_receipt(state, initial_asset_count=1, removed_asset_count=0, change_requested=False,
                             confirmation_seen=False, confirmation_accepted=False, confirmation_text="")
         self.assertEqual(state.collector.poll_bridge(), 0)
         self.assertTrue(state.collector.photos_isolated)
+
+
+    def test_seed_receipt_is_persisted_before_isolation_and_never_reaccepted_after_failure(self):
+        state = self.photos_state()
+        raw = self.seed_receipt(state, status="failed", error="PhotoKit callback late", change_completed=False)
+        with self.assertRaisesRegex(C.CollectorError, "Photos seed failed: PhotoKit callback late"):
+            state.collector.poll_bridge()
+        self.assertEqual((state.collector.root / "bridge/photos-seed.json").read_bytes(), raw)
+        self.assertIsNone(state.collector.photos_seed)
+        self.assertFalse(state.collector.photos_isolated)
+        with self.assertRaisesRegex(C.CollectorError, "previously failed"): state.collector.poll_bridge()
+
+    def test_partial_seed_failure_before_first_checkpoint_is_retained(self):
+        state = self.photos_state()
+        value = state.collector._photos_identity("photos_seed")
+        value.update(status="failed", error="authorization deadline")
+        raw = C.canonical(value)
+        (state.bridge / "photos-seed.json").write_bytes(raw)
+        with self.assertRaisesRegex(C.CollectorError, "Photos seed failed: authorization deadline"):
+            state.collector.poll_bridge()
+        self.assertEqual((state.collector.root / "bridge/photos-seed.json").read_bytes(), raw)
+        self.assertEqual(state.collector.barriers, [])
+
+    def test_seed_requires_ack_and_isolation_requires_seed(self):
+        state = self.fixture(); self.install(state)
+        with self.assertRaisesRegex(C.CollectorError, "installation acknowledgement"): state.collector._poll_photos_seed()
+        state = self.photos_state(); self.photos_receipt(state)
+        (state.bridge / "photos-seed.json").unlink()
+        with self.assertRaisesRegex(C.CollectorError, "seed missing before isolation"): state.collector.poll_bridge()
+
+    def test_seed_identity_and_mutation_proofs_fail_closed(self):
+        variants = [{"simulator_udid": "foreign"}, {"installation_request_sha256": "0" * 64},
+                    {"runner_bundle_id": "com.alvit.roominventory"}, {"schema_version": True},
+                    {"bundle_resource_filename": "SyntheticRecoveryReceipt.png"}, {"fixture_bytes": 0},
+                    {"before_sha256": "0" * 64}, {"after_sha256": "0" * 64}, {"after_bytes": 0},
+                    {"existing_fixture_count": 1}, {"existing_fixture_count": False},
+                    {"mutation_attempts": 0}, {"mutation_attempts": 2}, {"mutation_attempts": True},
+                    {"change_requested": False}, {"change_completed": False}, {"read_write_authorized": False},
+                    {"finished_within_deadline": False}, {"elapsed_seconds": 86}, {"elapsed_seconds": -1},
+                    {"elapsed_seconds": True}, {"elapsed_seconds": float("inf")}, {"elapsed_seconds": float("nan")},
+                    {"created_asset_id": "default-0"}, {"created_asset_id": "foreign"},
+                    {"initial_asset_count": True}, {"final_asset_count": 0}, {"initial_asset_ids_sha256": "0" * 64},
+                    {"final_asset_ids_sha256": "0" * 64}, {"unknown": 1}, {"deadline_seconds": 87}]
+        for change in variants:
+            with self.subTest(change=change):
+                state = self.photos_state(); self.seed_receipt(state, **change)
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+                self.assertIsNone(state.collector.photos_seed)
+                self.assertFalse(state.collector.photos_isolated)
+
+    def test_seed_arrays_require_exact_new_asset_even_with_updated_digests(self):
+        for initial, final in [(["a", "a"], ["a", "a", "synthetic-owned-asset/L0/001"]),
+                               (["b", "a"], ["a", "b", "synthetic-owned-asset/L0/001"]),
+                               (["a"], ["replacement", "synthetic-owned-asset/L0/001"]),
+                               (["a"], ["a", "new", "synthetic-owned-asset/L0/001"]),
+                               (["bad\nID"], ["bad\nID", "synthetic-owned-asset/L0/001"]),
+                               ([str(i) for i in range(64)], [str(i) for i in range(64)] + ["synthetic-owned-asset/L0/001"])]:
+            with self.subTest(initial=initial):
+                state = self.photos_state()
+                self.seed_receipt(state, initial_asset_ids=initial, initial_asset_count=len(initial),
+                                  initial_asset_ids_sha256=C.sha("\n".join(initial).encode()),
+                                  final_asset_ids=final, final_asset_count=len(final),
+                                  final_asset_ids_sha256=C.sha("\n".join(final).encode()))
+                with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+
+    def test_seed_authorization_failure_does_not_admit_isolation(self):
+        state = self.photos_state(); raw = self.seed_receipt(state)
+        value = C.parse(raw); value["authorization"]["after_raw"] = 4
+        (state.bridge / "photos-seed.json").write_bytes(C.canonical(value))
+        with self.assertRaisesRegex(C.CollectorError, "full authorization"): state.collector.poll_bridge()
+
+    def test_seed_is_immutable_and_cannot_disappear(self):
+        for remove in (False, True):
+            state = self.photos_state(); raw = self.seed_receipt(state)
+            self.assertEqual(state.collector.poll_bridge(), 0)
+            self.assertIsNotNone(state.collector.photos_seed)
+            self.assertFalse(state.collector.photos_isolated)
+            path = state.bridge / "photos-seed.json"
+            if remove: path.unlink()
+            else: path.write_bytes(raw + b" ")
+            with self.assertRaisesRegex(C.CollectorError, "seed receipt (disappeared|changed)"): state.collector.poll_bridge()
+
+    def test_isolation_must_keep_same_seed_asset_and_inventory(self):
+        for change in ({"seed_receipt_sha256": "0" * 64}, {"fixture_asset_id": "another-asset"},
+                       {"initial_asset_ids_sha256": "0" * 64}, {"removed_asset_ids_sha256": "0" * 64},
+                       {"initial_asset_count": 6, "removed_asset_count": 5}):
+            state = self.photos_state(); self.photos_receipt(state, **change)
+            with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+            self.assertFalse(state.collector.photos_isolated)
+
+    def test_seed_upper_inventory_bound_uses_own_bounded_receipt(self):
+        state = self.photos_state()
+        ids = [f"{i:03}-" + "a" * 250 for i in range(63)]
+        raw = self.seed_receipt(state, initial_ids=ids)
+        self.assertGreater(len(raw), 16384)
+        self.assertLess(len(raw), 65536)
+        self.assertEqual(state.collector.poll_bridge(), 0)
+        self.assertIsNotNone(state.collector.photos_seed)
+
+    def test_seed_symlink_and_oversized_receipt_rejected(self):
+        for mode in ("symlink", "oversize"):
+            state = self.photos_state(); raw = self.seed_receipt(state)
+            path = state.bridge / "photos-seed.json"
+            if mode == "symlink":
+                path.unlink(); other = state.root / "outside.json"; other.write_bytes(raw); path.symlink_to(other)
+            else: path.write_bytes(raw + b" " * 65536)
+            with self.assertRaises(C.CollectorError): state.collector.poll_bridge()

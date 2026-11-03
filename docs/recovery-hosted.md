@@ -116,13 +116,19 @@ This is a bounded cold-start allowance, not evidence that a particular silent
 boot failure was caused by first-boot initialization. A timeout still fails the
 attempt, and successful boot alone cannot qualify Recovery.
 
-The single `simctl addmedia` import has a 90-second cap, including four seconds
-for owned-process cleanup. A hosted import remained running with empty output
-at its former 26-second work boundary, despite regular child polling. The new
-cap supplies bounded headroom within the same 660-second startup deadline;
-90 seconds is not a measured required duration or proof of a Photos repair.
-The exact fixture is imported once, without retry. A successful command still
-requires complete terminal accounting and later PhotoKit verification.
+The single Photos seed is now created by the actual UI-test runner through
+PhotoKit after its owned installation acknowledgement. This replaces the
+`simctl addmedia` command that timed out before UI execution in both attempts of
+run `41574541714`. The unchanged PNG bytes are packaged as a raw `.data` resource,
+verified in the built bundle and again by the runner. One 86-second seed window
+retains the former command's work allowance and consumes the existing 720-second
+native test budget; no outer, test or cleanup deadline increases. A timely callback,
+exactly one newly created asset ID and exact original-byte readback are required.
+The subsequent 20-second isolation must leave that same asset as the only photo.
+Separate immutable seed/isolation receipts bind both stages. No seed retry, fallback
+asset or weaker picker assertion is allowed. PhotoKit still depends on the native
+Photos services, so this change does not prove their latency cause or guarantee
+completion. See [the seed contract](recovery-journey.md) for the full checks.
 
 Swift CodeQL remains a required check on the tested source using the existing
 `macos-26` ARM64 runner and exact Xcode 26.4.1 build 17E202. GitHub's

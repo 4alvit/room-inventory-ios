@@ -480,12 +480,22 @@ class Discovery:
 
 
 NATIVE_LOG_LIMIT = 4 * controller.MIB
-NATIVE_LOG_PREDICATE = ('process == "simctl" OR process == "com.apple.CoreSimulator.CoreSimulatorService" '
-                        'OR subsystem BEGINSWITH "com.apple.CoreSimulator"')
+NATIVE_LOG_SOURCE_PREDICATE = ('process == "simctl" OR process == "com.apple.CoreSimulator.CoreSimulatorService" '
+                               'OR subsystem BEGINSWITH "com.apple.CoreSimulator"')
 NATIVE_LOG_TERMS = ("connection invalid", "connection interrupted", "timed out", "timeout", "refused",
                     "unavailable", "failed", "error", "permission", "denied", "registration", "migration")
 NATIVE_LOG_DOMAINS = ("NSPOSIXErrorDomain", "NSCocoaErrorDomain", "NSMachErrorDomain",
                       "NSOSStatusErrorDomain", "com.apple.CoreSimulator.SimError")
+# Filter before serializing the bounded response, using only source-owned
+# literals. Substrings deliberately over-select: the sanitizer below remains
+# authoritative for word boundaries, case-sensitive domains and numeric syntax.
+# Every recognized numeric code contains either "code" or "errno"; filtering on
+# those labels also preserves signs, whitespace and Unicode decimal digits.
+NATIVE_LOG_SIGNAL_PREDICATE = " OR ".join(
+    "eventMessage CONTAINS[c] " + json.dumps(value)
+    for value in (*NATIVE_LOG_TERMS, *NATIVE_LOG_DOMAINS, "code", "errno")
+)
+NATIVE_LOG_PREDICATE = f"({NATIVE_LOG_SOURCE_PREDICATE}) AND ({NATIVE_LOG_SIGNAL_PREDICATE})"
 
 
 class NativeLogUnavailable(Exception):

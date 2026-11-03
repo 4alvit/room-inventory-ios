@@ -85,15 +85,177 @@ final class PhotoFixtureAuthorization: @unchecked Sendable {
     func result() throws { _ = try completion.result() }
 }
 
+/// One change request and one terminal outcome, including delayed framework callbacks.
+/// The request block and completion handler run on PhotoKit's serial queue.
+final class PhotoFixtureSeedChange: @unchecked Sendable {
+    private let lock = NSLock()
+    private let deadline: ContinuousClock.Instant
+    private let completion: PhotoFixtureRead
+    private var attempts = 0
+    private var identifier: String?
+    var expectation: XCTestExpectation { completion.expectation }
+
+    init(deadline: ContinuousClock.Instant) {
+        self.deadline = deadline
+        completion = PhotoFixtureRead(limit: 0, deadline: deadline)
+    }
+
+    func admit(at now: ContinuousClock.Instant = ContinuousClock().now) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !completion.isFinished else { return false }
+        guard now < deadline, attempts == 0 else {
+            finish(error: PhotoFixtureError.invalid("seed request late or repeated"), at: now)
+            return false
+        }
+        attempts = 1
+        return true
+    }
+
+    func created(_ value: String?, at now: ContinuousClock.Instant = ContinuousClock().now) {
+        lock.lock(); defer { lock.unlock() }
+        guard !completion.isFinished else { return }
+        guard now < deadline, attempts == 1, identifier == nil,
+              let value, Self.validIdentifier(value) else {
+            finish(error: PhotoFixtureError.invalid("seed placeholder missing, repeated or late"), at: now)
+            return
+        }
+        identifier = value
+    }
+
+    func fail(_ error: Error, at now: ContinuousClock.Instant = ContinuousClock().now) {
+        lock.lock(); defer { lock.unlock() }
+        finish(error: error, at: now)
+    }
+
+    func complete(success: Bool, error: Error?, at now: ContinuousClock.Instant = ContinuousClock().now) {
+        lock.lock(); defer { lock.unlock() }
+        let failure = error ?? (success && attempts == 1 && identifier != nil ? nil
+            : PhotoFixtureError.invalid("seed change or placeholder unconfirmed"))
+        finish(error: failure, at: now)
+    }
+
+    var mutationAttempts: Int { lock.lock(); defer { lock.unlock() }; return attempts }
+
+    func result() throws -> String {
+        lock.lock(); defer { lock.unlock() }
+        _ = try completion.result()
+        guard let identifier else { throw PhotoFixtureError.invalid("seed placeholder missing") }
+        return identifier
+    }
+
+    private func finish(error: Error?, at now: ContinuousClock.Instant) {
+        if completion.complete(error: error, at: now) { completion.signal() }
+    }
+
+    static func validIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 256 && !value.unicodeScalars.contains { $0.value < 32 }
+    }
+}
+
 @MainActor
 final class RecoveryPhotosFixture {
-    static let filename = "SyntheticRecoveryReceipt.png"
-    static let bytes = 74_736
-    static let digest = "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181"
+    nonisolated static let filename = "SyntheticRecoveryReceipt.png"
+    nonisolated static let bundleFilename = "SyntheticRecoveryReceipt.data"
+    nonisolated static let bytes = 74_736
+    nonisolated static let digest = "3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181"
     static let seconds = 20.0
-    private static let assetLimit = 64
+    static let seedSeconds = 86.0
+    private nonisolated static let assetLimit = 64
 
-    static func isolate(deviceID: String, report: inout [String: Any]) throws {
+    static func seed(deviceID: String, report: inout [String: Any]) throws -> String {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let deadline = started.advanced(by: .seconds(seedSeconds))
+        defer { report["elapsed_seconds"] = duration(started.duration(to: clock.now)) }
+        #if !targetEnvironment(simulator)
+        throw PhotoFixtureError.invalid("physical device is forbidden")
+        #else
+        let usage = try validateRunner(deviceID: deviceID)
+        // Authorization retains its existing twenty-second ceiling inside this
+        // nonrenewable seed window. A pregrant is not authorization proof.
+        try authorize(deadline: min(deadline, clock.now.advanced(by: .seconds(seconds))),
+                      usage: usage, report: &report)
+        report["read_write_authorized"] = true
+        let original = try bundledData(deadline: deadline)
+        report["before_bytes"] = original.count
+        report["before_sha256"] = hash(original)
+        let before = try inventory(deadline: deadline, allowEmpty: true)
+        let beforeIDs = before.map(\.localIdentifier).sorted()
+        let existing = try namedFixtureCount(in: before, deadline: deadline)
+        report["initial_asset_count"] = before.count
+        report["initial_asset_ids"] = beforeIDs
+        report["initial_asset_ids_sha256"] = idsDigest(beforeIDs)
+        report["existing_fixture_count"] = existing
+        guard permitsSeed(initialIDs: beforeIDs, existingFixtureCount: existing) else {
+            throw PhotoFixtureError.invalid("preexisting fixture or over-bound seed inventory")
+        }
+        let change = PhotoFixtureSeedChange(deadline: deadline)
+        report["change_requested"] = false
+        report["change_completed"] = false
+        defer { report["mutation_attempts"] = change.mutationAttempts }
+        try check(deadline)
+        PHPhotoLibrary.shared().performChanges({ @Sendable in
+            do {
+                // Do not let queued execution or a changed library authorize a
+                // late or second creation. No PHAsset crosses queue boundaries.
+                let current = try inventory(deadline: deadline, allowEmpty: true)
+                guard current.map(\.localIdentifier).sorted() == beforeIDs,
+                      try namedFixtureCount(in: current, deadline: deadline) == 0 else {
+                    throw PhotoFixtureError.invalid("Photos inventory changed before seed admission")
+                }
+                guard change.admit() else { return }
+                let request = PHAssetCreationRequest.forAsset()
+                let options = PHAssetResourceCreationOptions()
+                options.originalFilename = filename
+                options.uniformTypeIdentifier = "public.png"
+                request.addResource(with: .photo, data: original, options: options)
+                change.created(request.placeholderForCreatedAsset?.localIdentifier)
+            } catch {
+                change.fail(error)
+            }
+        }, completionHandler: { @Sendable success, error in
+            change.complete(success: success, error: error)
+        })
+        report["change_requested"] = true
+        try wait(change.expectation, deadline: deadline)
+        let createdID = try change.result()
+        report["change_completed"] = true
+        report["created_asset_id"] = createdID
+        let after = try inventory(deadline: deadline)
+        let afterIDs = after.map(\.localIdentifier).sorted()
+        report["final_asset_count"] = after.count
+        report["final_asset_ids"] = afterIDs
+        report["final_asset_ids_sha256"] = idsDigest(afterIDs)
+        guard confirmsSeed(initialIDs: beforeIDs, finalIDs: afterIDs, createdID: createdID) else {
+            throw PhotoFixtureError.invalid("seed did not add exactly the placeholder asset")
+        }
+        let (asset, resource) = try fixtureResource(in: after, deadline: deadline)
+        guard asset.localIdentifier == createdID else { throw PhotoFixtureError.invalid("created fixture identity differs") }
+        let stored = try read(resource, deadline: deadline)
+        report["after_bytes"] = stored.count
+        report["after_sha256"] = hash(stored)
+        guard acceptsOriginal(stored) else { throw PhotoFixtureError.invalid("created original bytes or hash differ") }
+        try check(deadline)
+        report["finished_within_deadline"] = true
+        return createdID
+        #endif
+    }
+
+    nonisolated static func permitsSeed(initialIDs: [String], existingFixtureCount: Int) -> Bool {
+        initialIDs.count < assetLimit && Set(initialIDs).count == initialIDs.count
+            && initialIDs.allSatisfy(PhotoFixtureSeedChange.validIdentifier) && existingFixtureCount == 0
+    }
+
+    nonisolated static func confirmsSeed(initialIDs: [String], finalIDs: [String], createdID: String) -> Bool {
+        permitsSeed(initialIDs: initialIDs, existingFixtureCount: 0)
+            && PhotoFixtureSeedChange.validIdentifier(createdID) && !initialIDs.contains(createdID)
+            && finalIDs.count == initialIDs.count + 1 && Set(finalIDs).count == finalIDs.count
+            && Set(finalIDs) == Set(initialIDs + [createdID])
+    }
+
+    nonisolated static func acceptsOriginal(_ data: Data) -> Bool { data.count == bytes && hash(data) == digest }
+
+    static func isolate(deviceID: String, createdID: String, expectedAssetIDs: [String], report: inout [String: Any]) throws {
         let clock = ContinuousClock()
         let started = clock.now
         let deadline = started.advanced(by: .seconds(seconds))
@@ -101,23 +263,20 @@ final class RecoveryPhotosFixture {
         #if !targetEnvironment(simulator)
         throw PhotoFixtureError.invalid("physical device is forbidden")
         #else
-        let environment = ProcessInfo.processInfo.environment
-        guard environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
-              environment["SIMULATOR_UDID"] == deviceID,
-              Bundle.main.bundleIdentifier == "com.alvit.roominventory.uitests.xctrunner" else {
-            throw PhotoFixtureError.invalid("actual owned Simulator/runner binding missing")
-        }
-        guard let usage = Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") as? String,
-              !usage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw PhotoFixtureError.invalid("actual runner lacks Photos usage metadata")
-        }
+        let usage = try validateRunner(deviceID: deviceID)
         try authorize(deadline: deadline, usage: usage, report: &report)
         report["read_write_authorized"] = true
         let before = try inventory(deadline: deadline)
         report["initial_asset_count"] = before.count
         let beforeIDs = before.map(\.localIdentifier).sorted()
         report["initial_asset_ids_sha256"] = idsDigest(beforeIDs)
+        guard beforeIDs == expectedAssetIDs else {
+            throw PhotoFixtureError.invalid("Photos inventory changed between seed and isolation")
+        }
         let (fixture, resource) = try fixtureResource(in: before, deadline: deadline)
+        guard fixture.localIdentifier == createdID else {
+            throw PhotoFixtureError.invalid("isolation fixture is not this run's created asset")
+        }
         report["fixture_asset_id"] = fixture.localIdentifier
         let original = try read(resource, deadline: deadline)
         report["before_bytes"] = original.count
@@ -155,6 +314,55 @@ final class RecoveryPhotosFixture {
         try check(deadline)
         report["finished_within_deadline"] = true
         #endif
+    }
+
+    private static func validateRunner(deviceID: String) throws -> String {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
+              environment["SIMULATOR_UDID"] == deviceID,
+              Bundle.main.bundleIdentifier == "com.alvit.roominventory.uitests.xctrunner" else {
+            throw PhotoFixtureError.invalid("actual owned Simulator/runner binding missing")
+        }
+        guard let usage = Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") as? String,
+              !usage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PhotoFixtureError.invalid("actual runner lacks Photos usage metadata")
+        }
+        return usage
+    }
+
+    private static func bundledData(deadline: ContinuousClock.Instant) throws -> Data {
+        try check(deadline)
+        guard let url = Bundle(for: RecoveryPhotosFixture.self).url(forResource: "SyntheticRecoveryReceipt", withExtension: "data") else {
+            throw PhotoFixtureError.invalid("raw bundled fixture missing")
+        }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true, values.fileSize == bytes else {
+            throw PhotoFixtureError.invalid("raw bundled fixture is not the exact bounded regular file")
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        while data.count <= bytes {
+            try check(deadline)
+            let chunk = try handle.read(upToCount: bytes + 1 - data.count) ?? Data()
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        try check(deadline)
+        guard acceptsOriginal(data) else { throw PhotoFixtureError.invalid("raw bundled fixture bytes or hash differ") }
+        return data
+    }
+
+    private nonisolated static func namedFixtureCount(in assets: [PHAsset], deadline: ContinuousClock.Instant) throws -> Int {
+        var count = 0
+        for asset in assets {
+            try check(deadline)
+            let resources = PHAssetResource.assetResources(for: asset)
+            try check(deadline)
+            guard resources.count <= 8 else { throw PhotoFixtureError.invalid("asset resource bound") }
+            count += resources.filter { $0.originalFilename == filename }.count
+        }
+        return count
     }
 
     enum AuthorizationAction: Equatable { case proceed, request, reject }
@@ -296,7 +504,7 @@ final class RecoveryPhotosFixture {
         try check(deadline)
     }
 
-    private static func inventory(deadline: ContinuousClock.Instant) throws -> [PHAsset] {
+    private nonisolated static func inventory(deadline: ContinuousClock.Instant, allowEmpty: Bool = false) throws -> [PHAsset] {
         try check(deadline)
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
             throw PhotoFixtureError.invalid("Photos authorization changed")
@@ -307,7 +515,7 @@ final class RecoveryPhotosFixture {
         options.includeAllBurstAssets = true
         let fetched = PHAsset.fetchAssets(with: options)
         try check(deadline)
-        guard fetched.count > 0, fetched.count <= assetLimit else {
+        guard (allowEmpty || fetched.count > 0), fetched.count <= assetLimit else {
             throw PhotoFixtureError.invalid("empty or over-bound Photos inventory (\(fetched.count))")
         }
         let assets = (0..<fetched.count).map { fetched.object(at: $0) }
@@ -468,13 +676,13 @@ final class RecoveryPhotosFixture {
         try check(deadline)
     }
 
-    private static func check(_ deadline: ContinuousClock.Instant) throws {
+    private nonisolated static func check(_ deadline: ContinuousClock.Instant) throws {
         guard ContinuousClock().now < deadline else { throw PhotoFixtureError.invalid("isolation deadline") }
     }
     private static func duration(_ value: Duration) -> Double {
         let parts = value.components
         return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
     }
-    private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+    private nonisolated static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     private static func idsDigest(_ ids: [String]) -> String { hash(Data(ids.joined(separator: "\n").utf8)) }
 }

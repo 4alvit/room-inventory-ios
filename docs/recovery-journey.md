@@ -22,7 +22,7 @@ is evidence of application behavior, not an independent audit of the App Store.
 
 ## Fixture
 
-`UITests/Fixtures/SyntheticRecoveryReceipt.png` is a synthetic receipt: no real
+`UITests/Fixtures/SyntheticRecoveryReceipt.data` is a synthetic receipt: no real
 merchant, person, payment or purchase. Its original bytes are 74,736 bytes, SHA-256
 `3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181`.
 The printed OCR fields are model `VISTA-420`, serial `QA-2026-0042`, price
@@ -55,8 +55,9 @@ evidence; repair and review the cause before separately authorizing another run.
    Debug simulator settings and only the UI test target selected. Preserve the
    build log, exact command/exit, explicit build options and produced `.xctestrun`.
 4. Boot that UDID and install the freshly built app and UI test runner without
-   launching them. Import **only** the exact fixture once using `simctl addmedia`;
-   retain its source hash and command result. Record the preinstallation container
+   launching them. Verify the raw fixture in the built test bundle against its
+   source hash. The bound runner creates the sole fixture through PhotoKit after
+   the installation handshake below. Record the preinstallation container
    identities, empty scenario namespaces/exports, and fixture binding. These are
    installation observations, not the final scenario pins.
    The selected `.xctestrun` keeps the validated generated Simulator host,
@@ -199,8 +200,8 @@ this does not add an independent installed-binary attestation.
 
 The single Photos seed is not repeated or replaced. A fresh Simulator is not
 assumed to have an empty Photos library. After the installation ACK and before
-launching the data-bearing scenario, the UI-test runner verifies and isolates the
-seed using PhotoKit. The controller validates the actual built runner's Photos
+launching the data-bearing scenario, the UI-test runner creates and then isolates
+the seed using PhotoKit. The controller validates the actual built runner's Photos
 usage description and pregrants Photos access only to that runner on its newly
 owned device. This command is not proof of the later PhotoKit authorization state:
 XCTest may install the runner after the pregrant. After ACK, the runner records
@@ -220,13 +221,41 @@ Denied, restricted, limited, foreign/ambiguous prompts and incomplete callbacks
 fail. Before/after raw statuses and the actual prompt association are retained.
 The app's privacy permissions and built payload are unchanged.
 
-The runner also checks the actual Simulator UUID, runner bundle, usage description
-and full read/write authorization. One 20-second monotonic deadline inside the
-current XCTest/controller limits covers at most 64 local assets, at most eight
+The canonical fixture is `UITests/Fixtures/SyntheticRecoveryReceipt.data`, an
+unchanged PNG payload of 74,736 bytes with SHA-256
+`3be0a311997c35182f58e2658f64afe06b437665dfb420f1dc595e23e24ea181`.
+Its raw resource extension avoids the PNG processing observed in prior build
+logs. Both the controller's built-product check and the runner's bounded bundle
+read must match these exact bytes before creation. The PhotoKit original filename
+remains `SyntheticRecoveryReceipt.png`; no image decoding or re-encoding occurs.
+
+The seed has one nonrenewable 86-second monotonic window inside the unchanged
+720-second native test and 840-second controller test limits. Authorization retains
+its own maximum 20 seconds, clipped to the seed window. The runner requires zero
+to 63 distinct local asset IDs and no existing resource with the fixture filename.
+A fresh inventory check inside the change block must match that initial set. One
+`PHAssetCreationRequest` adds one `.photo` resource from the verified data. A timely
+successful completion and a valid placeholder ID are mandatory. The new inventory
+must equal the original IDs plus exactly that ID, and a network-disabled resource
+read must match the canonical bytes. Unknown or late completion fails; it does not
+cause a second creation. The seed consumes the existing native allowance rather
+than extending any controller or XCTest deadline.
+
+`photos-seed.json` is an atomic, at-most-64-KiB receipt bound to the installation
+request, run IDs, device and runner. It includes sorted before/after ID arrays and
+their hashes, the created ID, authorization facts, mutation count, raw-bundle and
+PhotoKit-original hashes, and elapsed time. The existing isolation receipt binds
+the seed receipt hash. The host requires both immutable receipts and independently
+checks the ID-set difference and the identity preserved by isolation.
+
+The runner then checks the actual Simulator UUID, runner bundle, usage description
+and full read/write authorization. One unchanged 20-second monotonic deadline
+covers isolation of at most 64 local assets, at most eight
 resources per asset, the unique named 1400×1800 PNG, and two network-disabled
 resource reads of at most 74,736 bytes each. Both reads must match the source
-fixture's SHA-256. After a stable inventory re-read, one PhotoKit change removes
-only the other asset IDs. The fixture itself is never deleted, replaced or seeded
+fixture's SHA-256. Its initial IDs must equal the seed's final IDs and the fixture
+must be the same newly created asset. After a stable inventory re-read, one PhotoKit
+change removes only the other asset IDs. The fixture is never deleted, replaced or seeded
 again. A per-change system confirmation must carry the exact removal count in
 its complete first-line deletion title. For the exact owned
 `com.alvit.roominventory.uitests.xctrunner` / `RoomInventoryUITests-Runner` pair,
@@ -835,13 +864,14 @@ of the earlier 180-second device phase. It does not guarantee filesystem or
 simulator latency, collector completion, XCTest success or simulator shutdown;
 any exhausted command, phase or outer deadline still fails the attempt. No
 historical failed run becomes accepted.
-The single `simctl addmedia` seed receives 90 seconds including its four-second
-process-cleanup reserve (86 seconds for child work and live accounting), clipped
-to the same 660-second startup boundary. A hosted import exhausted the former
-26-second work limit while regular child polls still observed it running. This
-finite headroom does not establish the underlying Photos delay or guarantee
-completion. There is no retry or additional seed; exact fixture/UDID binding,
-full terminal accounting and later PhotoKit content checks remain required.
+The runner's single PhotoKit seed replaces `simctl addmedia`, which exhausted its
+90-second command cap in both attempts of run `41574541714` before any UI test
+executed. The new seed window is 86 seconds, equal to the former command's work
+allowance, within the unchanged native/controller limits. It supplies explicit
+creation completion and original-byte evidence; it does not establish the cause
+of the prior service latency or guarantee success. There is no retry or second
+seed. Exact fixture/UDID binding, full terminal accounting, cleanup and later
+PhotoKit/UI content checks remain required.
 In `cleanup_mode`, the existing guard returns after its deadline tick and remains
 time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.

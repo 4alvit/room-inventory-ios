@@ -119,14 +119,14 @@ final class NameEntryKeyboardReadiness {
         }
     }
 
-    func waitAndTapField(observe: @escaping () throws -> Observation,
-                         continueHittable: @escaping () throws -> Bool,
-                         tapContinue: @escaping () throws -> Void,
-                         entryNameCount: @escaping () throws -> Int,
-                         fieldEnabled: @escaping () throws -> Bool,
-                         fieldHittable: @escaping () throws -> Bool,
-                         tapField: () throws -> Void,
-                         evidence: @escaping (EvidenceStage) throws -> Void) throws {
+    /// Autofocus callers omit the field tap and keep input inside `perform`.
+    func waitForField(observe: @escaping () throws -> Observation,
+                      continueHittable: @escaping () throws -> Bool,
+                      tapContinue: @escaping () throws -> Void,
+                      entryNameCount: @escaping () throws -> Int,
+                      fieldEnabled: @escaping () throws -> Bool,
+                      fieldHittable: @escaping () throws -> Bool,
+                      evidence: @escaping (EvidenceStage) throws -> Void) throws {
         var capturedError: Error?
         let result = try window.waitForProbe {
             do {
@@ -140,6 +140,19 @@ final class NameEntryKeyboardReadiness {
         }
         if let capturedError { throw capturedError }
         guard result == .completed, fieldReady else { throw Failure.notReady }
+    }
+
+    func waitAndTapField(observe: @escaping () throws -> Observation,
+                         continueHittable: @escaping () throws -> Bool,
+                         tapContinue: @escaping () throws -> Void,
+                         entryNameCount: @escaping () throws -> Int,
+                         fieldEnabled: @escaping () throws -> Bool,
+                         fieldHittable: @escaping () throws -> Bool,
+                         tapField: () throws -> Void,
+                         evidence: @escaping (EvidenceStage) throws -> Void) throws {
+        try waitForField(observe: observe, continueHittable: continueHittable,
+            tapContinue: tapContinue, entryNameCount: entryNameCount,
+            fieldEnabled: fieldEnabled, fieldHittable: fieldHittable, evidence: evidence)
         try self.tapField(tapField)
     }
 

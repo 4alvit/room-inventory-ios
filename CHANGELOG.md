@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Type once into Recovery's already-autofocused name sheets without retapping the field, handling only the identified keyboard introduction once within the same readiness window; cover successive home, room and item creation through relaunch.
 - Publish runner bridge messages with atomic exclusive rename, avoiding a temporary-link cleanup race while retaining overwrite refusal and strict collector metadata checks.
 - Seed the exact recovery receipt through PhotoKit in the owned test runner, with a byte-preserving resource, one bounded creation and linked seed/isolation evidence before opening the system Photos picker.
 - Filter native diagnostic queries to recognized signal candidates before serialization, preserving the existing sanitizer, byte limits and cleanup requirements.

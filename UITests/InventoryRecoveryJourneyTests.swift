@@ -11,6 +11,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private var activeRunID = ""
     private var completed = false
     private var firstFilesTapCaptured = false
+    private let keyboardIntroductionAllowance = NameEntryKeyboardReadiness.ContinueAllowance()
 
     private func finishEvidence() throws {
         defer { application?.terminate() }
@@ -267,8 +268,16 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func enterName(_ value: String, app: XCUIApplication) throws {
-        let field = app.textFields["entry.name"]
-        try typeIntoEmptyField(field, value: value, app: app)
+        try AutofocusedNameEntry.type(value, in: app, allowance: keyboardIntroductionAllowance, evidence: { stage in
+            let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screenshot.name = "recovery-name-entry-keyboard-introduction-" + stage.rawValue
+            screenshot.lifetime = .keepAlways
+            self.add(screenshot)
+        }, recordInitial: { before, placeholder in
+            try self.ledger.require("field initially empty", before.isEmpty || before == placeholder)
+        }, recordTyped: { after in
+            try self.ledger.require("typed value retained", actual: after, expected: value)
+        })
         try tap(app.buttons["entry.save"], app: app)
         try waitForDismissal(app.textFields.matching(identifier: "entry.name"))
     }

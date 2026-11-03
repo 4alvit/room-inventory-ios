@@ -450,6 +450,33 @@ The same label semantics are used by the ordinary UI tests. The existing bounded
 scrolling, live readiness, one activation and subsequent Files or import-picker
 assertions remain required; no export service is invoked directly.
 
+### Autofocused name entry
+
+New `NameEntrySheet` presentations focus their empty `entry.name` field in the
+app. Recovery uses `AutofocusedNameEntry` without a second field tap: one shared
+ten-second monotonic window covers the exact keyboard introduction, a unique
+enabled and hittable text field, an empty or placeholder value, one native
+`typeText`, and the exact typed value afterward. Initial live `nil` values use
+the prior empty-value normalization; the typed echo must still be a String
+equal to the requested name. The existing ledger assertions remain.
+
+The first focused regression exposed the actual `UIContinuousPathIntroductionView`
+with the known sliding-text marker and one Continue button. The helper reuses
+Localization's exact recognizer and a per-test Continue allowance shared across
+all three sheets. It requires the introduction to disappear and the field to
+be ready afterward. Optional before/after screenshots consume the same window;
+they do not renew it. `waitForField` omits the field tap, while Localization's
+existing `waitAndTapField` delegates to it and retains its tap. A late query or
+input cannot authorize Save; there is no generic Continue action, field-tap
+fallback, retyping or keyboard-visibility requirement. Generic item-editor
+fields still use their existing tap-based input.
+
+The native `NameEntryAutofocusUITests` regression creates a home, room and item
+on successive sheets using this same helper, then relaunches the same isolated
+test namespace and verifies all three exact names. This targets the redundant
+tap preceding a local empty room-name failure; it does not establish an OS-level
+cause for the observed AutoFill menu or discarded input.
+
 ### Dismissal observations
 
 `ElementDismissalReadiness` observes the count of the original, typed UI query

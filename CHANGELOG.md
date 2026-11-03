@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Publish runner bridge messages with atomic exclusive rename, avoiding a temporary-link cleanup race while retaining overwrite refusal and strict collector metadata checks.
 - Seed the exact recovery receipt through PhotoKit in the owned test runner, with a byte-preserving resource, one bounded creation and linked seed/isolation evidence before opening the system Photos picker.
 - Filter native diagnostic queries to recognized signal candidates before serialization, preserving the existing sanitizer, byte limits and cleanup requirements.
 - Bound passive StoreKit approval/refund observation to one ten-second monotonic window after a hosted approval arrived beyond the former five-second allowance; reject late matches and propagate cancellation without refreshing entitlements.

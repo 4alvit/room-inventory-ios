@@ -183,6 +183,18 @@ one 60-second monotonic deadline starting before request publication with the
 wait and acknowledgement validation. Late observations cannot authorize success;
 the XCTest and controller deadlines remain active and are never renewed.
 
+All runner publications (installation, Photos seed/isolation and numbered export
+requests) write a complete exclusive temporary file in the same directory, then
+publish it with Darwin `renamex_np(RENAME_EXCL)`. An existing destination, including
+a symlink, is not replaced; an unsupported or failed rename fails the publication
+without a fallback or retry. A failed rename cleans up only its own temporary
+file, while an already existing temporary path is left untouched.
+This avoids the former hard-link-then-unlink sequence: removing the temporary
+link could change the published inode's link count and `ctime` during a strict
+collector read, even when its bytes, size and modification time were unchanged.
+The collector still rejects every observed identity, content or metadata change
+during a read. Request/acknowledgement hashes, ordering and deadlines are unchanged.
+
 The host's existing guarded callback searches only the owned Simulator's
 `data/Containers/Data/Application` directory, with at most 2,000 entries and
 no-follow metadata reads. Missing old installation metadata is not a scenario

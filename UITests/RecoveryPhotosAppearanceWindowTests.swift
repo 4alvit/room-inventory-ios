@@ -78,6 +78,20 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
     }
 
     @MainActor
+    func testNegativeProbeCanBeRetriedWithinRemainingFractionOfASecond() throws {
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        now = 29.25
+        var calls = 0
+        XCTAssertTrue(try window.waitForProbe {
+            calls += 1
+            return calls == 2
+        })
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(try window.remaining(), 0.75)
+    }
+
+    @MainActor
     func testOuterDeadlineInterruptsNestedWaitWithoutAnotherProbe() {
         let start = ProcessInfo.processInfo.systemUptime
         var used = 0.0
@@ -128,10 +142,12 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         now = 29.5
         var calls = 0
         XCTAssertFalse(try window.waitForProbe { calls += 1; return false })
+        let callsAtReturn = calls
+        XCTAssertGreaterThan(callsAtReturn, 0)
         // The injected deadline remains open, so only waiter teardown can
         // prevent the pending timer from making an additional query.
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "pump canceled timer")], timeout: 1.05)
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls, callsAtReturn)
     }
 
     @MainActor

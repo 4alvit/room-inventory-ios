@@ -5,6 +5,7 @@
 - Bound passive StoreKit approval/refund observation to one ten-second monotonic window after a hosted approval arrived beyond the former five-second allowance; reject late matches and propagate cancellation without refreshing entitlements.
 - Update related CI action pins together and group future Dependabot action updates.
 - Collect bounded, redacted native diagnostics when Recovery device setup fails before UI execution, preserving the original failure and cleanup evidence.
+- Keep the bounded diagnostic window when device-command cleanup overruns its deadline, recording the actual duration, clipping and clock-validation stage without changing command limits or failure status.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.
 - Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
 - Start Photos appearance probes immediately inside the active waiter and cancel queued probes when it exits, retaining the 30-second deadline and rejecting late results.

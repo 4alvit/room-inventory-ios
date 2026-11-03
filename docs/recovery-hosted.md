@@ -509,9 +509,23 @@ When the controller returns after a device-phase `simctl` failure before UI
 execution, the adapter may make one additional read of recorded native logs.
 The `controller_native_log` summary in `preflight/adapter-result.json` uses the
 same fixed CoreSimulator predicate, sanitization and byte/event limits described
-above. It covers the identified failed command's recorded time window, derived
-from checked wall-clock and monotonic anchors. Ambiguous timing or clock drift
-makes the observation unavailable.
+above. Its window starts at the identified failed command's recorded start and
+ends at the earlier of its observed completion and nominal command deadline,
+within the controller's recorded duration. Command elapsed time includes child
+cleanup, so a cleanup overrun does not by itself invalidate the earlier window.
+The exact source interval remains at most 300 seconds. The log command rounds
+its timestamps outwards to whole seconds; the sanitizer retains events only
+inside the exact, unrounded interval.
+
+Checked wall-clock and monotonic anchors still bind that interval. Ambiguous
+timing, clock drift, or an observed command end after controller completion makes
+the observation unavailable. A fixed `clock_validation_stage` identifies the
+check reached without retaining raw anchors. After relative timing validation,
+`command_window` records the actual elapsed time, observed and selected ends,
+nominal deadline, and `clipped_to_command_deadline`; clipping never changes the
+original command record. A completed clock-validation stage does not mean the
+later log query succeeded. Historical records without anchors or this stage
+cannot establish which clock check first rejected their diagnostic.
 
 This path requires positive final ledger evidence that every spawned owned
 process group is absent and its leader reaped. It does not probe a possibly

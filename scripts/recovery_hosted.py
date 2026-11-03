@@ -698,7 +698,8 @@ def diagnose_controller_failure(discovery, runner, context, anchor, outer_end, *
         return
     row = {"schema_version": 1, "status": "UNAVAILABLE", "complete": False,
            "native_cause": "UNKNOWN", "raw_text_retained": False, "query_attempted": False,
-           "coverage": "returned_query_events_only", "reason": "preconditions_not_met"}
+           "coverage": "returned_query_events_only", "reason": "preconditions_not_met",
+           "clock_validation_stage": "not_started"}
     context["controller_native_log"] = row
     parent_alarm, raw = discovery.alarm, None
     try:
@@ -756,29 +757,55 @@ def diagnose_controller_failure(discovery, runner, context, anchor, outer_end, *
             log_require(args[:2] == ["xcrun", "simctl"] and len(args) >= 4
                         and args[3] == runner.device_id and command.get("post_command_accounting") is None
                         and command["primary_error"] == record["primary_error"], "failed_device_command_unconfirmed")
+            row["clock_validation_stage"] = "finish_anchor"
             finish_anchor = controller_clock_anchor(clock, wall_clock)
-            log_require(type(anchor) is dict and type(finish_anchor) is dict, "clock_window_unconfirmed")
-            for sample in (anchor, finish_anchor):
-                log_require(all(finite_number(sample.get(k)) for k in ("before", "wall", "after"))
+            for stage, sample in (("start_anchor", anchor), ("finish_anchor", finish_anchor)):
+                row["clock_validation_stage"] = stage
+                log_require(type(sample) is dict
+                            and all(finite_number(sample.get(k)) for k in ("before", "wall", "after"))
                             and 0 <= sample["after"] - sample["before"] <= 1, "clock_window_unconfirmed")
+            row["clock_validation_stage"] = "wall_monotonic_drift"
             origin = (anchor["before"] + anchor["after"]) / 2
             finish_origin = (finish_anchor["before"] + finish_anchor["after"]) / 2
             log_require(abs((finish_anchor["wall"] - anchor["wall"]) - (finish_origin - origin)) <= 2,
                         "clock_window_unconfirmed")
             start, elapsed = command.get("start_elapsed"), command.get("elapsed_seconds")
             limit, total = command.get("end_deadline_elapsed"), record.get("elapsed_seconds")
-            log_require(all(finite_number(v) for v in (runner.start, start, elapsed, limit, total))
-                        and 0 <= start < start + elapsed <= min(limit, total)
-                        and total <= POLICY["recovery_seconds"]
-                        and limit - start <= 300
-                        and runner.start <= anchor["before"] <= anchor["after"] <= runner.start + start
+            row["clock_validation_stage"] = "command_numbers"
+            log_require(all(finite_number(v) for v in (runner.start, start, elapsed, limit, total)),
+                        "clock_window_unconfirmed")
+            observed_end = start + elapsed
+            log_require(finite_number(observed_end), "clock_window_unconfirmed")
+            row["clock_validation_stage"] = "command_order"
+            log_require(0 <= start < observed_end <= total <= POLICY["recovery_seconds"],
+                        "clock_window_unconfirmed")
+            row["clock_validation_stage"] = "source_interval"
+            log_require(start < limit and limit - start <= 300, "clock_window_unconfirmed")
+            # elapsed includes child cleanup and may exceed the nominal command
+            # deadline. Observe only its bounded command interval, not that tail.
+            selected_end = min(observed_end, limit, total)
+            log_require(0 < selected_end - start <= 300, "clock_window_unconfirmed")
+            row["command_window"] = {"start_elapsed": start, "actual_elapsed_seconds": elapsed,
+                                     "observed_end_elapsed": observed_end, "end_deadline_elapsed": limit,
+                                     "selected_end_elapsed": selected_end,
+                                     "clipped_to_command_deadline": observed_end > limit}
+            row["clock_validation_stage"] = "anchor_coverage"
+            log_require(runner.start <= anchor["before"] <= anchor["after"] <= runner.start + start
                         and runner.start + total <= finish_anchor["before"], "clock_window_unconfirmed")
+            row["clock_validation_stage"] = "utc_conversion"
             begin = anchor["wall"] + runner.start + start - origin
-            finish = begin + elapsed
+            finish = begin + (selected_end - start)
+            log_require(finite_number(begin) and finite_number(finish) and begin < finish,
+                        "clock_window_unconfirmed")
             date = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+0000")
+            try:
+                window_start = dt.datetime.fromtimestamp(begin, dt.timezone.utc).isoformat()
+                window_end = dt.datetime.fromtimestamp(finish, dt.timezone.utc).isoformat()
+                log_start, log_end = date(math.floor(begin)), date(math.ceil(finish))
+            except (OverflowError, OSError, ValueError):
+                raise NativeLogUnavailable("clock_window_unconfirmed") from None
             row.update(command=command["name"], terminal_owned_groups=len(groups),
-                       window_start=dt.datetime.fromtimestamp(begin, dt.timezone.utc).isoformat(),
-                       window_end=dt.datetime.fromtimestamp(finish, dt.timezone.utc).isoformat())
+                       window_start=window_start, window_end=window_end, clock_validation_stage="complete")
             discovery.check()
             home = discovery.output / "controller-native-log-home"
             home.mkdir(mode=0o700)
@@ -786,8 +813,8 @@ def diagnose_controller_failure(discovery, runner, context, anchor, outer_end, *
             log_require(alarm.end - clock() >= 10, "insufficient_observation_budget")
             args = ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + str(home),
                     "LANG=C", "LC_ALL=C", "/usr/bin/log", "show", "--style", "json", "--timezone", "UTC",
-                    "--no-pager", "--info", "--debug", "--start", date(math.floor(begin)),
-                    "--end", date(math.ceil(finish)), "--predicate", NATIVE_LOG_PREDICATE]
+                    "--no-pager", "--info", "--debug", "--start", log_start,
+                    "--end", log_end, "--predicate", NATIVE_LOG_PREDICATE]
             row["query_attempted"] = True
             raw = discovery.command(args, "controller-native-log", 10, retain_output=False)
             alarm.arm()

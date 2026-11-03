@@ -169,7 +169,148 @@ class PostfailureTests(unittest.TestCase):
         self.runner.record["commands"][0].update(name="boot-status", start_elapsed=10,
                                                end_deadline_elapsed=310, elapsed_seconds=2)
         self.runner.record["elapsed_seconds"] = 50
-        self.assertTrue(self.diagnose()["complete"])
+        row = self.diagnose()
+        self.assertTrue(row["complete"])
+        self.assertEqual(row["command_window"]["selected_end_elapsed"], 12)
+        self.assertFalse(row["command_window"]["clipped_to_command_deadline"])
+
+    def assert_clipped_window(self, name, start, elapsed, limit, total):
+        command = self.runner.record["commands"][0]
+        command.update(name=name, start_elapsed=start, elapsed_seconds=elapsed,
+                       end_deadline_elapsed=limit,
+                       args=["xcrun", "simctl", "bootstatus", "owned-device", "-b"]
+                       if name == "boot-status" else
+                       ["xcrun", "simctl", "addmedia", "owned-device", "/fixture.png"])
+        self.runner.record["cleanup_errors"][0]["command"] = name
+        self.runner.record["elapsed_seconds"] = total
+        self.now = self.runner.start + total + 1
+        original = deepcopy(self.runner.record)
+        row = self.diagnose()
+        self.diagnose()
+        self.discovery.command.assert_called_once()
+        args, label, cap = self.discovery.command.call_args.args
+        self.assertEqual((label, cap), ("controller-native-log", 10))
+        self.assertEqual(self.discovery.command.call_args.kwargs, {"retain_output": False})
+        self.assertTrue(row["complete"])
+        self.assertEqual(row["clock_validation_stage"], "complete")
+        self.assertEqual(row["native_cause"], "UNKNOWN")
+        self.assertEqual(row["command_window"], {
+            "start_elapsed": start, "actual_elapsed_seconds": elapsed,
+            "observed_end_elapsed": start + elapsed, "end_deadline_elapsed": limit,
+            "selected_end_elapsed": limit, "clipped_to_command_deadline": True})
+        self.assertAlmostEqual(H.dt.datetime.fromisoformat(row["window_start"]).timestamp(), 1000 + start, places=5)
+        self.assertAlmostEqual(H.dt.datetime.fromisoformat(row["window_end"]).timestamp(), 1000 + limit, places=5)
+        self.assertEqual(self.runner.record, original)
+        self.assertIs(self.context["primary_error"], self.runner.record["primary_error"])
+        self.assertIs(self.context["cleanup_errors"], self.runner.record["cleanup_errors"])
+        self.assertEqual(self.armed, [self.now + 14, self.now + 14])
+        self.assertIs(self.discovery.alarm, self.old_alarm)
+        return args
+
+    def test_boot_cleanup_overrun_keeps_exact_bounded_command_window(self):
+        # Retained attempt 1: elapsed includes cleanup after the 300-second cap.
+        args = self.assert_clipped_window("boot-status", 85.65477050000004, 301.01716829199995,
+                                          385.65469395900004, 460.99660479199997)
+        self.assertEqual(args[args.index("--start") + 1], "1970-01-01 00:18:05+0000")
+        self.assertEqual(args[args.index("--end") + 1], "1970-01-01 00:23:06+0000")
+
+    def test_seed_cleanup_overrun_keeps_exact_bounded_command_window(self):
+        # Retained attempt 2: the original 91.22-second duration stays visible.
+        args = self.assert_clipped_window("seed-sole-photo", 223.47902949999997, 91.22173591699999,
+                                          313.47894875, 392.571159708)
+        self.assertEqual(args[args.index("--start") + 1], "1970-01-01 00:20:23+0000")
+        self.assertEqual(args[args.index("--end") + 1], "1970-01-01 00:21:54+0000")
+
+    def test_exact_command_deadline_is_not_reported_as_clipped(self):
+        self.runner.record["commands"][0].update(start_elapsed=10, elapsed_seconds=300,
+                                               end_deadline_elapsed=310)
+        row = self.diagnose()
+        self.assertTrue(row["complete"])
+        self.assertEqual(row["command_window"]["selected_end_elapsed"], 310)
+        self.assertFalse(row["command_window"]["clipped_to_command_deadline"])
+
+    def test_rounded_query_does_not_retain_events_from_cleanup_overrun(self):
+        self.runner.record["commands"][0].update(start_elapsed=10.25, elapsed_seconds=31,
+                                               end_deadline_elapsed=40.5)
+        self.discovery.command.return_value = json.dumps([
+            {"processImagePath": "/private/simctl", "subsystem": "com.apple.CoreSimulator",
+             "timestamp": H.dt.datetime.fromtimestamp(t, H.dt.timezone.utc).isoformat(),
+             "eventMessage": "permission denied errno=1 secret@example.test"}
+            for t in (1010.1, 1040.4, 1040.6)]).encode()
+        row = self.diagnose()
+        args = self.discovery.command.call_args.args[0]
+        self.assertEqual(args[args.index("--start") + 1], "1970-01-01 00:16:50+0000")
+        self.assertEqual(args[args.index("--end") + 1], "1970-01-01 00:17:21+0000")
+        self.assertEqual(row["returned_event_count"], 3)
+        self.assertEqual(row["outside_window_count"], 2)
+        self.assertEqual(len(row["signals"]), 1)
+        self.assertEqual(row["signals"][0]["timestamp"], "1970-01-01T00:17:20.400000+00:00")
+        self.assertNotIn("secret@", json.dumps(row))
+
+    def test_invalid_numeric_or_ordered_windows_cannot_be_rescued_by_clipping(self):
+        cases = [({"start_elapsed": True}, {}, "command_numbers"),
+                 ({"elapsed_seconds": None}, {}, "command_numbers"),
+                 ({"elapsed_seconds": float("nan")}, {}, "command_numbers"),
+                 ({"end_deadline_elapsed": float("inf")}, {}, "command_numbers"),
+                 ({"start_elapsed": 1e308, "elapsed_seconds": 1e308}, {}, "command_numbers"),
+                 ({"elapsed_seconds": 0}, {}, "command_order"),
+                 ({"elapsed_seconds": -1}, {}, "command_order"),
+                 ({"start_elapsed": -1}, {}, "command_order"),
+                 ({"elapsed_seconds": 101}, {}, "command_order"),
+                 ({}, {"elapsed_seconds": 1800.01}, "command_order"),
+                 ({"end_deadline_elapsed": 237.882}, {}, "source_interval"),
+                 ({"end_deadline_elapsed": 200}, {}, "source_interval"),
+                 ({"end_deadline_elapsed": 537.8821}, {}, "source_interval")]
+        for change, record_change, stage in cases:
+            with self.subTest(change=change, record_change=record_change):
+                self.runner = fixture()
+                self.runner.record["commands"][0].update(change)
+                self.runner.record.update(record_change)
+                self.context.pop("controller_native_log", None)
+                row = self.diagnose()
+                self.assertEqual(row["reason"], "clock_window_unconfirmed")
+                self.assertEqual(row["clock_validation_stage"], stage)
+                self.assertFalse(row["query_attempted"])
+                self.assertNotIn("command_window", row)
+                json.dumps(row, allow_nan=False)
+        self.discovery.command.assert_not_called()
+
+    def test_clipped_window_still_requires_trusted_anchors_and_reports_stage(self):
+        self.runner.record["commands"][0]["elapsed_seconds"] = 31
+        start = {"before": 100.0, "wall": 1000.0, "after": 100.0}
+        finish = {"before": 438.0, "wall": 1338.0, "after": 438.0}
+        cases = [(None, finish, "start_anchor"),
+                 ({**start, "after": 102}, finish, "start_anchor"),
+                 ({**start, "after": 99}, finish, "start_anchor"),
+                 (start, None, "finish_anchor"),
+                 (start, {**finish, "wall": float("nan")}, "finish_anchor"),
+                 (start, {**finish, "after": 440}, "finish_anchor"),
+                 (start, {**finish, "wall": 1340.001}, "wall_monotonic_drift"),
+                 ({"before": 99, "after": 99, "wall": 999}, finish, "anchor_coverage"),
+                 ({"before": 400, "after": 400, "wall": 1300}, finish, "anchor_coverage"),
+                 (start, {"before": 437, "after": 437, "wall": 1337}, "anchor_coverage")]
+        for before, after, stage in cases:
+            with self.subTest(stage=stage, before=before, after=after):
+                self.anchor = before
+                self.context.pop("controller_native_log", None)
+                with patch.object(H, "controller_clock_anchor", return_value=after):
+                    row = self.diagnose()
+                self.assertEqual(row["reason"], "clock_window_unconfirmed")
+                self.assertEqual(row["clock_validation_stage"], stage)
+                self.assertFalse(row["query_attempted"])
+                if stage == "anchor_coverage":
+                    self.assertTrue(row["command_window"]["clipped_to_command_deadline"])
+                self.assertNotIn("wall", row)
+        self.discovery.command.assert_not_called()
+
+    def test_unrepresentable_utc_window_rejects_before_filesystem_or_query(self):
+        self.anchor["wall"] = 253402300790.0  # End of year 9999, before adding command offset.
+        row = self.diagnose(wall=lambda: self.anchor["wall"] + self.now - 100)
+        self.assertEqual(row["reason"], "clock_window_unconfirmed")
+        self.assertEqual(row["clock_validation_stage"], "utc_conversion")
+        self.assertFalse(row["query_attempted"])
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.discovery.command.assert_not_called()
 
     def test_preparation_cannot_consume_query_reserve(self):
         mkdir = Path.mkdir
@@ -206,6 +347,7 @@ class PostfailureTests(unittest.TestCase):
             self.discovery.command.side_effect = error
             row = self.diagnose()
             self.assertFalse(row["complete"])
+            self.assertEqual(row["clock_validation_stage"], "complete")
             self.assertNotIn("private", json.dumps(row))
             self.assertNotIn("secret@", json.dumps(row))
             self.assertEqual(self.runner.record, self.original)

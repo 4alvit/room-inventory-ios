@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Type once into Recovery's already-autofocused name sheets without retapping the field, handling only the identified keyboard introduction and waiting for the exact typed echo within the same ten-second window; retain the last mismatching echo on failure and cover successive home, room and item creation through relaunch.
+- Give Recovery's cold keyboard setup one 30-second window, then type once into the already-autofocused name field and verify its exact echo within a separate ten-second window; retain mismatch diagnostics and verify successive home, room and item creation through relaunch.
 - Publish runner bridge messages with atomic exclusive rename, avoiding a temporary-link cleanup race while retaining overwrite refusal and strict collector metadata checks.
 - Seed the exact recovery receipt through PhotoKit in the owned test runner, with a byte-preserving resource, one bounded creation and linked seed/isolation evidence before opening the system Photos picker.
 - Filter native diagnostic queries to recognized signal candidates before serialization, preserving the existing sanitizer, byte limits and cleanup requirements.
@@ -14,7 +14,7 @@
 - Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
 - Allow up to 90 seconds for the first system Photos presentation after an observed delayed load, with immediate serialized probes, no renewed deadline and late-result rejection inside the existing overall test limits.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
-- Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and the shared ten-second check for a unique, interactive field.
+- Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and a bounded check for a unique, interactive field.
 - Observe Files inline-folder rename and Save dismissal through live queries, retaining the ten-second deadline, exact destination-folder checks and exported-byte verification.
 - Share immediate, bounded dismissal queries across OCR, item editors, name entry, privacy and Files tests, preserving the original ten-second limit and rejecting late or failed observations.
 

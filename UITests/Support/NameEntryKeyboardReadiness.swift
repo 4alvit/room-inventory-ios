@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
 
-/// Handles only the observed system keyboard introduction, inside name-entry's
-/// original readiness window. It never accepts an unrelated alert or Continue.
+/// Handles only the observed system keyboard introduction. Autofocus may use a
+/// separate setup allowance; the default keeps Localization's shared ten seconds.
 @MainActor
 final class NameEntryKeyboardReadiness {
     static let introductionID = "UIContinuousPathIntroductionView"
@@ -36,8 +36,29 @@ final class NameEntryKeyboardReadiness {
 
     enum Failure: Error { case notReady }
     enum EvidenceStage: String { case beforeContinue, dismissedAndFieldReady }
+    enum Timing { case sharedTenSeconds, keyboardSetupThenInput }
 
-    private let window: RecoveryOCRReadinessWindow
+    // Cache only samples already requested by the deadline engine. Diagnostics
+    // must not query the UI or advance an injected clock.
+    private final class Clock {
+        let read: () -> TimeInterval
+        var latest = 0.0
+        init(_ read: @escaping () -> TimeInterval) { self.read = read }
+        func now() -> TimeInterval { latest = read(); return latest }
+    }
+
+    private let clock: Clock
+    private let timing: Timing
+    private let setupWindow: RecoveryOCRReadinessWindow
+    private let setupStartedAt: TimeInterval
+    private var inputWindow: RecoveryOCRReadinessWindow?
+    private var inputStartedAt: TimeInterval?
+    private var setupWaitStarted = false
+    private var setupCompleted = false
+    private var polling = false
+    private var terminalError: Error?
+    private var inputAttempted = false
+    private var window: RecoveryOCRReadinessWindow { inputWindow ?? setupWindow }
     private let allowance: ContinueAllowance
     private(set) var observation: Observation?
     private(set) var sawIntroduction = false
@@ -56,14 +77,29 @@ final class NameEntryKeyboardReadiness {
     private var lastEchoMismatch: String?
     private var lastEchoMismatchTruncated = false
 
-    init(allowance: ContinueAllowance,
+    init(allowance: ContinueAllowance, timing: Timing = .sharedTenSeconds,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.allowance = allowance
-        window = RecoveryOCRReadinessWindow(clock: clock)
+        self.timing = timing
+        let sampledClock = Clock(clock)
+        self.clock = sampledClock
+        setupWindow = RecoveryOCRReadinessWindow(
+            timeout: timing == .keyboardSetupThenInput ? 30 : 10, clock: sampledClock.now)
+        setupStartedAt = sampledClock.latest
     }
 
     func perform<Value>(_ operation: () throws -> Value) throws -> Value {
-        try window.perform(operation)
+        if let terminalError { throw terminalError }
+        do { return try window.perform(operation) }
+        catch { retainFailure(error); throw error }
+    }
+
+    private func retainFailure(_ error: Error) {
+        guard terminalError == nil else { return }
+        // A throwing native call skips the window's postcheck. Capture its end
+        // for diagnostics only; the original error remains authoritative.
+        _ = clock.now()
+        terminalError = error
     }
 
     // This is the same policy seam used by the live adapter and deterministic
@@ -75,6 +111,10 @@ final class NameEntryKeyboardReadiness {
               fieldEnabled: () throws -> Bool,
               fieldHittable: () throws -> Bool,
               evidence: (EvidenceStage) throws -> Void = { _ in }) throws -> Bool {
+        if let terminalError { throw terminalError }
+        guard inputWindow == nil, !polling else { throw Failure.notReady }
+        polling = true
+        defer { polling = false }
         fieldReady = false
         self.entryNameCount = nil
         self.fieldEnabled = nil
@@ -118,14 +158,15 @@ final class NameEntryKeyboardReadiness {
     }
 
     func tapField(_ action: () throws -> Void) throws {
-        guard fieldReady, !fieldTapAttempted else { throw Failure.notReady }
+        guard timing == .sharedTenSeconds, fieldReady, !fieldTapAttempted else { throw Failure.notReady }
         try perform {
             fieldTapAttempted = true
             try action()
         }
     }
 
-    /// Autofocus callers omit the field tap and keep input inside `perform`.
+    /// Only this completed wait may activate the autofocus input window. A
+    /// successful individual poll cannot renew the setup allowance or admit input.
     func waitForField(observe: @escaping () throws -> Observation,
                       continueHittable: @escaping () throws -> Bool,
                       tapContinue: @escaping () throws -> Void,
@@ -133,18 +174,47 @@ final class NameEntryKeyboardReadiness {
                       fieldEnabled: @escaping () throws -> Bool,
                       fieldHittable: @escaping () throws -> Bool,
                       evidence: @escaping (EvidenceStage) throws -> Void) throws {
-        try waitUntil {
-            try self.poll(observe: observe, continueHittable: continueHittable,
-                tapContinue: tapContinue, entryNameCount: entryNameCount, fieldEnabled: fieldEnabled,
-                fieldHittable: fieldHittable, evidence: evidence)
+        if let terminalError { throw terminalError }
+        guard !setupWaitStarted, !polling else { throw Failure.notReady }
+        setupWaitStarted = true
+        do {
+            try waitUntil {
+                try self.poll(observe: observe, continueHittable: continueHittable,
+                    tapContinue: tapContinue, entryNameCount: entryNameCount, fieldEnabled: fieldEnabled,
+                    fieldHittable: fieldHittable, evidence: evidence)
+            }
+            guard fieldReady else { throw Failure.notReady }
+            if timing == .keyboardSetupThenInput {
+                // Construct exactly once, then check that the complete handoff
+                // still falls within setup's deadline before publishing it.
+                let (candidate, startedAt) = try setupWindow.perform {
+                    let candidate = RecoveryOCRReadinessWindow(clock: self.clock.now)
+                    return (candidate, self.clock.latest)
+                }
+                inputStartedAt = startedAt
+                inputWindow = candidate
+            }
+            setupCompleted = true
+        } catch {
+            retainFailure(error)
+            throw error
         }
-        guard fieldReady else { throw Failure.notReady }
+    }
+
+    func typeTextOnce(_ action: () throws -> Void) throws {
+        guard fieldReady, !inputAttempted,
+              timing == .sharedTenSeconds || inputWindow != nil else { throw Failure.notReady }
+        try perform {
+            inputAttempted = true
+            try action()
+        }
     }
 
     /// Input has already happened once. Only read its echo, using the remainder
-    /// of the original window; nil and partial values do not authorize progress.
+    /// of its ten seconds; nil and partial values do not authorize progress.
     func waitForExactValue(_ expected: String, read: @escaping () throws -> String?) throws -> String {
-        guard fieldReady, !echoWaitStarted else { throw Failure.notReady }
+        guard fieldReady, !echoWaitStarted,
+              timing == .sharedTenSeconds || (inputWindow != nil && inputAttempted) else { throw Failure.notReady }
         echoWaitStarted = true
         var matchedValue: String?
         try waitUntil {
@@ -174,17 +244,23 @@ final class NameEntryKeyboardReadiness {
     }
 
     private func waitUntil(_ probe: @escaping () throws -> Bool) throws {
-        var capturedError: Error?
-        let result = try window.waitForProbe {
-            do {
-                return try probe()
-            } catch {
-                capturedError = error
-                return true
+        if let terminalError { throw terminalError }
+        do {
+            var capturedError: Error?
+            let result = try window.waitForProbe {
+                do {
+                    return try probe()
+                } catch {
+                    capturedError = error
+                    return true
+                }
             }
+            if let capturedError { throw capturedError }
+            guard result == .completed else { throw Failure.notReady }
+        } catch {
+            retainFailure(error)
+            throw error
         }
-        if let capturedError { throw capturedError }
-        guard result == .completed else { throw Failure.notReady }
     }
 
     func waitAndTapField(observe: @escaping () throws -> Observation,
@@ -203,7 +279,7 @@ final class NameEntryKeyboardReadiness {
 
     /// Test-owned synthetic names only. This never queries the UI or clock.
     var echoDiagnostic: [String: Any] {
-        ["schema_version": 1,
+        let record: [String: Any] = ["schema_version": 1,
          "allowance_seconds": 10,
          "echo_wait_started": echoWaitStarted,
          "timely_observation_count": echoObservationCount,
@@ -211,10 +287,11 @@ final class NameEntryKeyboardReadiness {
          "mismatch_observed": echoMismatchObserved,
          "last_mismatching_value": lastEchoMismatch.map { $0 as Any } ?? NSNull(),
          "last_mismatching_value_truncated": lastEchoMismatchTruncated]
+        return timingDiagnostic.merging(record) { _, value in value }
     }
 
     var diagnostic: [String: Any] {
-        ["owner_identifier": Self.introductionID,
+        let record: [String: Any] = ["owner_identifier": Self.introductionID,
          "has_timely_observation": observation != nil,
          "entry_name_count": entryNameCount.map { $0 as Any } ?? NSNull(),
          "introduction_count": observation.map { $0.introductionCount as Any } ?? NSNull(),
@@ -228,5 +305,21 @@ final class NameEntryKeyboardReadiness {
          "field_hittable": fieldHittable.map { $0 as Any } ?? NSNull(),
          "field_tap_attempted": fieldTapAttempted,
          "path": sawIntroduction ? "observed_introduction" : "introduction_not_observed"]
+        return timingDiagnostic.merging(record) { _, value in value }
+    }
+
+    private var timingDiagnostic: [String: Any] {
+        func elapsed(from start: TimeInterval, to end: TimeInterval) -> Any {
+            let value = end - start
+            return value.isFinite && value >= 0 ? value as Any : NSNull()
+        }
+        return ["timing_mode": timing == .keyboardSetupThenInput ? "keyboard_setup_then_input" : "shared_ten_seconds",
+                "active_phase": inputWindow != nil ? "input" : "setup",
+                "setup_allowance_seconds": timing == .keyboardSetupThenInput ? 30 : 10,
+                "input_allowance_seconds": 10,
+                "setup_elapsed_seconds": elapsed(from: setupStartedAt, to: inputStartedAt ?? clock.latest),
+                "input_elapsed_seconds": inputStartedAt.map { elapsed(from: $0, to: clock.latest) } ?? NSNull(),
+                "setup_completed": setupCompleted,
+                "input_attempted_once": inputAttempted]
     }
 }

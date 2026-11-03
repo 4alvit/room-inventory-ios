@@ -453,14 +453,15 @@ assertions remain required; no export service is invoked directly.
 ### Autofocused name entry
 
 New `NameEntrySheet` presentations focus their empty `entry.name` field in the
-app. Recovery uses `AutofocusedNameEntry` without a second field tap: one shared
-ten-second monotonic window covers the exact keyboard introduction, a unique
-enabled and hittable text field, an empty or placeholder value, one native
-`typeText`, and the exact typed value afterward. Initial live `nil` values use
+app. Recovery uses `AutofocusedNameEntry` without a second field tap. One
+30-second monotonic setup window covers the exact keyboard introduction and a
+unique enabled and hittable text field. Only timely readiness can start the
+separate ten-second input window, covering an empty or placeholder value, one
+native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
 equal to the requested name. After the one input action, immediate serialized
 read-only probes allow nil or partial values to settle within the remainder of
-that same window. A late exact value or a query error still fails; the wait does
+the input window. A late exact value or a query error still fails; the wait does
 not repeat input or renew its deadline. The existing exact ledger assertion
 runs only after a timely match. On failure, `ROOM_NAME_ENTRY_ECHO_V1` records
 the stage, timely observation count and last mismatching synthetic name (or
@@ -471,12 +472,23 @@ The first focused regression exposed the actual `UIContinuousPathIntroductionVie
 with the known sliding-text marker and one Continue button. The helper reuses
 Localization's exact recognizer and a per-test Continue allowance shared across
 all three sheets. It requires the introduction to disappear and the field to
-be ready afterward. Optional before/after screenshots consume the same window;
-they do not renew it. `waitForField` omits the field tap, while Localization's
-existing `waitAndTapField` delegates to it and retains its tap. A late query or
+be ready afterward. Optional before/after screenshots consume the setup window;
+they do not renew it. `waitForField` omits the field tap. The helper's explicit
+setup/input mode is used for AutofocusedNameEntry; Localization retains its
+existing shared ten-second `waitAndTapField` path and field tap. A late query or
 input cannot authorize Save; there is no generic Continue action, field-tap
 fallback, retyping or keyboard-visibility requirement. Generic item-editor
 fields still use their existing tap-based input.
+
+In hosted run `41689555867`, the former shared ten-second waiter interrupted
+the first exact introduction-owner query before it returned a count. The native
+session records the watchdog interruption and cancelled query; the failure
+screenshot and accessibility tree show the real introduction and an empty,
+focused Home field. No Continue or input action had occurred. The setup/input
+split gives cold keyboard initialization its own finite allowance without
+loosening exact-value checks. Thirty seconds is a bounded policy allowance,
+not a measured guarantee of hosted latency. Neither phase may renew its
+deadline, and a failed or late setup cannot start input.
 
 The native `NameEntryAutofocusUITests` regression creates a home, room and item
 on successive sheets using this same helper, then relaunches the same isolated

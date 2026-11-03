@@ -399,6 +399,27 @@ The same label semantics are used by the ordinary UI tests. The existing bounded
 scrolling, live readiness, one activation and subsequent Files or import-picker
 assertions remain required; no export service is invoked directly.
 
+### Dismissal observations
+
+`ElementDismissalReadiness` observes the count of the original, typed UI query
+inside an active waiter. Its first probe has no initial predicate polling delay;
+later probes do not overlap. Only a zero count returned within the original
+ten-second monotonic window proves absence. An error or late result cannot
+authorize progress, and XCTest issues remain failures. The preceding action
+still happens once. The helper is shared by OCR Apply, editor Save/Cancel, name
+entry, privacy dismissal and the Files transitions below. Each caller retains
+its existing subsequent checks of navigation, saved values or exported bytes.
+
+In run `41550393558`, the OCR navigation controller reported `ViewDidDisappear`
+35 ms after the old dismissal waiter began. Its first predicate query started
+1.039 seconds into the ten-second allowance and successfully returned no matches
+after another 9.129 seconds, past the deadline. The subsequent failure screenshot
+showed the applied model and price with the other fields retained. That screenshot
+does not prove the complete persistence/export/restore journey. Immediate probing
+removes the observed initial scheduling delay; it neither extends the deadline
+nor guarantees that a slow accessibility query will finish in time. The cause of
+that native query's latency remains unknown.
+
 ### Files location titles
 
 The journey recognizes a Files location by its exact, unique, visible title
@@ -415,9 +436,27 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. It waits for editing to end before opening the
-folder if Files has not already entered it. The earlier alert-based creation path remains available when that inline
+unique keyboard Done button. It observes the live inline-editor query until its
+count reaches zero within the original ten-second window, starting the first
+probe inside the active waiter without its initial polling delay. It does not
+resolve the disappearing indexed editor: in the main run `41519955826`, that
+native query remained pending even though Files reported navigation into the
+correct folder before the deadline. Interrupted, failed or late observations
+cannot prove dismissal. The exact folder title and open state remain required
+before saving. The journey opens the folder if Files has not already entered it.
+The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
+
+Saving uses the same bounded live-query observer for the exact Save selector
+used by the tap. In run `41534245115`, inline rename passed, but the old
+element-bound Save absence predicate spent its allowance resolving a remote
+hierarchy and timed out. The native session recorded the host presentation's
+disappearance before the deadline; the later failure screenshot showed the
+dashboard. Neither observation proves that the exported file was committed.
+The journey still requires the dashboard to be interactive and the runner's
+after-export barrier to verify the actual saved bytes. A zero query count only
+proves that the matching UI control is absent; late counts and query failures
+do not authorize progress.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app
 snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy

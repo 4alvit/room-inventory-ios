@@ -2,13 +2,17 @@
 
 ## Unreleased
 
+- Bound passive StoreKit approval/refund observation to one ten-second monotonic window after a hosted approval arrived beyond the former five-second allowance; reject late matches and propagate cancellation without refreshing entitlements.
 - Update related CI action pins together and group future Dependabot action updates.
 - Collect bounded, redacted native diagnostics when Recovery device setup fails before UI execution, preserving the original failure and cleanup evidence.
+- Keep the bounded diagnostic window when device-command cleanup overruns its deadline, recording the actual duration, clipping and clock-validation stage without changing command limits or failure status.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.
 - Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
 - Start Photos appearance probes immediately inside the active waiter and cancel queued probes when it exits, retaining the 30-second deadline and rejecting late results.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
 - Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and the shared ten-second check for a unique, interactive field.
+- Observe Files inline-folder rename and Save dismissal through live queries, retaining the ten-second deadline, exact destination-folder checks and exported-byte verification.
+- Share immediate, bounded dismissal queries across OCR, item editors, name entry, privacy and Files tests, preserving the original ten-second limit and rejecting late or failed observations.
 
 ## [0.1.0] - development preview
 

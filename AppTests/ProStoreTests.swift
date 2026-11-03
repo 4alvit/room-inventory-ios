@@ -101,11 +101,21 @@ final class ProStoreTests: XCTestCase {
 
     // Observe live updates without refreshing the state under test.
     private func waitForObservedEntitlement(_ expected: Bool, store: ProStore) async {
-        for _ in 0..<50 {
-            if store.isPro == expected { return }
-            try? await Task.sleep(for: .milliseconds(100))
+        let clock = ContinuousClock()
+        // Hosted StoreKit delivered a verified approval after 5.30 seconds.
+        // Ten seconds is one integration allowance, not a repeated operation.
+        let deadline = clock.now.advanced(by: .seconds(10))
+        do {
+            let result = try await waitForStoreKitEntitlement(expected: expected,
+                deadline: deadline, now: { clock.now },
+                pauseUntil: { try await clock.sleep(until: $0) },
+                read: { store.isPro })
+            XCTAssertTrue(result.matched,
+                "Expected Pro=\(expected) before StoreKit delivery deadline; "
+                + "last=\(String(describing: result.lastObserved)), observations=\(result.observations)")
+        } catch {
+            XCTFail("StoreKit observation interrupted: \(error)")
         }
-        XCTAssertEqual(store.isPro, expected)
     }
 
     private func processingFields(_ store: ProStore) -> [String: Any] {

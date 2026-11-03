@@ -512,8 +512,12 @@ class Collector:
         entries = self._entries(bridge, [24])
         check(all(path.name.startswith(".") or path.name == "installation-request.json" for path in entries),
               "scenario or acknowledgement file exists before installation handshake")
+        # Request discovery can yield through guard while the first AUT launch
+        # replaces its preinstalled container. Only bind from a census taken
+        # after the runner's validated, post-warmup request has been observed.
+        installed_roots = self._entries(self.simulator / "data/Containers/Data/Application", [2000])
         matches = {self.config["app_bundle_id"]: [], self.config["runner_bundle_id"]: []}
-        for root in roots:
+        for root in installed_roots:
             metadata = self._plain(root / MCM)
             if not metadata.exists():
                 continue  # Installation has not established this unrelated container.
@@ -526,6 +530,31 @@ class Collector:
             bundle = value.get("MCMMetadataIdentifier")
             if bundle in matches:
                 matches[bundle].append(root)
+        initial_set, installed_set = set(roots), set(installed_roots)
+        discovery = {"schema_version": 1, "phase": "installation_discovery",
+                     "request": request, "request_sha256": sha(raw),
+                     "request_runner": runner.relative_to(self.simulator).as_posix(),
+                     "initial_root_count": len(roots), "post_request_root_count": len(installed_roots),
+                     "added_root_count": len(installed_set - initial_set),
+                     "removed_root_count": len(initial_set - installed_set),
+                     "matches": {}}
+        for role in ("app", "runner"):
+            paths = matches[self.config[role + "_bundle_id"]]
+            discovery["matches"][role] = {
+                "count": len(paths), "classification": "missing" if not paths else "unique" if len(paths) == 1 else "duplicate",
+                "relative_paths": [path.relative_to(self.simulator).as_posix() for path in paths[:16]],
+                "paths_truncated": len(paths) > 16,
+            }
+        discovery_raw = canonical(discovery)
+        check(len(discovery_raw) <= 65536, "installation discovery byte limit")
+        try:
+            self._write("bridge/installation-discovery.json", discovery_raw)
+        except Exception as error:
+            # Preserve guard/I/O failure identity, with the already observed
+            # cardinalities still available if the diagnostic cannot be saved.
+            error.add_note("installation discovery counts: " + ", ".join(
+                f"{role}={value['count']}" for role, value in discovery["matches"].items()))
+            raise
         check(all(len(paths) == 1 for paths in matches.values()), "missing or ambiguous installed AUT or runner")
         check(matches[self.config["runner_bundle_id"]][0] == runner, "installation request is outside expected runner")
         check(not self.pins and self.baseline is None, "scenario pins already established")

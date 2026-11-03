@@ -7,7 +7,7 @@ import XCTest
 final class FilesNavigationReadiness {
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
     enum Failure: Error, Equatable, CustomStringConvertible {
-        case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock
+        case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
 
         var description: String { "Files navigation readiness: \(self.name)" }
         private var name: String {
@@ -18,6 +18,7 @@ final class FilesNavigationReadiness {
             case .alreadyWaiting: "wait already active"
             case .invalidAllowance: "invalid allowance"
             case .invalidClock: "invalid monotonic clock"
+            case .invalidTitleCount: "target folder title count is not zero or one"
             }
         }
     }
@@ -81,6 +82,22 @@ final class FilesNavigationReadiness {
             throw remember(result == .timedOut ? Failure.expired : Failure.interrupted)
         }
         return state
+    }
+
+    /// Confirm the newly created folder by its exact live title, without
+    /// resolving the inline editor after Files has removed it.
+    func waitForTargetFolder(titleCount: @escaping () throws -> Int,
+                             enabled: @escaping () throws -> Bool,
+                             hittable: @escaping () throws -> Bool) throws -> Bool {
+        let state = try waitForState {
+            let count = try self.perform(titleCount)
+            guard count == 0 || count == 1 else { throw Failure.invalidTitleCount }
+            guard count == 1 else { return nil }
+            guard try self.perform(enabled) else { return nil }
+            guard try self.perform(hittable) else { return nil }
+            return .targetFolder
+        }
+        return state == .targetFolder
     }
 
     func cancel() {

@@ -675,8 +675,29 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                let dismissal = ElementDismissalReadiness()
-                try ledger.require("sheet dismissed", try dismissal.waitForDismissal { inlineFields.count })
+                let creation = FilesNavigationReadiness(timeout: 10)
+                let began = ProcessInfo.processInfo.systemUptime
+                var folderReady = false
+                do {
+                    defer {
+                        let record: [String: Any] = [
+                            "schema_version": 1, "phase": "inline_creation", "folder": folder,
+                            "allowance_seconds": 10,
+                            "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                            "result": folderReady ? "ready" : "failed"
+                        ]
+                        if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                           data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                            print("ROOM_FILES_CREATION_V1 \(text)")
+                        }
+                    }
+                    let titles = filesFolderTitles(folder, app: app)
+                    folderReady = try creation.waitForTargetFolder(
+                        titleCount: { titles.count },
+                        enabled: { titles.firstMatch.isEnabled },
+                        hittable: { titles.firstMatch.isHittable })
+                }
+                try ledger.require("newly created run folder ready", folderReady)
             } else {
                 let field = app.alerts.textFields.firstMatch
                 try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))

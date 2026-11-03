@@ -577,6 +577,22 @@ therefore uses the stable app root's later `debugDescription`, which includes th
 remote picker. `hierarchy_observation` explicitly distinguishes these observations;
 they are diagnostic evidence and do not authorize an action or prove acceptance.
 
+Restore-file selection uses the exact typed hierarchy observed in the picker:
+one `Browse View (Picker)`, its run-bound local-storage `DOC.browsingRoot`, one
+`File View` collection and one cell whose identifier is the full backup filename
+followed by `, roominventory`. Each scope must be unique before querying its
+descendants. A single active ten-second window covers those live checks,
+enabled/hittable readiness and one direct tap. Missing or noninteractive targets
+remain pending; duplicate scopes, errors, late results and repeated selection
+fail. The generic scrolling/tap helper is not used for this restore selection.
+In run `41704117640`, that helper's repeated existence query ran outside its
+waiter after the file had already been found. The scoped path removes that
+unbounded query sequence; it does not establish the cause of native query latency.
+`ROOM_FILES_SELECTION_V1` records the exact folder/filename, elapsed time, last
+returned counts, current stage and tap admissions from existing operations only.
+A timely tap still requires the replacement alert and all subsequent restore,
+persistence and exported-byte checks; it is not itself proof of restoration.
+
 The replacement alert can expose two nested `restore.confirm` buttons for one
 visible Restore backup action. The journey accepts one button or a single nested
 pair with the same exact identifier, label and nonempty frame, then selects the

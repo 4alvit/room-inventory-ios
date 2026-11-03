@@ -355,4 +355,290 @@ final class FilesNavigationReadinessTests: XCTestCase {
         XCTAssertEqual(counts, 2)
         XCTAssertEqual(positiveQueries, 2)
     }
+
+    @MainActor
+    func testFileSelectionChecksExactScopesInOrderAndTapsOnce() throws {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        now = 9.25
+        var calls: [String] = []
+        func select() throws {
+            try window.waitAndTapFile(
+                pickerCount: { calls.append("picker"); return 1 },
+                folderCount: { calls.append("folder"); return 1 },
+                fileViewCount: { calls.append("view"); return 1 },
+                fileCount: { calls.append("file"); return 1 },
+                enabled: { calls.append("enabled"); return true },
+                hittable: { calls.append("hittable"); return true },
+                tap: { calls.append("tap") })
+        }
+        try select()
+        XCTAssertThrowsError(try select()) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(calls, ["picker", "folder", "view", "file", "enabled", "hittable", "tap"])
+    }
+
+    @MainActor
+    func testMissingFileScopeWaitsWithoutQueryingItsDescendants() throws {
+        for missingScope in 0...3 {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var calls: [Int] = []
+            var polls = 0
+            func count(_ scope: Int) -> Int {
+                if scope == 0 { polls += 1 }
+                calls.append(scope)
+                return polls == 1 && scope == missingScope ? 0 : 1
+            }
+            try window.waitAndTapFile(
+                pickerCount: { count(0) }, folderCount: { count(1) },
+                fileViewCount: { count(2) }, fileCount: { count(3) },
+                enabled: { calls.append(4); return true },
+                hittable: { calls.append(5); return true }, tap: { calls.append(6) })
+            XCTAssertEqual(calls, Array(0...missingScope) + Array(0...6))
+        }
+    }
+
+    @MainActor
+    func testInvalidOrDuplicateFileScopesFailBeforeAnyDescendantOrTap() {
+        for badScope in 0...3 {
+            for badCount in [-1, 2, Int.max] {
+                let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+                var calls: [Int] = []
+                func count(_ scope: Int) -> Int {
+                    calls.append(scope)
+                    return scope == badScope ? badCount : 1
+                }
+                XCTAssertThrowsError(try window.waitAndTapFile(
+                    pickerCount: { count(0) }, folderCount: { count(1) },
+                    fileViewCount: { count(2) }, fileCount: { count(3) },
+                    enabled: { calls.append(4); return true },
+                    hittable: { calls.append(5); return true }, tap: { calls.append(6) })) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionCount)
+                }
+                XCTAssertThrowsError(try window.perform { calls.append(7) }) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionCount)
+                }
+                XCTAssertEqual(calls, Array(0...badScope))
+            }
+        }
+    }
+
+    @MainActor
+    func testDisabledOrNonhittableFileWaitsBeforeSingleTap() throws {
+        for pendingProperty in 4...5 {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var calls: [Int] = []
+            var polls = 0
+            func count(_ scope: Int) -> Int {
+                if scope == 0 { polls += 1 }
+                calls.append(scope)
+                return 1
+            }
+            func ready(_ property: Int) -> Bool {
+                calls.append(property)
+                return property != pendingProperty || polls > 1
+            }
+            try window.waitAndTapFile(
+                pickerCount: { count(0) }, folderCount: { count(1) },
+                fileViewCount: { count(2) }, fileCount: { count(3) },
+                enabled: { ready(4) }, hittable: { ready(5) }, tap: { calls.append(6) })
+            XCTAssertEqual(calls, Array(0...pendingProperty) + Array(0...6))
+        }
+    }
+
+    @MainActor
+    func testEveryFileOperationRejectsExactOrLateReturnWithoutRetry() {
+        for lateOperation in 0...6 {
+            for lateTime in [10.0, 10.001] {
+                var now = 0.0
+                let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+                var calls: [Int] = []
+                func operation(_ index: Int) {
+                    calls.append(index)
+                    if index == lateOperation { now = lateTime }
+                }
+                func select() throws {
+                    try window.waitAndTapFile(
+                        pickerCount: { operation(0); return 1 },
+                        folderCount: { operation(1); return 1 },
+                        fileViewCount: { operation(2); return 1 },
+                        fileCount: { operation(3); return 1 },
+                        enabled: { operation(4); return true },
+                        hittable: { operation(5); return true }, tap: { operation(6) })
+                }
+                XCTAssertThrowsError(try select()) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+                }
+                XCTAssertThrowsError(try select()) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+                }
+                XCTAssertEqual(calls, Array(0...lateOperation))
+            }
+        }
+    }
+
+    @MainActor
+    func testEveryFileOperationPreservesNativeErrorEvenWhenLate() {
+        final class NativeFailure: Error {}
+        for failedOperation in 0...6 {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            let expected = NativeFailure()
+            var calls: [Int] = []
+            func operation(_ index: Int) throws {
+                calls.append(index)
+                if index == failedOperation { now = 11; throw expected }
+            }
+            XCTAssertThrowsError(try window.waitAndTapFile(
+                pickerCount: { try operation(0); return 1 },
+                folderCount: { try operation(1); return 1 },
+                fileViewCount: { try operation(2); return 1 },
+                fileCount: { try operation(3); return 1 },
+                enabled: { try operation(4); return true },
+                hittable: { try operation(5); return true }, tap: { try operation(6) })) {
+                XCTAssertTrue(($0 as? NativeFailure) === expected)
+            }
+            XCTAssertThrowsError(try window.perform { calls.append(7) }) {
+                XCTAssertTrue(($0 as? NativeFailure) === expected)
+            }
+            XCTAssertEqual(calls, Array(0...failedOperation))
+        }
+    }
+
+    @MainActor
+    func testFileSelectionReentryCannotAdmitAnotherQueryOrTap() {
+        for reenterAtTap in [false, true] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var queries = 0
+            var taps = 0
+            var reentrantOperations = 0
+            func reenter() {
+                XCTAssertThrowsError(try window.waitAndTapFile(
+                    pickerCount: { reentrantOperations += 1; return 1 },
+                    folderCount: { reentrantOperations += 1; return 1 },
+                    fileViewCount: { reentrantOperations += 1; return 1 },
+                    fileCount: { reentrantOperations += 1; return 1 },
+                    enabled: { reentrantOperations += 1; return true },
+                    hittable: { reentrantOperations += 1; return true },
+                    tap: { reentrantOperations += 1 })) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+                }
+            }
+            XCTAssertThrowsError(try window.waitAndTapFile(
+                pickerCount: {
+                    queries += 1
+                    if !reenterAtTap { reenter() }
+                    return 1
+                }, folderCount: { queries += 1; return 1 },
+                fileViewCount: { queries += 1; return 1 }, fileCount: { queries += 1; return 1 },
+                enabled: { queries += 1; return true }, hittable: { queries += 1; return true },
+                tap: { taps += 1; reenter() })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+            }
+            XCTAssertEqual(queries, reenterAtTap ? 6 : 1)
+            XCTAssertEqual(taps, reenterAtTap ? 1 : 0)
+            XCTAssertEqual(reentrantOperations, 0)
+        }
+    }
+
+    @MainActor
+    func testNavigationWaitCannotReenterFileSelectionWaiter() {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var taps = 0
+        XCTAssertThrowsError(try window.waitAndTapFile(
+            pickerCount: {
+                XCTAssertThrowsError(try window.waitForState {
+                    XCTFail("Reentrant navigation probe"); return .targetFolder
+                }) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .alreadyWaiting) }
+                return 1
+            }, folderCount: { XCTFail("After reentry"); return 1 },
+            fileViewCount: { XCTFail("After reentry"); return 1 },
+            fileCount: { XCTFail("After reentry"); return 1 },
+            enabled: { XCTFail("After reentry"); return true },
+            hittable: { XCTFail("After reentry"); return true }, tap: { taps += 1 })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .alreadyWaiting)
+        }
+        XCTAssertEqual(taps, 0)
+    }
+
+    @MainActor
+    func testFileSelectionPumpingRunLoopCannotOverlapOrContinueAfterTap() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var active = false
+        var polls = 0
+        var taps = 0
+        try window.waitAndTapFile(
+            pickerCount: {
+                XCTAssertFalse(active)
+                active = true
+                defer { active = false }
+                polls += 1
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                return polls == 1 ? 0 : 1
+            }, folderCount: { 1 }, fileViewCount: { 1 }, fileCount: { 1 },
+            enabled: { true }, hittable: { true },
+            tap: {
+                taps += 1
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            })
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(polls, 2)
+        XCTAssertEqual(taps, 1)
+    }
+
+    @MainActor
+    func testFileSelectionUsesExistingDeadlineAndHonorsCancellation() throws {
+        for cancel in [false, true] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            XCTAssertEqual(try window.waitForState { .targetFolder }, .targetFolder)
+            if cancel { window.cancel() } else { now = 10 }
+            var calls = 0
+            XCTAssertThrowsError(try window.waitAndTapFile(
+                pickerCount: { calls += 1; return 1 }, folderCount: { calls += 1; return 1 },
+                fileViewCount: { calls += 1; return 1 }, fileCount: { calls += 1; return 1 },
+                enabled: { calls += 1; return true }, hittable: { calls += 1; return true },
+                tap: { calls += 1 })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, cancel ? .cancelled : .expired)
+            }
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    @MainActor
+    func testFileSelectionCancellationDuringProbePreventsTap() {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var calls = 0
+        XCTAssertThrowsError(try window.waitAndTapFile(
+            pickerCount: { calls += 1; window.cancel(); return 1 },
+            folderCount: { XCTFail("Cancelled descendant"); return 1 },
+            fileViewCount: { XCTFail("Cancelled descendant"); return 1 },
+            fileCount: { XCTFail("Cancelled descendant"); return 1 },
+            enabled: { XCTFail("Cancelled descendant"); return true },
+            hittable: { XCTFail("Cancelled descendant"); return true },
+            tap: { XCTFail("Cancelled tap") })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testFileTapIsInsideTheActiveOuterWaiter() {
+        let window = FilesNavigationReadiness(timeout: 0.25)
+        var taps = 0
+        var nested: XCTWaiter.Result?
+        XCTAssertThrowsError(try window.waitAndTapFile(
+            pickerCount: { 1 }, folderCount: { 1 }, fileViewCount: { 1 }, fileCount: { 1 },
+            enabled: { true }, hittable: { true },
+            tap: {
+                taps += 1
+                nested = XCTWaiter.wait(for: [XCTestExpectation(description: "native tap")], timeout: 2)
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(nested, .interrupted)
+        XCTAssertEqual(taps, 1)
+    }
 }

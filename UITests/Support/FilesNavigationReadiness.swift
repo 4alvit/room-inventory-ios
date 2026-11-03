@@ -8,6 +8,7 @@ final class FilesNavigationReadiness {
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
+        case invalidSelectionCount, selectionAlreadyStarted
 
         var description: String { "Files navigation readiness: \(self.name)" }
         private var name: String {
@@ -19,6 +20,8 @@ final class FilesNavigationReadiness {
             case .invalidAllowance: "invalid allowance"
             case .invalidClock: "invalid monotonic clock"
             case .invalidTitleCount: "target folder title count is not zero or one"
+            case .invalidSelectionCount: "file selection scope count is not zero or one"
+            case .selectionAlreadyStarted: "file selection already started"
             }
         }
     }
@@ -27,7 +30,9 @@ final class FilesNavigationReadiness {
     private let end: TimeInterval
     private var lastTime: TimeInterval
     private var failure: Error?
-    private var pending: PendingProbe?
+    private var cancelPending: ((Error) -> Void)?
+    private var selectionStarted = false
+    private var tapConsumed = false
 
     init(timeout: TimeInterval = 30,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
@@ -67,11 +72,15 @@ final class FilesNavigationReadiness {
     }
 
     func waitForState(probe: @escaping () throws -> State?) throws -> State {
+        try waitForResult(probe: probe)
+    }
+
+    private func waitForResult<Value>(probe: @escaping () throws -> Value?) throws -> Value {
         _ = try remaining()
-        guard pending == nil else { throw remember(Failure.alreadyWaiting) }
+        guard cancelPending == nil else { throw remember(Failure.alreadyWaiting) }
         let work = PendingProbe(window: self, probe: probe)
-        pending = work
-        defer { work.stop(); pending = nil }
+        cancelPending = { work.finish(.failure($0)) }
+        defer { work.stop(); cancelPending = nil }
         RunLoop.main.perform(inModes: [.default]) {
             MainActor.assumeIsolated { work.poll() }
         }
@@ -100,9 +109,37 @@ final class FilesNavigationReadiness {
         return state == .targetFolder
     }
 
+    /// Check each exact typed scope before its descendants. The direct tap is
+    /// inside the same active waiter as readiness, with no second generic wait.
+    /// Calling this selection again, including from a native callback, fails.
+    func waitAndTapFile(pickerCount: @escaping () throws -> Int,
+                        folderCount: @escaping () throws -> Int,
+                        fileViewCount: @escaping () throws -> Int,
+                        fileCount: @escaping () throws -> Int,
+                        enabled: @escaping () throws -> Bool,
+                        hittable: @escaping () throws -> Bool,
+                        tap: @escaping () throws -> Void) throws {
+        _ = try remaining()
+        guard !selectionStarted else { throw remember(Failure.selectionAlreadyStarted) }
+        selectionStarted = true
+        let _: Bool = try waitForResult {
+            for query in [pickerCount, folderCount, fileViewCount, fileCount] {
+                let count = try self.perform(query)
+                guard count == 0 || count == 1 else { throw Failure.invalidSelectionCount }
+                guard count == 1 else { return nil }
+            }
+            guard try self.perform(enabled) else { return nil }
+            guard try self.perform(hittable) else { return nil }
+            guard !self.tapConsumed else { throw Failure.selectionAlreadyStarted }
+            self.tapConsumed = true
+            try self.perform(tap)
+            return true
+        }
+    }
+
     func cancel() {
         let error = remember(Failure.cancelled)
-        pending?.finish(.failure(error))
+        cancelPending?(error)
     }
 
     private func remember(_ error: Error) -> Error {
@@ -111,15 +148,15 @@ final class FilesNavigationReadiness {
     }
 
     @MainActor
-    private final class PendingProbe {
+    private final class PendingProbe<Value> {
         let ready = XCTestExpectation(description: "Files navigation state")
-        private(set) var result: Result<State, Error>?
+        private(set) var result: Result<Value, Error>?
         private let window: FilesNavigationReadiness
-        private let probe: () throws -> State?
+        private let probe: () throws -> Value?
         private var active = true
         private var timer: Timer?
 
-        init(window: FilesNavigationReadiness, probe: @escaping () throws -> State?) {
+        init(window: FilesNavigationReadiness, probe: @escaping () throws -> Value?) {
             self.window = window
             self.probe = probe
         }
@@ -145,7 +182,7 @@ final class FilesNavigationReadiness {
             }
         }
 
-        func finish(_ result: Result<State, Error>) {
+        func finish(_ result: Result<Value, Error>) {
             guard active else { return }
             self.result = result
             stop()

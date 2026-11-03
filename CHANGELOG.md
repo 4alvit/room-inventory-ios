@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Select the exact Recovery backup through unique typed Files scopes, with readiness and one direct tap inside the same ten-second window; retain replacement confirmation and all restored-content checks.
 - Give Recovery's cold keyboard setup one 30-second window, then type once into the already-autofocused name field and verify its exact echo within a separate ten-second window; retain mismatch diagnostics and verify successive home, room and item creation through relaunch.
 - Publish runner bridge messages with atomic exclusive rename, avoiding a temporary-link cleanup race while retaining overwrite refusal and strict collector metadata checks.
 - Seed the exact recovery receipt through PhotoKit in the owned test runner, with a byte-preserving resource, one bounded creation and linked seed/isolation evidence before opening the system Photos picker.

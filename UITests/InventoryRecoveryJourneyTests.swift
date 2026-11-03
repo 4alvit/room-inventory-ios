@@ -185,8 +185,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try checkpoint("target_empty_free", observations: emptyAndFree(app), app: app)
         try selectExport("export.restore", app: app)
         try enterFilesFolder(folder, create: false, app: app)
-        let backup = fileItem("backup-\(journeyID)", app: app)
-        try tap(backup, app: app, scroll: true)
+        try selectRestoreBackup(folder: folder, app: app)
         let confirmation = app.alerts["Replace the current inventory?"]
         try ledger.require("replacement warning presented", confirmation.waitForExistence(timeout: 10))
         let warning = confirmation.staticTexts["Replace the current inventory?"].label
@@ -798,6 +797,55 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private func fileItem(_ name: String, app: XCUIApplication) -> XCUIElement {
         let predicate = NSPredicate(format: "label == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@", name, name + ".", name + ",")
         return app.descendants(matching: .any).matching(predicate).firstMatch
+    }
+
+    private func selectRestoreBackup(folder: String, app: XCUIApplication) throws {
+        let filename = "backup-\(journeyID).roominventory"
+        let began = ProcessInfo.processInfo.systemUptime
+        let selection = FilesNavigationReadiness(timeout: 10)
+        var tapped = false
+        var tapAdmissions = 0
+        var lastCounts: [String: Int] = [:]
+        var stage = "starting"
+        defer {
+            let record: [String: Any] = [
+                "schema_version": 1, "phase": "restore_backup", "journey_id": journeyID,
+                "folder": folder, "filename": filename, "allowance_seconds": 10,
+                "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                "result": tapped ? "tapped" : "failed", "tap_admissions": tapAdmissions,
+                "last_returned_counts": lastCounts, "stage": stage
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_FILES_SELECTION_V1 \(text)")
+            }
+        }
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let folders = pickers.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: \(folder)")
+        let fileViews = folders.collectionViews.matching(identifier: "File View")
+        // The identifier has a stable type suffix; the label also contains
+        // presentation-dependent time and size. Every live lookup stays scoped
+        // to the exact run folder and filename. These are sequential checks,
+        // not an atomic hierarchy snapshot.
+        let files = fileViews.cells.matching(identifier: filename + ", roominventory")
+        let target = files.element(boundBy: 0)
+        func count(_ query: XCUIElementQuery, _ name: String) -> Int {
+            stage = name
+            let value = query.count
+            lastCounts[name] = value
+            return value
+        }
+        try selection.waitAndTapFile(
+            pickerCount: { count(pickers, "picker") },
+            folderCount: { count(folders, "folder") },
+            fileViewCount: { count(fileViews, "file_view") },
+            fileCount: { count(files, "file") },
+            enabled: { stage = "enabled"; return target.isEnabled },
+            hittable: { stage = "hittable"; return target.isHittable },
+            tap: { stage = "tap"; tapAdmissions += 1; target.tap() })
+        tapped = true
+        stage = "completed"
     }
 
     private func restoreConfirmationButton(in alert: XCUIElement) throws -> XCUIElement {

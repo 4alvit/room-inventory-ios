@@ -551,11 +551,62 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             ? String(observedTitle.dropLast(actionsSuffix.count)) : observedTitle
         try ledger.require("unique export folder", actual: observedFolder, expected: folder)
         ledger.capture("recovery-\(checkpointName)-save-dialog", app: app, test: self)
+        guard let homeName = ledger.expected["home_name"] else {
+            throw RecoveryJourneyFailure.assertion("export return home", "missing", "run-bound home")
+        }
         try tap(saveButton, app: app)
-        let dismissal = ElementDismissalReadiness()
-        try ledger.require("sheet dismissed", try dismissal.waitForDismissal { saveButtons.count })
-        if app.buttons["Close"].exists && app.buttons["Close"].isHittable { try tap(app.buttons["Close"], app: app) }
-        try ledger.require("export returned to dashboard", app.buttons["inventory.exportMenu"].isHittable)
+        let returning = ExportReturnReadiness(homeName: homeName)
+        var returnSucceeded = false
+        do {
+            defer {
+                var record = returning.diagnostic
+                record["role"] = role.rawValue
+                record["result"] = returnSucceeded ? "returned" : "failed"
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_EXPORT_RETURN_V1 " + text)
+                }
+            }
+            // Each probe takes one immutable app snapshot. Remote Files nodes may
+            // be omitted, so their absence is never our return condition. Unique
+            // positive anchors also need current native hittability. firstMatch
+            // avoids exhaustive remote traversal after snapshot uniqueness checks;
+            // these observations are sequential, not an atomic hierarchy snapshot.
+            let export = app.buttons.matching(identifier: "inventory.exportMenu").firstMatch
+            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", homeName + ", ")).firstMatch
+            let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
+                .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close"))
+                .firstMatch
+            returnSucceeded = try returning.waitForReturn(observe: {
+                let root = try app.snapshot()
+                var nodes: [ExportReturnReadiness.Element] = []
+                var pending = root.children.reversed().map { ($0, Optional<Int>.none) }
+                while let (node, parent) = pending.popLast() {
+                    guard nodes.count < 10_000 else { throw ExportReturnReadiness.Failure.invalidObservation }
+                    let kind: ExportReturnReadiness.Kind
+                    switch node.elementType {
+                    case .button: kind = .button
+                    case .staticText: kind = .text
+                    case .navigationBar: kind = .navigationBar
+                    case .alert: kind = .alert
+                    default: kind = .other
+                    }
+                    let index = nodes.count
+                    nodes.append(.init(kind: kind, identifier: node.identifier, label: node.label,
+                                       enabled: node.isEnabled, frame: node.frame, parent: parent))
+                    pending.append(contentsOf: node.children.reversed().map { ($0, Optional(index)) })
+                }
+                return .init(frame: root.frame, elements: nodes)
+            }, isHittable: { target in
+                switch target {
+                case .exportMenu: return export.isHittable
+                case .home: return home.isHittable
+                case .shareClose: return close.isHittable
+                }
+            }, close: { close.tap() })
+        }
+        try ledger.require("sheet dismissed", returnSucceeded)
+        try ledger.require("export returned to dashboard", returnSucceeded)
         try bridge.synchronize(role: role, phase: .after, test: self)
         try checkpoint(checkpointName, observations: ["save_name": observedName, "folder": observedFolder], app: app)
     }

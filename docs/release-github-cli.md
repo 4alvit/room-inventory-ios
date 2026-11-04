@@ -70,3 +70,48 @@ module-only wildcard result does not establish a linked or used vulnerable path.
 Reassess after an upstream release, a command change or a new advisory. This
 scoped assessment supports no known applicable critical or overdue vulnerability
 on the stated date; it is not an indefinite exception or a blanket clean scan.
+
+## Release read recovery and rerun validation
+
+The legacy release publisher carries two scoped shared-toolkit backports:
+[bounded GET recovery](https://github.com/victron-venus/venus-os-ci-toolkit/commit/f6b7d4dfbe44158663d6d3da8c3092932d59253a)
+and [current-attempt validation](https://github.com/victron-venus/venus-os-ci-toolkit/commit/ae0b6f54b19256c1495c821fb70145eaab6be04e).
+Recognized transport failures and HTTP 500/502/503/504 responses can retry a whole
+GET with at most three total attempts (the initial request and up to two
+retries). Metadata attempts are limited to 30 seconds; buffered
+asset and Actions ZIP attempts to 120 seconds, with at most six seconds total
+jitter. Failed response bytes are released before waiting or allocating the next
+capture. Authentication and authorization, certificate, missing-resource and
+rate-limit errors remain terminal. Publication writes
+remain single attempts; streamed downloads retain their existing contract.
+
+For reruns, the existing `validate_run` release gate reads the exact attempt's
+start time and rejects successful jobs or steps copied from an earlier attempt.
+Both candidate publication and RC promotion pass through this gate. First-attempt
+compatibility is retained. This is a partial backport: the legacy API, release
+policy revision, workflows, versions and source/Simulator release requirements
+are unchanged. No version-ledger or final-build migration is included.
+
+The required **Release tooling contracts** job discovers every `test_*.py` in
+`.github/release-tests`; **Core and iOS tests** repeats them through `scripts/ci.sh`.
+The focused `test_release_read_safety.py` exercises complete-response recovery,
+denial handling, failed-capture release, rejected write methods on the attempt
+route, actual attempt timestamps and the legacy gate.
+`test_release_response_framing.py` covers partial headers and status-shaped
+payload text. Keep both files and the existing release-contract suite:
+`test_writes_are_not_replayed` in `test_release_control.py` protects
+single-attempt write behavior.
+Run these contracts without building Swift or starting a Simulator:
+
+```sh
+python3 -m unittest discover -s .github/release-tests -p 'test_*.py' -v
+```
+
+Keep the focused tests when regenerating release tooling. An older generator
+can overwrite these backports, but the retained gate and recovery regressions
+must fail until both fixes are reapplied. Do not replace this legacy engine with
+a newer whole file without reviewing its other dependencies and release policy.
+After a terminal infrastructure failure, inspect existing tags, assets and active
+runs before retrying. Where the existing policy allows a retry before publication,
+use **Re-run all jobs** at the unchanged source; an earlier attempt's successful
+validation does not qualify a later attempt.

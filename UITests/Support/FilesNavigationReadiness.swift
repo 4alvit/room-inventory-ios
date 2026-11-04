@@ -6,8 +6,23 @@ import XCTest
 @MainActor
 final class FilesNavigationReadiness {
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
+    enum TitleKind { case application, navigationBar, text, button, other }
+    struct TitleItem {
+        let kind: TitleKind
+        let label: String
+        let identifier: String
+
+        init(kind: TitleKind, label: String, identifier: String = "") {
+            self.kind = kind
+            self.label = label
+            self.identifier = identifier
+        }
+    }
+    static let navigationBarIdentifier = "FullDocumentManagerViewControllerNavigationBar"
+    static let titleSnapshotNodeLimit = 4_096
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
+        case invalidTitleSnapshot
         case invalidSelectionCount, selectionAlreadyStarted
 
         var description: String { "Files navigation readiness: \(self.name)" }
@@ -20,6 +35,7 @@ final class FilesNavigationReadiness {
             case .invalidAllowance: "invalid allowance"
             case .invalidClock: "invalid monotonic clock"
             case .invalidTitleCount: "target folder title count is not zero or one"
+            case .invalidTitleSnapshot: "invalid or oversized folder title snapshot"
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
             }
@@ -93,8 +109,75 @@ final class FilesNavigationReadiness {
         return state
     }
 
-    /// Confirm the newly created folder by its exact live title, without
-    /// resolving the inline editor after Files has removed it.
+    /// Capture through a resolver that requires a unique Files bar. Missing or
+    /// ambiguous owners remain resolver failures, never an absent title.
+    func captureTargetFolderTitleCount<Node>(title: String, uniqueSnapshot: () throws -> Node,
+                                             children: (Node) -> [Node],
+                                             attributes: (Node) -> TitleItem) throws -> Int {
+        let root = try perform(uniqueSnapshot)
+        return try targetFolderTitleCount(title: title, root: root,
+                                          children: children, attributes: attributes)
+    }
+
+    /// Inspect only the captured owner's direct children. A button's nested text
+    /// is not another title, and no additional live query is needed here.
+    private func targetFolderTitleCount<Node>(title: String, root: Node,
+                                              children: (Node) -> [Node],
+                                              attributes: (Node) -> TitleItem) throws -> Int {
+        let owner = try perform { attributes(root) }
+        try perform {
+            guard owner.kind == .navigationBar,
+                  owner.identifier == Self.navigationBarIdentifier else {
+                throw Failure.invalidTitleSnapshot
+            }
+        }
+        let titles = try perform { children(root) }
+        try perform {
+            guard titles.count < Self.titleSnapshotNodeLimit else {
+                throw Failure.invalidTitleSnapshot
+            }
+        }
+        var count = 0
+        for node in titles {
+            let item = try perform { attributes(node) }
+            if (item.kind == .text && item.label == title)
+                || (item.kind == .button && item.label == title + ", Actions Menu") {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    func captureTargetFolderTitleCount(title: String, navigationBars: XCUIElementQuery) throws -> Int {
+        // `element` requires one match. Keep its resolution and snapshot inside
+        // perform's deadline checks, without a separate remote count query.
+        try captureTargetFolderTitleCount(title: title,
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try navigationBars.element.snapshot() },
+            children: { $0.children }, attributes: { node in
+                let kind: TitleKind
+                switch node.elementType {
+                case .application: kind = .application
+                case .navigationBar: kind = .navigationBar
+                case .staticText: kind = .text
+                case .button: kind = .button
+                default: kind = .other
+                }
+                return TitleItem(kind: kind, label: node.label, identifier: node.identifier)
+            })
+    }
+
+    /// Observe the folder opened by creation. Its unique exact title proves the
+    /// navigation state; no interaction with that title is required.
+    func waitForCreatedFolderObservation(titleCount: @escaping () throws -> Int) throws -> Bool {
+        let state = try waitForState {
+            let count = try self.perform(titleCount)
+            guard count == 0 || count == 1 else { throw Failure.invalidTitleCount }
+            return count == 1 ? .targetFolder : nil
+        }
+        return state == .targetFolder
+    }
+
+    /// Require current native readiness when the target itself must be interactive.
     func waitForTargetFolder(titleCount: @escaping () throws -> Int,
                              enabled: @escaping () throws -> Bool,
                              hittable: @escaping () throws -> Bool) throws -> Bool {

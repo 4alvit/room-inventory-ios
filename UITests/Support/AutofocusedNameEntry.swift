@@ -24,8 +24,8 @@ enum AutofocusedNameEntry {
                      recordTyped: @escaping (String) throws -> Void = { _ in }) throws -> Observation {
         let readiness = NameEntryKeyboardReadiness(allowance: allowance, timing: .keyboardSetupThenInput)
         let fields = app.textFields.matching(identifier: "entry.name")
-        // Readiness checks the exact match count and snapshot identity before
-        // use. Avoid resolving every match again during the one native input.
+        // A complete app snapshot establishes the exact typed match count and
+        // attributes before the live hit test and one native input.
         let field = fields.firstMatch
         let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
         // Count and snapshot recognition below establish uniqueness before use.
@@ -34,6 +34,7 @@ enum AutofocusedNameEntry {
         let continueButton = introduction.buttons
             .matching(NSPredicate(format: "label == %@", "Continue")).firstMatch
         var placeholder: String?
+        var fieldObservation: NameEntryKeyboardReadiness.FieldObservation?
         var stage = "keyboard_setup"
         do {
             try readiness.waitForField(observe: {
@@ -60,13 +61,26 @@ enum AutofocusedNameEntry {
                         return .init(kind: kind, label: node.label, enabled: node.isEnabled)
                     })
             }, continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
-            entryNameCount: { fields.count }, fieldEnabled: {
-                let snapshot = try field.snapshot()
-                guard snapshot.elementType == .textField, snapshot.identifier == "entry.name" else {
+            entryNameCount: {
+                fieldObservation = nil
+                let captured = try readiness.captureNameField(snapshot: { () throws -> any XCUIElementSnapshot in
+                    let root = try app.snapshot()
+                    guard root.elementType == .application else { throw Failure.unexpectedField }
+                    return root
+                }, children: { (node: any XCUIElementSnapshot) in node.children },
+                attributes: { (node: any XCUIElementSnapshot) in
+                    .init(isTextField: node.elementType == .textField, identifier: node.identifier,
+                          enabled: node.isEnabled, placeholder: node.placeholderValue)
+                })
+                fieldObservation = captured
+                return captured.count
+            }, fieldEnabled: {
+                guard let captured = fieldObservation, captured.count == 1,
+                      let snapshot = captured.onlyField else {
                     throw Failure.unexpectedField
                 }
-                placeholder = snapshot.placeholderValue
-                return snapshot.isEnabled
+                placeholder = snapshot.placeholder
+                return snapshot.enabled
             }, fieldHittable: { field.isHittable }, evidence: evidence)
             // Empty controls may expose nil. Preserve the original live-value
             // normalization only before input; nil is never a successful typed echo.

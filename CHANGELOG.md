@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bind export-return checks to the snapshot-selected home's stable accessibility ID in Recovery and RC, retaining unique identity, overlay rejection, one live interaction check and the 30-second deadline.
+- Capture the newly created Files folder through XCTest's unique `element` resolution without a separate owner-count query. Keep the ten-second deadline and exact title checks; missing or ambiguous owners fail instead of being treated as a pending title.
+- Observe the newly created Files folder through its unique navigation bar and exact direct title in Recovery and RC, retaining the ten-second deadline, duplicate rejection and all folder assertions. Keep live interaction checks for filename input and Save; retain the last returned title count if a later observation fails.
+- Tap each OCR switch at its verified center after checking that the resolved coordinate still matches, retaining one activation and the existing selection deadline.
+- Reuse one bounded application snapshot for exact name-field readiness and handle a recognized late keyboard introduction without querying it again, retaining the setup/input deadlines and single-action guards.
 - Resolve the uniquely recognized keyboard introduction and Continue button with short-circuit queries, retaining exact recognition, native hit testing, one tap and the existing setup/input deadlines.
 - Start the StoreKit reset observation window after session preparation, retaining the five-second limit and fresh checks of both transaction sources; record preparation phases for cold-service diagnostics.
 - Select the exact Recovery backup through unique typed Files scopes, with readiness and one direct tap inside the same ten-second window; retain replacement confirmation and all restored-content checks.
@@ -14,7 +19,7 @@
 - Collect bounded, redacted native diagnostics when Recovery device setup fails before UI execution, preserving the original failure and cleanup evidence.
 - Keep the bounded diagnostic window when device-command cleanup overruns its deadline, recording the actual duration, clipping and clock-validation stage without changing command limits or failure status.
 - Start OCR readiness observation on the first waiter run-loop turn, preserving its ten-second allowance and nested-query cancellation.
-- Keep OCR selection controls separate from their visible labels, and use one native switch tap after checking the full control frame without changing selection deadlines.
+- Keep OCR selection controls separate from their visible labels and check the full control frame before activation without changing selection deadlines.
 - Allow up to 90 seconds for the first system Photos presentation after an observed delayed load, with immediate serialized probes, no renewed deadline and late-result rejection inside the existing overall test limits. Space unsuccessful probes by one second to reduce repeated accessibility work during presentation.
 - Record bounded Recovery resource-scan wall and controller CPU costs without changing resource checks, command deadlines or cleanup.
 - Handle the identified iOS keyboard introduction before querying the covered name field, retaining one real Continue action and a bounded check for a unique, interactive field.

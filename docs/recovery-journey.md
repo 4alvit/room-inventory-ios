@@ -364,7 +364,7 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price with one native `XCUIElement.tap()` per switch. The production
+model and price with one `XCUICoordinate.tap()` at each verified switch center. The production
 row uses a separate visible localized label and the same bound native Toggle
 with `labelsHidden()`. The Toggle retains its original accessibility label;
 the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
@@ -374,11 +374,24 @@ In this fixed English fixture, the native switch must have a narrow 40–80-poin
 frame. Its entire frame must lie inside the containing OCR Form's visible bounds
 with a two-point inset, below its navigation bar, and must not intersect exposed
 navigation, tab-bar, keyboard or toolbar-button frames. An alert or
-unidentifiable form fails before tapping. XCTest chooses the native hit point;
-the recorded center is geometry evidence, not an instruction to tap that point.
+unidentifiable form fails before tapping. A switch-relative normalized coordinate
+`(0.5, 0.5)` must resolve to the admitted center inside that frame, within the
+same readiness window. A changed coordinate fails before the one tap. Coordinates
+remain dynamic; this check is admission evidence, not an atomic guarantee that
+the layout cannot move before event delivery.
 The test accepts the exact post-tap value `1` only within the original ten-second
 observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
 selective-update artifact checks remain mandatory.
+
+In run `41800293919`, attempt 2, the native element tap used the AX visible point
+`(310, 353)` for the model switch at `(309, 352, 61, 28)`, rather than its center
+`(339.5, 366)`. The Session log confirms one touch down/up at that corner. The
+post-tap window completed ten snapshot queries without establishing selection;
+the final exact switch value was `0`. Pre-tap and failure images were identical,
+with all switches off and `Apply 0` disabled. This supports choosing an interior
+point explicitly; it does not prove why the corner touch failed or an app state
+reset. The next hosted journey must still establish selection and all later
+persistence, export and restore outcomes. No timeout or assertion is relaxed.
 
 An isolated iOS 27.0 diagnostic using the production source at `fde75fa` exposed
 the original labeled Toggle as a 338×28-point row. Its one native tap at
@@ -398,7 +411,7 @@ The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
 geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
-`activation=native_switch_tap`, `checked_region=entire_switch_frame`, and
+`activation=verified_switch_center`, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness
@@ -482,9 +495,11 @@ JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
 Before starting that input window, the autofocus setup rechecks the exact
 introduction owner after the field-readiness queries and optional evidence.
-An introduction that appeared during those queries returns control to the same
-bounded setup loop, where the existing recognizer and single Continue allowance
-apply. A duplicate or unrecognized owner also blocks input. This final check
+An introduction that appeared during those queries uses the same guarded
+Continue action immediately when its complete observation is recognized, without
+waiting to resolve that owner a second time. A tap still returns control to the
+setup loop for a fresh absence and field-readiness check. A duplicate or
+unrecognized owner also blocks input. This final check
 uses the original setup deadline; a late or throwing check cannot admit input.
 It narrows a sequential observation gap rather than making UI queries atomic.
 
@@ -504,14 +519,28 @@ The autofocus adapter resolves the recognized owner and Continue button with
 `firstMatch` only after the same owner-count and snapshot-recognition guards.
 The snapshot still requires the exact owner identifier, exact marker and exactly
 one enabled Continue button; native hittability and the single tap remain gated
-by the setup deadline. The exact name-field query also uses `firstMatch` after
-its count, snapshot identity, enabled and hittable checks. These are sequential
-observations, not an atomic UI snapshot. In attempt 2 of hosted run `41733453608`,
+by the setup deadline. The adapter inventories exact `entry.name` text fields
+from one direct application snapshot, traversing at most 1,024 nodes. It counts
+all matching typed fields and uses enabled state and placeholder only from the
+sole match in that same snapshot. Each capture clears the prior field proof;
+missing, duplicate, oversized, late or throwing captures cannot reuse it. The
+live `firstMatch.isHittable` check and native input remain separate operations.
+The keyboard owner still uses its separate query because an application snapshot
+can omit that sibling. These are sequential observations, not an atomic UI
+transaction. In attempt 2 of hosted run `41733453608`,
 indexed owner resolution took about 17.8 seconds while fetching the resolved
 owner snapshot took 0.08 seconds. Continue resolution took another 6.6 seconds;
 the setup watchdog cancelled the later tap lookup before event synthesis.
 Short-circuit resolution reduces traversal work without increasing either
 deadline. Its effect on hosted latency still requires a fresh passing run.
+
+In beta run `41791887890`, the post-Continue field query took 5.144 seconds to
+resolve, while fetching its snapshot took 0.012 seconds. Setup expired before
+input. A recognized late introduction had also waited one polling interval and
+been resolved again before Continue. The direct field snapshot and immediate
+guarded action remove those redundant operations without increasing the
+30-second setup or ten-second input allowance. They do not guarantee completion
+under arbitrary service delays; the complete hosted journey must still pass.
 
 In main run `41772302929`, native input's indexed name-field resolution took
 13.340 seconds. The single input completed after its ten-second window, so the
@@ -575,8 +604,61 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. A ten-second window then requires the exact new
-folder title to be unique, enabled and natively hittable. It does not query the
+unique keyboard Done button. A ten-second folder-state observation then requires
+exactly one title for the new folder. Each probe uses
+`navigationBars.element.snapshot()` for the navigation-bar query with the exact
+identifier `FullDocumentManagerViewControllerNavigationBar`. The entire expression
+is inside the existing deadline checks, with no separate owner-count query.
+XCTest's `element` requires a unique match: a missing or ambiguous owner fails the
+test rather than becoming a pending title. Any thrown native error is preserved;
+it is not converted to a zero count. The returned root must have the expected type
+and identifier. Only direct children are inspected for the
+exact typed title predicate; nested button text is not counted twice. The owner
+and direct children are bounded to 4,096 nodes. One exact title establishes the
+open folder; zero remains pending and duplicate titles fail. The title is not
+activated, so this observation does not query its live enabled or hittable state.
+Filename input and Save retain their live interaction guards. Every probe captures
+afresh; unique resolution, snapshot and child inspection reject late results and preserve
+native errors and cancellation within the original deadline. The successful
+observation satisfies the existing folder assertions without repeating the title
+query or navigation tap. Apple's [unique-element contract](https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/element)
+does not guarantee one internal traversal or RPC, nor completion within the
+deadline. The creation diagnostic retains its last returned title count when a
+later probe fails, without making additional UI queries. Exact saved-file and
+restored-content acceptance remains mandatory.
+
+In attempt 2 of run `41829513390`, eleven application-root snapshot requests
+followed Done before the last request was interrupted. The failure capture showed
+the exact target folder open under this Files navigation-bar identifier. The
+snapshot API can omit remote Files nodes; the later debug hierarchy is a separate
+observation and cannot establish the earlier counts or timely readiness. Resolving
+the known owner before snapshotting follows the same scoped-observation approach
+used for the keyboard introduction.
+
+The subsequent run `41846510175` returned one exact title but exhausted the
+ten-second window during the live hittable stage after 10.154 seconds. Its failure
+capture showed the target folder open and empty. The marker does not record the
+returned hittable Boolean, and the later capture cannot prove timely readiness.
+The dedicated post-creation observation therefore checks the open-folder state
+without requiring the title to be an interaction target. The revised path still
+requires hosted validation; this failure is not a passing journey.
+
+In attempt 2 of run `41859790648`, the separate owner-count query began at
+316.69 seconds and the subsequent `firstMatch.snapshot()` resolution began at
+323.91 seconds. That operation was interrupted by the waiter; creation elapsed
+10.272 seconds without a returned title count. The failure capture showed the
+created folder open, but no filename or Save action had been reached. Using the
+unique resolver directly removes the separately requested count. It does not
+establish a speedup or a passing journey; current hosted evidence is still required.
+
+Runs `41814583789` and `41821314272` reached the new folder but exceeded the
+ten-second readiness window. In the latter, accessibility-bound title enumeration
+occupied about 8.9 seconds before live property checks; the window failed after
+10.245 seconds. The later application-snapshot implementation removed that
+enumeration, but did not establish title readiness in the attempt described above.
+A speedup and successful current runtime still need hosted evidence. A failure
+screenshot captured after the window cannot establish
+timely readiness. The check does not query the
 inline editor after Files removes it. In run `41618087432`, resolving that
 disappearing editor exhausted the window even though Files had entered the new
 folder. The positive title check passed in PR run `41627999490` and actual-main
@@ -591,8 +673,17 @@ After one real Save, return from the external Files service has a separate
 snapshot. An observed Files action or alert blocks progress. A remaining share
 sheet may receive at most one enabled, geometrically valid, natively hittable
 Close action, identified under its unique owned header. Success requires unique,
-visible, enabled export and run-bound home anchors, the exact home text under
-that home, and a fresh native hit test of the home. Neither a missing remote
+enabled export and run-bound home anchors with positive, contained frames, the
+exact home text under that home, and a fresh native hit test of the same home.
+Each dashboard home link has the stable ID `inventory.home.<UUID.uuidString>`.
+The selected snapshot button must have a canonical UUID ID, with no other button
+sharing it. Nonbutton children may inherit the ID without making the button
+ambiguous. Both Recovery and RC pass that exact captured ID to
+`app.buttons.matching(NSPredicate(format: "identifier == %@", id)).element.isHittable` inside the same
+30-second window, without a label-prefix query or `firstMatch` fallback.
+Missing or ambiguous native targets cannot establish return; native errors and
+late results remain failures. Geometric containment alone does not prove that
+an overlay has gone away, so the live hit check remains required. Neither a missing remote
 Files node nor closing the share sheet establishes success. The after-export
 barrier must still verify the actual saved bytes.
 
@@ -607,10 +698,21 @@ XCTest/controller limits remain unchanged. It does not identify or eliminate the
 underlying native latency. Late results and native errors remain failures, and
 neither polling nor an error restarts the allowance.
 
+In attempt 2 of run `41883603308`, folder creation completed in 5.193 seconds
+and the first export return passed. The later backup return took 11.515 seconds
+for the snapshot, then spent 18.862 seconds in the broad home hit query before
+the 30-second window rejected the result. Its home-hit value remained null;
+that does not distinguish an interrupted query from a Boolean returned too
+late to admit. The later screenshot and hierarchy showed the dashboard, but
+do not prove timely return. Stable-ID binding removes the second broad label
+selection and ties the native check to the observed row. It does not guarantee
+one internal RPC, faster completion, or successful end-to-end acceptance.
+
 `ROOM_EXPORT_RETURN_V3` records bounded reasons/counts from those existing
 snapshots and the current native stage, without another accessibility query or
-private labels. This distinguishes a completed negative observation from a
-query interrupted before it returns. The complete save/export/restore journey,
+private labels or home IDs. It distinguishes an admitted negative observation
+from a query with no admitted result, including interruption or a late return.
+The complete save/export/restore journey,
 including all six byte-verification barriers, remains the acceptance gate.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app

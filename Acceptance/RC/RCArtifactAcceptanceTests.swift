@@ -260,8 +260,37 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                 try require(element.value as? String == folder, "Exact folder name")
                 try tap(app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")))
             }
-            // Positive exact-title proof; never query a disappeared editor.
-            try ready(titleQuery(folder, app))
+            // Observe the exact remote Files owner, never a disappeared editor.
+            let creation = FilesNavigationReadiness(timeout: 10)
+            let began = ProcessInfo.processInfo.systemUptime
+            var folderReady = false
+            var creationStage = "snapshot"
+            var titleCount: Int?
+            defer {
+                let record: [String: Any] = [
+                    "schema_version": 1, "phase": "creation", "folder": folder,
+                    "allowance_seconds": 10,
+                    "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                    "result": folderReady ? "ready" : "failed",
+                    "last_stage": creationStage,
+                    "last_returned_title_count": titleCount as Any? ?? NSNull()
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_RC_FILES_CREATION_V1 \(text)")
+                }
+            }
+            let navigationBars = app.navigationBars.matching(identifier:
+                FilesNavigationReadiness.navigationBarIdentifier)
+            folderReady = try creation.waitForCreatedFolderObservation(
+                titleCount: {
+                    creationStage = "snapshot"
+                    let count = try creation.captureTargetFolderTitleCount(title: folder,
+                        navigationBars: navigationBars)
+                    titleCount = count
+                    return count
+                })
+            try require(folderReady, "New export folder ready")
         } else {
             try tap(fileRow(folder, app)); try ready(titleQuery(folder, app))
         }
@@ -283,7 +312,6 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         try capture("save-" + baseName, app)
         try tap(app.buttons.matching(identifier: "Save"))
         let returning = ExportReturnReadiness(homeName: names["home"]!)
-        let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", names["home"]! + ", ")).firstMatch
         let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
             .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close")).firstMatch
         let returned = try returning.waitForReturn(observe: {
@@ -307,7 +335,11 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             }
             return .init(frame: root.frame, elements: nodes)
         }, isHittable: { target in
-            switch target { case .home: return home.isHittable; case .shareClose: return close.isHittable }
+            switch target {
+            case let .home(identifier):
+                return app.buttons.matching(NSPredicate(format: "identifier == %@", identifier)).element.isHittable
+            case .shareClose: return close.isHittable
+            }
         }, close: { close.tap() })
         try require(returned, "Positive export return")
     }

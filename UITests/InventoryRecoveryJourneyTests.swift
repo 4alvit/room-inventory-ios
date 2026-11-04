@@ -412,8 +412,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             throw RecoveryJourneyFailure.assertion("OCR \(id) readiness observation", "missing", "completed")
         }
         // The visible label is separate from the native switch, whose frame
-        // must stay narrow in this fixed English fixture. Let XCTest choose its
-        // native hit point. Never retry a toggle: a second tap can undo a delayed
+        // must stay narrow in this fixed English fixture. Use its verified
+        // center: XCTest can choose an unresponsive point at the rounded edge.
+        // Never retry a toggle: a second tap can undo a delayed
         // first activation and hide a real interaction failure.
         let (snapshot, nodes, switches, navigation) = observation
         try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
@@ -445,7 +446,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                       "no_alert": !nodes.contains { $0.element.elementType == .alert }]
         func rectangle(_ frame: CGRect) -> [CGFloat] { [frame.minX, frame.minY, frame.width, frame.height] }
         let geometry: [String: Any] = ["field": id, "basis": "single_application_snapshot",
-            "activation": "native_switch_tap", "checked_region": "entire_switch_frame",
+            "activation": "verified_switch_center", "checked_region": "entire_switch_frame",
             "center": [center.x, center.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
             "navigation": rectangle(navigation.element.frame), "checks": checks,
             "chrome": chrome.map { ["type": $0.element.elementType.rawValue, "frame": rectangle($0.element.frame)] },
@@ -455,8 +456,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
+        let activation = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let point = try window.perform { activation.screenPoint }
+        guard point == center, frame.contains(point) else {
+            throw RecoveryJourneyFailure.assertion("OCR \(id) activation geometry",
+                "resolved center=\(point); admitted center=\(center)", "unchanged center inside the verified switch")
+        }
         _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
-        toggle.tap()
+        activation.tap()
         let selectionWindow = RecoveryOCRSelectionWindow()
         var selectionObservation: RecoveryOCRSelectionWindow.Observation?
         var selectionError: Error?
@@ -578,10 +585,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             // Each probe takes one immutable app snapshot. Remote Files nodes may
             // be omitted, so their absence is never our return condition. Unique
             // positive anchors identify the screen; the run-bound home also
-            // needs current native hittability. firstMatch avoids exhaustive
-            // remote traversal after snapshot uniqueness checks;
+            // needs current native hittability, resolved uniquely by the stable
+            // ID selected in that snapshot, without a second label search;
             // these observations are sequential, not an atomic hierarchy snapshot.
-            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", homeName + ", ")).firstMatch
             let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
                 .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close"))
                 .firstMatch
@@ -607,7 +613,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 return .init(frame: root.frame, elements: nodes)
             }, isHittable: { target in
                 switch target {
-                case .home: return home.isHittable
+                case let .home(identifier):
+                    return app.buttons.matching(NSPredicate(format: "identifier == %@", identifier)).element.isHittable
                 case .shareClose: return close.isHittable
                 }
             }, close: { close.tap() })
@@ -664,6 +671,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                                                    app: app, initial: false)
         }
         try ledger.require("local Files location selected", filesFolderIsOpen(localTitle, app: app))
+        var createdFolderObserved = false
         if create {
             try ledger.require("run folder does not already exist", !fileItem(folder, app: app).exists)
             let more = app.buttons.matching(NSPredicate(format: "label == 'More' OR label == 'More Actions'")).firstMatch
@@ -686,26 +694,36 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let creation = FilesNavigationReadiness(timeout: 10)
                 let began = ProcessInfo.processInfo.systemUptime
                 var folderReady = false
+                var creationStage = "snapshot"
+                var titleCount: Int?
                 do {
                     defer {
                         let record: [String: Any] = [
                             "schema_version": 1, "phase": "inline_creation", "folder": folder,
                             "allowance_seconds": 10,
                             "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
-                            "result": folderReady ? "ready" : "failed"
+                            "result": folderReady ? "ready" : "failed",
+                            "last_stage": creationStage,
+                            "last_returned_title_count": titleCount as Any? ?? NSNull()
                         ]
                         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                            data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
                             print("ROOM_FILES_CREATION_V1 \(text)")
                         }
                     }
-                    let titles = filesFolderTitles(folder, app: app)
-                    folderReady = try creation.waitForTargetFolder(
-                        titleCount: { titles.count },
-                        enabled: { titles.firstMatch.isEnabled },
-                        hittable: { titles.firstMatch.isHittable })
+                    let navigationBars = app.navigationBars.matching(identifier:
+                        FilesNavigationReadiness.navigationBarIdentifier)
+                    folderReady = try creation.waitForCreatedFolderObservation(
+                        titleCount: {
+                            creationStage = "snapshot"
+                            let count = try creation.captureTargetFolderTitleCount(title: folder,
+                                navigationBars: navigationBars)
+                            titleCount = count
+                            return count
+                        })
                 }
                 try ledger.require("newly created run folder ready", folderReady)
+                createdFolderObserved = folderReady
             } else {
                 let field = app.alerts.textFields.firstMatch
                 try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))
@@ -718,6 +736,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let createButton = app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")).firstMatch
                 try tap(createButton, app: app)
             }
+        }
+        if createdFolderObserved {
+            // The timely, unique exact title already proves both assertions.
+            // Requerying its live properties could trigger another remote wait
+            // or an unnecessary row tap in the folder that is already open.
+            try ledger.require("run folder title appeared", createdFolderObserved)
+            try ledger.require("run folder opened", createdFolderObserved)
+            return
         }
         if try !filesFolderIsOpen(folder, app: app) { try tap(fileItem(folder, app: app), app: app, scroll: true) }
         try ledger.require("run folder title appeared", filesFolderTitles(folder, app: app).element(boundBy: 0).waitForExistence(timeout: 5))

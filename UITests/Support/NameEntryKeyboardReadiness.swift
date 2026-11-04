@@ -34,6 +34,20 @@ final class NameEntryKeyboardReadiness {
             continueEnabled: buttons.count == 1 && buttons[0].enabled)
     }
 
+    struct FieldItem {
+        let isTextField: Bool
+        let identifier: String
+        let enabled: Bool
+        let placeholder: String?
+    }
+
+    struct FieldObservation {
+        var count = 0
+        var onlyField: FieldItem?
+    }
+
+    static let fieldSnapshotNodeLimit = 1024
+
     enum Failure: Error { case notReady }
     enum EvidenceStage: String { case beforeContinue, dismissedAndFieldReady }
     enum Timing { case sharedTenSeconds, keyboardSetupThenInput }
@@ -94,6 +108,32 @@ final class NameEntryKeyboardReadiness {
         catch { retainFailure(error); throw error }
     }
 
+    /// Inventory one immutable application snapshot; never resolve the field
+    /// again merely to read attributes already present in that snapshot.
+    func captureNameField<Node>(snapshot: () throws -> Node,
+                                children: (Node) -> [Node],
+                                attributes: (Node) -> FieldItem) throws -> FieldObservation {
+        var pending = [try perform(snapshot)]
+        var visited = 0
+        var result = FieldObservation()
+        while let node = pending.popLast() {
+            let item = try perform { attributes(node) }
+            visited += 1
+            if item.isTextField && item.identifier == "entry.name" {
+                result.count += 1
+                result.onlyField = result.count == 1 ? item : nil
+            }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard descendants.count <= Self.fieldSnapshotNodeLimit - visited - pending.count else {
+                    throw Failure.notReady
+                }
+            }
+            pending.append(contentsOf: descendants)
+        }
+        return result
+    }
+
     private func retainFailure(_ error: Error) {
         guard terminalError == nil else { return }
         // A throwing native call skips the window's postcheck. Capture its end
@@ -123,20 +163,8 @@ final class NameEntryKeyboardReadiness {
         self.observation = observation
         sawIntroduction = sawIntroduction || observation.introductionCount > 0
         if observation.introductionCount != 0 {
-            guard observation.introductionCount == 1,
-                  observation.exactMarkerCount == 1,
-                  observation.continueButtonCount == 1,
-                  observation.continueEnabled,
-                  !allowance.attempted else { return false }
-            guard try perform(continueHittable) else { return false }
-            // Evidence is optional near the deadline; it never renews it. A
-            // slow screenshot still fails closed before the physical action.
-            if try window.remaining() > 2 { try perform { try evidence(.beforeContinue) } }
-            try perform {
-                allowance.attempted = true
-                continueAttempted = true
-                try tapContinue()
-            }
+            try handleIntroduction(observation, continueHittable: continueHittable,
+                tapContinue: tapContinue, evidence: evidence)
             return false // A tap is not proof that the introduction disappeared.
         }
         dismissedIntroduction = sawIntroduction && continueAttempted
@@ -162,11 +190,32 @@ final class NameEntryKeyboardReadiness {
             sawIntroduction = sawIntroduction || finalObservation.introductionCount > 0
             guard finalObservation.introductionCount == 0 else {
                 dismissedIntroduction = false
+                try handleIntroduction(finalObservation, continueHittable: continueHittable,
+                    tapContinue: tapContinue, evidence: evidence)
                 return false
             }
         }
         fieldReady = true
         return true
+    }
+
+    private func handleIntroduction(_ observation: Observation,
+                                    continueHittable: () throws -> Bool,
+                                    tapContinue: () throws -> Void,
+                                    evidence: (EvidenceStage) throws -> Void) throws {
+        guard observation.introductionCount == 1,
+              observation.exactMarkerCount == 1,
+              observation.continueButtonCount == 1,
+              observation.continueEnabled,
+              !allowance.attempted else { return }
+        guard try perform(continueHittable) else { return }
+        // Evidence is optional near the deadline and cannot renew it.
+        if try window.remaining() > 2 { try perform { try evidence(.beforeContinue) } }
+        try perform {
+            allowance.attempted = true
+            continueAttempted = true
+            try tapContinue()
+        }
     }
 
     func tapField(_ action: () throws -> Void) throws {

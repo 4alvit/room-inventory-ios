@@ -2,6 +2,7 @@ import XCTest
 
 final class ExportReturnReadinessTests: XCTestCase {
     private let home = "Recovery Home 12345678"
+    private let homeID = "inventory.home.A1234567-89AB-4CDE-8FAB-0123456789AB"
     private let viewport = CGRect(x: 0, y: 0, width: 402, height: 874)
 
     @MainActor
@@ -12,10 +13,10 @@ final class ExportReturnReadinessTests: XCTestCase {
     }
 
     @MainActor
-    private func dashboard() -> ExportReturnReadiness.Observation {
+    private func dashboard(identifier: String? = nil) -> ExportReturnReadiness.Observation {
         .init(frame: viewport, elements: [
             node(.button, id: "inventory.exportMenu"),
-            node(.button, label: home + ", 1 room · 1 item"),
+            node(.button, id: identifier ?? homeID, label: home + ", 1 room · 1 item"),
             node(.text, label: home, parent: 1)
         ])
     }
@@ -44,7 +45,7 @@ final class ExportReturnReadinessTests: XCTestCase {
             return self.dashboard()
         }, isHittable: { hits.append($0); return true }, close: { XCTFail("Unexpected Close") }))
         XCTAssertEqual(snapshots, 1)
-        XCTAssertEqual(hits, [.home])
+        XCTAssertEqual(hits, [.home(identifier: homeID)])
         XCTAssertFalse(wait.closeAttempted)
         XCTAssertEqual(wait.diagnostic["schema_version"] as? Int, 3)
         XCTAssertEqual(wait.diagnostic["deadline_seconds"] as? Int, 30)
@@ -89,7 +90,7 @@ final class ExportReturnReadinessTests: XCTestCase {
             }
             return self.dashboard()
         }, isHittable: { target in
-            XCTAssertEqual(target, .home)
+            XCTAssertEqual(target, .home(identifier: self.homeID))
             hits += 1
             now += 1
             return true
@@ -153,6 +154,7 @@ final class ExportReturnReadinessTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys])
         XCTAssertLessThanOrEqual(data.count, 16_384)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(home))
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(homeID))
         for invalidTiming in [Double.nan, .infinity, -1] {
             var reads = 0
             let invalidClock = ExportReturnReadiness(homeName: home, clock: { 0 }, diagnosticClock: {
@@ -188,7 +190,7 @@ final class ExportReturnReadinessTests: XCTestCase {
             [base[1], node(.text, label: home, parent: 0)],
             base + [base[0]],
             base + [base[1]],
-            [base[0], node(.button, label: home + "9, 1 room · 1 item"), base[2]],
+            [base[0], node(.button, id: homeID, label: home + "9, 1 room · 1 item"), base[2]],
             [base[0], base[1], node(.text, label: "Another home", parent: 1)],
             [base[0], base[1], node(.text, label: home)],
             [node(.other, id: "inventory.exportMenu"), base[1], base[2]]
@@ -226,8 +228,103 @@ final class ExportReturnReadinessTests: XCTestCase {
         XCTAssertFalse(try wait.poll(observe: { self.dashboard() }, isHittable: {
             hits.append($0); return false
         }, close: { XCTFail("Unexpected Close") }))
-        XCTAssertEqual(hits, [.home])
+        XCTAssertEqual(hits, [.home(identifier: homeID)])
         XCTAssertEqual(wait.lastHomeHittable, false)
+    }
+
+    @MainActor
+    func testMissingMalformedOrNoncanonicalHomeIdentifiersAreRejected() throws {
+        for identifier in ["", "inventory.home.not-a-uuid", homeID.lowercased(), homeID + " ",
+                           "inventory.home.{A1234567-89AB-4CDE-8FAB-0123456789AB}",
+                           "other.home.A1234567-89AB-4CDE-8FAB-0123456789AB"] {
+            let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+            XCTAssertFalse(try wait.poll(observe: { self.dashboard(identifier: identifier) },
+                isHittable: { _ in XCTFail("Invalid identity cannot reach a native query"); return true },
+                close: { XCTFail("Unexpected Close") }))
+            XCTAssertEqual(wait.diagnostic["last_reason"] as? String, "dashboardIdentity")
+        }
+    }
+
+    @MainActor
+    func testDuplicateHomeIdentifierOnAnyButtonIsRejected() throws {
+        for label in [home + ", 1 room · 1 item", "A different home"] {
+            let base = dashboard()
+            let observation = ExportReturnReadiness.Observation(frame: viewport,
+                elements: base.elements + [node(.button, id: homeID, label: label)])
+            let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+            XCTAssertFalse(try wait.poll(observe: { observation },
+                isHittable: { _ in XCTFail("An ambiguous button ID cannot reach a native query"); return true },
+                close: { XCTFail("Unexpected Close") }))
+        }
+    }
+
+    @MainActor
+    func testHomeIdentifierPropagationToNonbuttonsDoesNotDuplicateAnchor() throws {
+        let base = dashboard().elements
+        let observation = ExportReturnReadiness.Observation(frame: viewport, elements: [
+            base[0], base[1], node(.text, id: homeID, label: home, parent: 1),
+            node(.other, id: homeID, parent: 1)
+        ])
+        let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+        var hits: [ExportReturnReadiness.Target] = []
+        XCTAssertTrue(try wait.poll(observe: { observation },
+            isHittable: { hits.append($0); return true }, close: { XCTFail("Unexpected Close") }))
+        XCTAssertEqual(hits, [.home(identifier: homeID)])
+    }
+
+    @MainActor
+    func testEachSnapshotSuppliesItsExactHomeIdentifierToNativeHit() throws {
+        let otherID = "inventory.home.B1234567-89AB-4CDE-8FAB-0123456789AB"
+        let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+        var hits: [ExportReturnReadiness.Target] = []
+        XCTAssertFalse(try wait.poll(observe: { self.dashboard() },
+            isHittable: { hits.append($0); return false }, close: { XCTFail("Unexpected Close") }))
+        XCTAssertTrue(try wait.poll(observe: { self.dashboard(identifier: otherID) },
+            isHittable: { hits.append($0); return true }, close: { XCTFail("Unexpected Close") }))
+        XCTAssertEqual(hits, [.home(identifier: homeID), .home(identifier: otherID)])
+        XCTAssertEqual(wait.observations, 2)
+    }
+
+    @MainActor
+    func testMissingOrAmbiguousNativeHomeResolutionErrorsArePreserved() {
+        enum ResolutionFailure: Error, Equatable { case missing, ambiguous }
+        for failure in [ResolutionFailure.missing, .ambiguous] {
+            var now = 0.0
+            let wait = ExportReturnReadiness(homeName: home, clock: { now })
+            var hits = 0
+            XCTAssertThrowsError(try wait.poll(observe: { self.dashboard() }, isHittable: {
+                XCTAssertEqual($0, .home(identifier: self.homeID))
+                hits += 1
+                now = 30 // The native error remains primary even when its query returns late.
+                throw failure
+            }, close: { XCTFail("Unexpected Close") })) {
+                XCTAssertEqual($0 as? ResolutionFailure, failure)
+            }
+            XCTAssertEqual(hits, 1)
+            XCTAssertNil(wait.lastHomeHittable)
+            XCTAssertEqual(wait.diagnostic["error_stage"] as? String, "homeHit")
+        }
+    }
+
+    @MainActor
+    func testSnapshotAndExactHomeHitCancellationErrorsArePreserved() {
+        for cancelSnapshot in [true, false] {
+            let wait = ExportReturnReadiness(homeName: home, clock: { 0 })
+            var hits = 0
+            XCTAssertThrowsError(try wait.waitForReturn(observe: {
+                if cancelSnapshot { throw CancellationError() }
+                return self.dashboard()
+            }, isHittable: {
+                XCTAssertEqual($0, .home(identifier: self.homeID))
+                hits += 1
+                throw CancellationError()
+            }, close: { XCTFail("Unexpected Close") })) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertEqual(hits, cancelSnapshot ? 0 : 1)
+            XCTAssertNil(wait.lastHomeHittable)
+        }
     }
 
     @MainActor
@@ -303,7 +400,7 @@ final class ExportReturnReadinessTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         XCTAssertEqual(snapshots, 2)
         XCTAssertEqual(closes, 1)
-        XCTAssertEqual(hits, [.shareClose, .home])
+        XCTAssertEqual(hits, [.shareClose, .home(identifier: homeID)])
     }
 
     @MainActor
@@ -318,7 +415,7 @@ final class ExportReturnReadinessTests: XCTestCase {
             return checksAfterHit <= 3 ? 29 : 30
         })
         XCTAssertThrowsError(try wait.waitForReturn(observe: { self.dashboard() }, isHittable: {
-            if $0 == .home { finalHitReturned = true }
+            if $0 == .home(identifier: self.homeID) { finalHitReturned = true }
             return true
         }, close: { XCTFail("Unexpected Close") })) {
             XCTAssertTrue($0 is ExportReturnReadiness.Failure)
@@ -363,7 +460,7 @@ final class ExportReturnReadinessTests: XCTestCase {
                     if stage == "snapshot" { now = elapsed }
                     return stage == "close" ? self.share() : self.dashboard()
                 }, isHittable: { target in
-                    if (stage == "home" && target == .home)
+                    if (stage == "home" && target == .home(identifier: self.homeID))
                         || (stage == "close" && target == .shareClose) { now = elapsed }
                     return true
                 }, close: { closes += 1 }))

@@ -217,6 +217,21 @@ class BuildHarnessOnly(unittest.TestCase):
             self.assertIs(proof['test_executed'],False);self.assertIs(proof['application_built'],False)
             self.assertTrue(any('build-for-testing' in c for c in run.commands))
             self.assertFalse(any('simctl' in c or 'test-without-building' in c for c in run.commands))
+    def test_project_destination_exists_before_generator_is_invoked(self):
+        with tempfile.TemporaryDirectory() as d:
+            run=self.fixture(Path(d));command=run.command;observed=[]
+            self.assertFalse((run.out/'project').exists())
+            def checked_command(argv,name,**kwargs):
+                if name=='generate':
+                    destination=Path(argv[argv.index('--project')+1])
+                    self.assertEqual(destination,run.out/'project')
+                    self.assertTrue(destination.is_dir())
+                    self.assertFalse(destination.is_symlink())
+                    observed.append(destination)
+                return command(argv,name,**kwargs)
+            run.command=checked_command
+            R.build_harness(run,ID)
+            self.assertEqual(observed,[run.out/'project'])
     def test_rebuilt_aut_product_fails_before_exercise(self):
         with tempfile.TemporaryDirectory() as d:
             run=self.fixture(Path(d),extra=True)

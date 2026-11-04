@@ -77,6 +77,7 @@ struct InventoryDashboard: View {
                                     }
                                 }.padding(.vertical, 5)
                             }
+                            .accessibilityIdentifier("inventory.home.\(home.id.uuidString)")
                             .contextMenu {
                                 Button(UIL10n.text("Rename home"), systemImage: "pencil") { renamingHome = home }
                                 Button(UIL10n.text("Delete home"), systemImage: "trash", role: .destructive) { deletingHome = home }

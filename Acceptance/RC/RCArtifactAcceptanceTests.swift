@@ -312,7 +312,6 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         try capture("save-" + baseName, app)
         try tap(app.buttons.matching(identifier: "Save"))
         let returning = ExportReturnReadiness(homeName: names["home"]!)
-        let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", names["home"]! + ", ")).firstMatch
         let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
             .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close")).firstMatch
         let returned = try returning.waitForReturn(observe: {
@@ -336,7 +335,11 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             }
             return .init(frame: root.frame, elements: nodes)
         }, isHittable: { target in
-            switch target { case .home: return home.isHittable; case .shareClose: return close.isHittable }
+            switch target {
+            case let .home(identifier):
+                return app.buttons.matching(NSPredicate(format: "identifier == %@", identifier)).element.isHittable
+            case .shareClose: return close.isHittable
+            }
         }, close: { close.tap() })
         try require(returned, "Positive export return")
     }

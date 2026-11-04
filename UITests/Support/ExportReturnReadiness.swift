@@ -18,7 +18,7 @@ final class ExportReturnReadiness {
         let frame: CGRect
         let elements: [Element]
     }
-    enum Target: String { case home, shareClose }
+    enum Target: Equatable { case home(identifier: String), shareClose }
     enum Decision: String { case pending, dashboard, share }
     enum Failure: Error { case expired, invalidObservation }
     private enum Reason: String {
@@ -30,6 +30,7 @@ final class ExportReturnReadiness {
         let decision: Decision
         let reason: Reason
         let counts: [String: Int]
+        let homeIdentifier: String?
     }
     private enum Stage: String { case snapshot, classification, homeHit, closeHit, close, finalCheck, waitReturn }
 
@@ -112,8 +113,8 @@ final class ExportReturnReadiness {
         let counts = ["nodes": nodes.count, "owners": owners.count, "headers": headers.count,
                       "closes": closes.count, "exports": exports.count, "homes": homes.count,
                       "files": files, "alerts": alerts]
-        func result(_ decision: Decision, _ reason: Reason) -> Classification {
-            Classification(decision: decision, reason: reason, counts: counts)
+        func result(_ decision: Decision, _ reason: Reason, homeIdentifier: String? = nil) -> Classification {
+            Classification(decision: decision, reason: reason, counts: counts, homeIdentifier: homeIdentifier)
         }
         // A positively observed Files control or alert always blocks actions.
         // Conversely, its omission from an app-only snapshot proves nothing.
@@ -136,6 +137,16 @@ final class ExportReturnReadiness {
               let export = exports.first, let home = homes.first else {
             return result(.pending, .dashboardIdentity)
         }
+        // Bind the later native query to this exact model-backed row. Only
+        // buttons participate: SwiftUI can propagate the ID to child text.
+        let identifier = nodes[home].identifier
+        let prefix = "inventory.home."
+        guard identifier.hasPrefix(prefix),
+              let uuid = UUID(uuidString: String(identifier.dropFirst(prefix.count))),
+              identifier == prefix + uuid.uuidString,
+              nodes.filter({ $0.kind == .button && $0.identifier == identifier }).count == 1 else {
+            return result(.pending, .dashboardIdentity)
+        }
         guard nodes[export].enabled, nodes[home].enabled,
               visible(nodes[export].frame, in: observation.frame),
               visible(nodes[home].frame, in: observation.frame) else {
@@ -152,7 +163,7 @@ final class ExportReturnReadiness {
             }
         }
         guard exactHomeLabel else { return result(.pending, .homeLabel) }
-        return result(.dashboard, .dashboard)
+        return result(.dashboard, .dashboard, homeIdentifier: identifier)
     }
 
     func poll(observe: () throws -> Observation,
@@ -210,7 +221,10 @@ final class ExportReturnReadiness {
             case .dashboard:
                 // The snapshot identifies both anchors; one live content hit proves
                 // the run-bound home is interactable within the same allowance.
-                let homeHittable = try measured(.homeHit) { try window.perform { try isHittable(.home) } }
+                guard let identifier = classification.homeIdentifier else { throw Failure.invalidObservation }
+                let homeHittable = try measured(.homeHit) {
+                    try window.perform { try isHittable(.home(identifier: identifier)) }
+                }
                 lastHomeHittable = homeHittable
                 guard homeHittable else { lastReason = .homeNotHittable; return false }
                 _ = try measured(.finalCheck) { try window.remaining() }

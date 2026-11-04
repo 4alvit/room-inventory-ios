@@ -673,8 +673,17 @@ After one real Save, return from the external Files service has a separate
 snapshot. An observed Files action or alert blocks progress. A remaining share
 sheet may receive at most one enabled, geometrically valid, natively hittable
 Close action, identified under its unique owned header. Success requires unique,
-visible, enabled export and run-bound home anchors, the exact home text under
-that home, and a fresh native hit test of the home. Neither a missing remote
+enabled export and run-bound home anchors with positive, contained frames, the
+exact home text under that home, and a fresh native hit test of the same home.
+Each dashboard home link has the stable ID `inventory.home.<UUID.uuidString>`.
+The selected snapshot button must have a canonical UUID ID, with no other button
+sharing it. Nonbutton children may inherit the ID without making the button
+ambiguous. Both Recovery and RC pass that exact captured ID to
+`app.buttons.matching(NSPredicate(format: "identifier == %@", id)).element.isHittable` inside the same
+30-second window, without a label-prefix query or `firstMatch` fallback.
+Missing or ambiguous native targets cannot establish return; native errors and
+late results remain failures. Geometric containment alone does not prove that
+an overlay has gone away, so the live hit check remains required. Neither a missing remote
 Files node nor closing the share sheet establishes success. The after-export
 barrier must still verify the actual saved bytes.
 
@@ -689,10 +698,21 @@ XCTest/controller limits remain unchanged. It does not identify or eliminate the
 underlying native latency. Late results and native errors remain failures, and
 neither polling nor an error restarts the allowance.
 
+In attempt 2 of run `41883603308`, folder creation completed in 5.193 seconds
+and the first export return passed. The later backup return took 11.515 seconds
+for the snapshot, then spent 18.862 seconds in the broad home hit query before
+the 30-second window rejected the result. Its home-hit value remained null;
+that does not distinguish an interrupted query from a Boolean returned too
+late to admit. The later screenshot and hierarchy showed the dashboard, but
+do not prove timely return. Stable-ID binding removes the second broad label
+selection and ties the native check to the observed row. It does not guarantee
+one internal RPC, faster completion, or successful end-to-end acceptance.
+
 `ROOM_EXPORT_RETURN_V3` records bounded reasons/counts from those existing
 snapshots and the current native stage, without another accessibility query or
-private labels. This distinguishes a completed negative observation from a
-query interrupted before it returns. The complete save/export/restore journey,
+private labels or home IDs. It distinguishes an admitted negative observation
+from a query with no admitted result, including interruption or a late return.
+The complete save/export/restore journey,
 including all six byte-verification barriers, remains the acceptance gate.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app

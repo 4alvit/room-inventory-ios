@@ -585,10 +585,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             // Each probe takes one immutable app snapshot. Remote Files nodes may
             // be omitted, so their absence is never our return condition. Unique
             // positive anchors identify the screen; the run-bound home also
-            // needs current native hittability. firstMatch avoids exhaustive
-            // remote traversal after snapshot uniqueness checks;
+            // needs current native hittability, resolved uniquely by the stable
+            // ID selected in that snapshot, without a second label search;
             // these observations are sequential, not an atomic hierarchy snapshot.
-            let home = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", homeName + ", ")).firstMatch
             let close = app.navigationBars.matching(identifier: "UIActivityContentView").buttons
                 .matching(NSPredicate(format: "identifier == %@ AND label == %@", "header.closeButton", "Close"))
                 .firstMatch
@@ -614,7 +613,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 return .init(frame: root.frame, elements: nodes)
             }, isHittable: { target in
                 switch target {
-                case .home: return home.isHittable
+                case let .home(identifier):
+                    return app.buttons.matching(NSPredicate(format: "identifier == %@", identifier)).element.isHittable
                 case .shareClose: return close.isHittable
                 }
             }, close: { close.tap() })

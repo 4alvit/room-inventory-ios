@@ -480,6 +480,14 @@ the stage, timely observation count and last mismatching synthetic name (or
 explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
 JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
+Before starting that input window, the autofocus setup rechecks the exact
+introduction owner after the field-readiness queries and optional evidence.
+An introduction that appeared during those queries returns control to the same
+bounded setup loop, where the existing recognizer and single Continue allowance
+apply. A duplicate or unrecognized owner also blocks input. This final check
+uses the original setup deadline; a late or throwing check cannot admit input.
+It narrows a sequential observation gap rather than making UI queries atomic.
+
 The first focused regression exposed the actual `UIContinuousPathIntroductionView`
 with the known sliding-text marker and one Continue button. The helper reuses
 Localization's exact recognizer and a per-test Continue allowance shared across
@@ -496,13 +504,23 @@ The autofocus adapter resolves the recognized owner and Continue button with
 `firstMatch` only after the same owner-count and snapshot-recognition guards.
 The snapshot still requires the exact owner identifier, exact marker and exactly
 one enabled Continue button; native hittability and the single tap remain gated
-by the setup deadline. The name-field query is unchanged. These are sequential
+by the setup deadline. The exact name-field query also uses `firstMatch` after
+its count, snapshot identity, enabled and hittable checks. These are sequential
 observations, not an atomic UI snapshot. In attempt 2 of hosted run `41733453608`,
 indexed owner resolution took about 17.8 seconds while fetching the resolved
 owner snapshot took 0.08 seconds. Continue resolution took another 6.6 seconds;
 the setup watchdog cancelled the later tap lookup before event synthesis.
 Short-circuit resolution reduces traversal work without increasing either
 deadline. Its effect on hosted latency still requires a fresh passing run.
+
+In main run `41772302929`, native input's indexed name-field resolution took
+13.340 seconds. The single input completed after its ten-second window, so the
+test correctly failed before reading an echo. The failure screenshot shows the
+complete requested name and the keyboard introduction; its arrival time is not
+recorded. The field locator avoids full indexed resolution, and the final setup
+observation prevents an earlier absence from authorizing input after the owner
+has become visible. Neither change accepts late input or repeats typing; their
+effect on the complete journey requires fresh hosted validation.
 
 In hosted run `41689555867`, the former shared ten-second waiter interrupted
 the first exact introduction-owner query before it returned a count. The native

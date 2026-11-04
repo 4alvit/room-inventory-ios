@@ -605,7 +605,13 @@ Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
 unique keyboard Done button. A ten-second window then requires the exact new
-folder title to be unique, enabled and natively hittable. It does not query the
+folder title to be unique, enabled and natively hittable. Each title-count probe
+clears its retained element, resolves the exact title matches by accessibility
+element once, and retains only a single match. The enabled and hittable checks
+use that same element; their properties are still read live. The next probe
+resolves a fresh set of matches. This binds the checks to one title identity,
+without caching readiness properties or changing the ten-second deadline;
+remote queries can still finish late. It does not query the
 inline editor after Files removes it. In run `41618087432`, resolving that
 disappearing editor exhausted the window even though Files had entered the new
 folder. The positive title check passed in PR run `41627999490` and actual-main

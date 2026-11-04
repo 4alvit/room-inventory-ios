@@ -707,10 +707,16 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                         }
                     }
                     let titles = filesFolderTitles(folder, app: app)
+                    var boundTitle: XCUIElement?
                     folderReady = try creation.waitForTargetFolder(
-                        titleCount: { titles.count },
-                        enabled: { titles.firstMatch.isEnabled },
-                        hittable: { titles.firstMatch.isHittable })
+                        titleCount: {
+                            boundTitle = nil
+                            let matches = titles.allElementsBoundByAccessibilityElement
+                            if matches.count == 1 { boundTitle = matches[0] }
+                            return matches.count
+                        },
+                        enabled: { boundTitle?.isEnabled ?? false },
+                        hittable: { boundTitle?.isHittable ?? false })
                 }
                 try ledger.require("newly created run folder ready", folderReady)
             } else {

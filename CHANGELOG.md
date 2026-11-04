@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bind each Files folder-title readiness probe to its single exact accessibility element for live enabled and hittable checks, retaining the ten-second deadline and all folder assertions.
 - Tap each OCR switch at its verified center after checking that the resolved coordinate still matches, retaining one activation and the existing selection deadline.
 - Reuse one bounded application snapshot for exact name-field readiness and handle a recognized late keyboard introduction without querying it again, retaining the setup/input deadlines and single-action guards.
 - Resolve the uniquely recognized keyboard introduction and Continue button with short-circuit queries, retaining exact recognition, native hit testing, one tap and the existing setup/input deadlines.

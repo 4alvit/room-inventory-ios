@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Capture the newly created Files folder through XCTest's unique `element` resolution without a separate owner-count query. Keep the ten-second deadline and exact title checks; missing or ambiguous owners fail instead of being treated as a pending title.
 - Observe the newly created Files folder through its unique navigation bar and exact direct title in Recovery and RC, retaining the ten-second deadline, duplicate rejection and all folder assertions. Keep live interaction checks for filename input and Save; retain the last returned title count if a later observation fails.
 - Tap each OCR switch at its verified center after checking that the resolved coordinate still matches, retaining one activation and the existing selection deadline.
 - Reuse one bounded application snapshot for exact name-field readiness and handle a recognized late keyboard introduction without querying it again, retaining the setup/input deadlines and single-action guards.

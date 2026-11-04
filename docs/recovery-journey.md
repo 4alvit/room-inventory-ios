@@ -605,20 +605,25 @@ Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
 unique keyboard Done button. A ten-second folder-state observation then requires
-exactly one title for the new folder. Each probe first counts the navigation bars with the exact identifier
-`FullDocumentManagerViewControllerNavigationBar`. Zero remains pending; multiple
-owners fail. One owner admits a snapshot of that resolved bar, whose root must
-have the expected type and identifier. Only direct children are inspected for the
+exactly one title for the new folder. Each probe uses
+`navigationBars.element.snapshot()` for the navigation-bar query with the exact
+identifier `FullDocumentManagerViewControllerNavigationBar`. The entire expression
+is inside the existing deadline checks, with no separate owner-count query.
+XCTest's `element` requires a unique match: a missing or ambiguous owner fails the
+test rather than becoming a pending title. Any thrown native error is preserved;
+it is not converted to a zero count. The returned root must have the expected type
+and identifier. Only direct children are inspected for the
 exact typed title predicate; nested button text is not counted twice. The owner
 and direct children are bounded to 4,096 nodes. One exact title establishes the
 open folder; zero remains pending and duplicate titles fail. The title is not
 activated, so this observation does not query its live enabled or hittable state.
 Filename input and Save retain their live interaction guards. Every probe captures
-afresh; owner count, snapshot and child inspection reject late results and preserve
+afresh; unique resolution, snapshot and child inspection reject late results and preserve
 native errors and cancellation within the original deadline. The successful
 observation satisfies the existing folder assertions without repeating the title
-query or navigation tap. These sequential observations are not an atomic hierarchy
-guarantee. The creation diagnostic retains its last returned title count when a
+query or navigation tap. Apple's [unique-element contract](https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/element)
+does not guarantee one internal traversal or RPC, nor completion within the
+deadline. The creation diagnostic retains its last returned title count when a
 later probe fails, without making additional UI queries. Exact saved-file and
 restored-content acceptance remains mandatory.
 
@@ -637,6 +642,14 @@ returned hittable Boolean, and the later capture cannot prove timely readiness.
 The dedicated post-creation observation therefore checks the open-folder state
 without requiring the title to be an interaction target. The revised path still
 requires hosted validation; this failure is not a passing journey.
+
+In attempt 2 of run `41859790648`, the separate owner-count query began at
+316.69 seconds and the subsequent `firstMatch.snapshot()` resolution began at
+323.91 seconds. That operation was interrupted by the waiter; creation elapsed
+10.272 seconds without a returned title count. The failure capture showed the
+created folder open, but no filename or Save action had been reached. Using the
+unique resolver directly removes the separately requested count. It does not
+establish a speedup or a passing journey; current hosted evidence is still required.
 
 Runs `41814583789` and `41821314272` reached the new folder but exceeded the
 ten-second readiness window. In the latter, accessibility-bound title enumeration

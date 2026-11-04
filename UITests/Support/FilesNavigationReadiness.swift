@@ -22,7 +22,7 @@ final class FilesNavigationReadiness {
     static let titleSnapshotNodeLimit = 4_096
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
-        case invalidTitleSnapshot, invalidTitleOwnerCount
+        case invalidTitleSnapshot
         case invalidSelectionCount, selectionAlreadyStarted
 
         var description: String { "Files navigation readiness: \(self.name)" }
@@ -36,7 +36,6 @@ final class FilesNavigationReadiness {
             case .invalidClock: "invalid monotonic clock"
             case .invalidTitleCount: "target folder title count is not zero or one"
             case .invalidTitleSnapshot: "invalid or oversized folder title snapshot"
-            case .invalidTitleOwnerCount: "Files navigation bar count is not zero or one"
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
             }
@@ -110,18 +109,21 @@ final class FilesNavigationReadiness {
         return state
     }
 
-    /// Resolve the unique Files bar before capturing its remote subtree. Count
-    /// only direct title children; a button's nested text is not another title.
-    func captureTargetFolderTitleCount<Node>(title: String, ownerCount: () throws -> Int,
-                                             snapshot: () throws -> Node,
+    /// Capture through a resolver that requires a unique Files bar. Missing or
+    /// ambiguous owners remain resolver failures, never an absent title.
+    func captureTargetFolderTitleCount<Node>(title: String, uniqueSnapshot: () throws -> Node,
                                              children: (Node) -> [Node],
                                              attributes: (Node) -> TitleItem) throws -> Int {
-        let owners = try perform(ownerCount)
-        try perform {
-            guard owners == 0 || owners == 1 else { throw Failure.invalidTitleOwnerCount }
-        }
-        guard owners == 1 else { return 0 }
-        let root = try perform(snapshot)
+        let root = try perform(uniqueSnapshot)
+        return try targetFolderTitleCount(title: title, root: root,
+                                          children: children, attributes: attributes)
+    }
+
+    /// Inspect only the captured owner's direct children. A button's nested text
+    /// is not another title, and no additional live query is needed here.
+    private func targetFolderTitleCount<Node>(title: String, root: Node,
+                                              children: (Node) -> [Node],
+                                              attributes: (Node) -> TitleItem) throws -> Int {
         let owner = try perform { attributes(root) }
         try perform {
             guard owner.kind == .navigationBar,
@@ -147,8 +149,10 @@ final class FilesNavigationReadiness {
     }
 
     func captureTargetFolderTitleCount(title: String, navigationBars: XCUIElementQuery) throws -> Int {
-        try captureTargetFolderTitleCount(title: title, ownerCount: { navigationBars.count },
-            snapshot: { () throws -> any XCUIElementSnapshot in try navigationBars.firstMatch.snapshot() },
+        // `element` requires one match. Keep its resolution and snapshot inside
+        // perform's deadline checks, without a separate remote count query.
+        try captureTargetFolderTitleCount(title: title,
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try navigationBars.element.snapshot() },
             children: { $0.children }, attributes: { node in
                 let kind: TitleKind
                 switch node.elementType {

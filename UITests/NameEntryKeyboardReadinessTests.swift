@@ -2,6 +2,18 @@ import XCTest
 
 @MainActor
 final class NameEntryKeyboardReadinessTests: XCTestCase {
+    private struct SnapshotNode {
+        var item: NameEntryKeyboardReadiness.FieldItem
+        var children: [SnapshotNode] = []
+
+        init(field: Bool = false, identifier: String = "", enabled: Bool = true,
+             placeholder: String? = nil, children: [SnapshotNode] = []) {
+            item = .init(isTextField: field, identifier: identifier,
+                         enabled: enabled, placeholder: placeholder)
+            self.children = children
+        }
+    }
+
     @MainActor
     private final class Harness {
         var now = 0.0
@@ -81,6 +93,99 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertEqual(duplicates.exactMarkerCount, 2)
         XCTAssertEqual(duplicates.continueButtonCount, 2)
         XCTAssertFalse(duplicates.continueEnabled)
+    }
+
+    func testFieldSnapshotRequiresExactTypedIdentityAndPreservesAttributes() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        let root = SnapshotNode(children: [
+            .init(identifier: "entry.name"),
+            .init(field: true, identifier: "entry.name.other"),
+            .init(field: true, identifier: "ENTRY.NAME"),
+            .init(children: [.init(field: true, identifier: "entry.name",
+                                   enabled: false, placeholder: "Home name")])
+        ])
+        let result = try h.subject.captureNameField(snapshot: { root },
+            children: { $0.children }, attributes: { $0.item })
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.onlyField?.enabled, false)
+        XCTAssertEqual(result.onlyField?.placeholder, "Home name")
+    }
+
+    func testFieldSnapshotCountsDeepDuplicatesAndDoesNotReuseEarlierCapture() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        let field = SnapshotNode(field: true, identifier: "entry.name", placeholder: "")
+        var root = SnapshotNode(children: [field])
+        let capture = {
+            try h.subject.captureNameField(snapshot: { root },
+                children: { $0.children }, attributes: { $0.item })
+        }
+        XCTAssertEqual(try capture().onlyField?.placeholder, "")
+        root = SnapshotNode(children: [field, .init(children: [field])])
+        let duplicate = try capture()
+        XCTAssertEqual(duplicate.count, 2)
+        XCTAssertNil(duplicate.onlyField)
+        root = SnapshotNode()
+        let absent = try capture()
+        XCTAssertEqual(absent.count, 0)
+        XCTAssertNil(absent.onlyField)
+    }
+
+    func testFieldSnapshotRejectsOversizedTraversalBeforeVisitingChildren() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        let limit = NameEntryKeyboardReadiness.fieldSnapshotNodeLimit
+        let maximum = SnapshotNode(children: Array(repeating: SnapshotNode(), count: limit - 1))
+        XCTAssertEqual(try h.subject.captureNameField(snapshot: { maximum },
+            children: { $0.children }, attributes: { $0.item }).count, 0)
+        let oversized = SnapshotNode(children: Array(repeating: SnapshotNode(), count: limit))
+        var visits = 0
+        XCTAssertThrowsError(try h.subject.captureNameField(snapshot: { oversized },
+            children: { $0.children }, attributes: { visits += 1; return $0.item })) {
+            XCTAssertTrue($0 is NameEntryKeyboardReadiness.Failure)
+        }
+        XCTAssertEqual(visits, 1)
+        XCTAssertThrowsError(try h.subject.captureNameField(snapshot: {
+            XCTFail("A failed traversal cannot be retried"); return SnapshotNode()
+        }, children: { $0.children }, attributes: { $0.item }))
+    }
+
+    func testFieldSnapshotRejectsLateCaptureAndTraversalWithoutFurtherReads() {
+        let stages = ["snapshot", "attributes", "children"]
+        for stage in stages {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            var reads: [String] = []
+            @MainActor func record(_ name: String) {
+                reads.append(name)
+                if name == stage { h.now = 30 }
+            }
+            XCTAssertThrowsError(try h.subject.captureNameField(snapshot: {
+                record("snapshot"); return SnapshotNode(field: true, identifier: "entry.name")
+            }, children: { node in
+                record("children"); return node.children
+            }, attributes: { node in
+                record("attributes"); return node.item
+            })) { XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired) }
+            let expected = Array(stages.prefix(stages.firstIndex(of: stage)! + 1))
+            XCTAssertEqual(reads, expected)
+            h.now = 0
+            XCTAssertThrowsError(try h.subject.captureNameField(snapshot: {
+                XCTFail("Late capture cannot be retried"); return SnapshotNode()
+            }, children: { $0.children }, attributes: { $0.item }))
+        }
+    }
+
+    func testFieldSnapshotPreservesNativeErrorAfterEarlierValidCapture() throws {
+        enum NativeFailure: Error { case snapshot }
+        let h = Harness(timing: .keyboardSetupThenInput)
+        let field = SnapshotNode(field: true, identifier: "entry.name")
+        XCTAssertEqual(try h.subject.captureNameField(snapshot: { field },
+            children: { $0.children }, attributes: { $0.item }).count, 1)
+        XCTAssertThrowsError(try h.subject.captureNameField(snapshot: { () throws -> SnapshotNode in
+            h.now = 31; throw NativeFailure.snapshot
+        }, children: { $0.children }, attributes: { $0.item })) { XCTAssertTrue($0 is NativeFailure) }
+        h.now = 0
+        XCTAssertThrowsError(try h.subject.perform { XCTFail("Native error remains terminal") }) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
     }
 
     func testAbsentTutorialRequiresLiveFieldReadinessAndOneRealTap() throws {
@@ -656,13 +761,13 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
                 XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
                 XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
             }
-            return (2...3).contains(observations) ? introduction : .init()
+            return observations == 2 ? introduction : .init()
         }, tapContinue: {
             h.stage("continue-tap")
-            XCTAssertEqual(observations, 3)
+            XCTAssertEqual(observations, 2)
             XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
         })
-        XCTAssertEqual(observations, 5)
+        XCTAssertEqual(observations, 4)
         XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
         XCTAssertEqual(h.events.filter { $0 == "entry-count" }.count, 2)
         XCTAssertTrue(h.subject.dismissedIntroduction)
@@ -674,6 +779,50 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
         XCTAssertEqual(h.events.filter { $0 == "type" }.count, 1)
         XCTAssertFalse(h.events.contains("unexpected-type"))
+    }
+
+    func testSplitFinalIntroductionRequiresEnabledHittableUnconsumedContinue() throws {
+        for mode in 0..<3 {
+            let allowance = NameEntryKeyboardReadiness.ContinueAllowance()
+            if mode == 2 {
+                let prior = Harness(allowance: allowance)
+                prior.showIntroduction()
+                XCTAssertFalse(try prior.poll())
+            }
+            let h = Harness(allowance: allowance, timing: .keyboardSetupThenInput)
+            h.showIntroduction()
+            if mode == 0 { h.observation.continueEnabled = false }
+            if mode == 1 { h.continueHittable = false }
+            var observations = 0
+            XCTAssertFalse(try h.poll(observe: {
+                observations += 1
+                return observations == 1 ? .init() : h.observation
+            }))
+            XCTAssertEqual(observations, 2)
+            XCTAssertFalse(h.events.contains("continue-tap"))
+            XCTAssertFalse(h.subject.continueAttempted)
+            XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Input is not ready") })
+        }
+    }
+
+    func testSplitFinalIntroductionThrowConsumesAllowanceWithoutAdmittingInput() {
+        enum NativeFailure: Error { case tap }
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        var observations = 0
+        XCTAssertThrowsError(try h.wait(observe: {
+            observations += 1
+            return observations == 1 ? .init() : h.observation
+        }, tapContinue: {
+            h.stage("continue-tap"); h.now = 31; throw NativeFailure.tap
+        })) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertTrue(h.allowance.attempted)
+        XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+        h.now = 0
+        XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Input must remain forbidden") })
+        XCTAssertThrowsError(try h.wait()) { XCTAssertTrue($0 is NativeFailure) }
     }
 
     func testSplitFinalObservationBlocksUnknownAndDuplicateOwners() throws {

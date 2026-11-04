@@ -482,9 +482,11 @@ JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
 Before starting that input window, the autofocus setup rechecks the exact
 introduction owner after the field-readiness queries and optional evidence.
-An introduction that appeared during those queries returns control to the same
-bounded setup loop, where the existing recognizer and single Continue allowance
-apply. A duplicate or unrecognized owner also blocks input. This final check
+An introduction that appeared during those queries uses the same guarded
+Continue action immediately when its complete observation is recognized, without
+waiting to resolve that owner a second time. A tap still returns control to the
+setup loop for a fresh absence and field-readiness check. A duplicate or
+unrecognized owner also blocks input. This final check
 uses the original setup deadline; a late or throwing check cannot admit input.
 It narrows a sequential observation gap rather than making UI queries atomic.
 
@@ -504,14 +506,28 @@ The autofocus adapter resolves the recognized owner and Continue button with
 `firstMatch` only after the same owner-count and snapshot-recognition guards.
 The snapshot still requires the exact owner identifier, exact marker and exactly
 one enabled Continue button; native hittability and the single tap remain gated
-by the setup deadline. The exact name-field query also uses `firstMatch` after
-its count, snapshot identity, enabled and hittable checks. These are sequential
-observations, not an atomic UI snapshot. In attempt 2 of hosted run `41733453608`,
+by the setup deadline. The adapter inventories exact `entry.name` text fields
+from one direct application snapshot, traversing at most 1,024 nodes. It counts
+all matching typed fields and uses enabled state and placeholder only from the
+sole match in that same snapshot. Each capture clears the prior field proof;
+missing, duplicate, oversized, late or throwing captures cannot reuse it. The
+live `firstMatch.isHittable` check and native input remain separate operations.
+The keyboard owner still uses its separate query because an application snapshot
+can omit that sibling. These are sequential observations, not an atomic UI
+transaction. In attempt 2 of hosted run `41733453608`,
 indexed owner resolution took about 17.8 seconds while fetching the resolved
 owner snapshot took 0.08 seconds. Continue resolution took another 6.6 seconds;
 the setup watchdog cancelled the later tap lookup before event synthesis.
 Short-circuit resolution reduces traversal work without increasing either
 deadline. Its effect on hosted latency still requires a fresh passing run.
+
+In beta run `41791887890`, the post-Continue field query took 5.144 seconds to
+resolve, while fetching its snapshot took 0.012 seconds. Setup expired before
+input. A recognized late introduction had also waited one polling interval and
+been resolved again before Continue. The direct field snapshot and immediate
+guarded action remove those redundant operations without increasing the
+30-second setup or ten-second input allowance. They do not guarantee completion
+under arbitrary service delays; the complete hosted journey must still pass.
 
 In main run `41772302929`, native input's indexed name-field resolution took
 13.340 seconds. The single input completed after its ten-second window, so the

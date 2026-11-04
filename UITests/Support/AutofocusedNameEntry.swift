@@ -63,11 +63,12 @@ enum AutofocusedNameEntry {
             }, continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
             entryNameCount: {
                 fieldObservation = nil
-                let captured = try readiness.captureNameField(snapshot: {
+                let captured = try readiness.captureNameField(snapshot: { () throws -> any XCUIElementSnapshot in
                     let root = try app.snapshot()
                     guard root.elementType == .application else { throw Failure.unexpectedField }
                     return root
-                }, children: { $0.children }, attributes: { node in
+                }, children: { (node: any XCUIElementSnapshot) in node.children },
+                attributes: { (node: any XCUIElementSnapshot) in
                     .init(isTextField: node.elementType == .textField, identifier: node.identifier,
                           enabled: node.isEnabled, placeholder: node.placeholderValue)
                 })

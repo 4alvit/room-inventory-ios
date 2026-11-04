@@ -38,6 +38,7 @@ class RecoveryRetentionTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.journey()
         verified = self.fixture.collector.capture_xcresult(self.fixture.original)
+        self.fixture.collector.seal_live_inputs()
         self.fixture.collector.collect(verified)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

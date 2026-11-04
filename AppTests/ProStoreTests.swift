@@ -16,18 +16,27 @@ final class ProStoreTests: XCTestCase {
 
     private func makeSession() async throws -> SKTestSession {
         let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "RoomInventory", withExtension: "storekit"))
+        diagnostic("session-create-before")
         let session = try SKTestSession(contentsOf: config)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
+        diagnostic("session-create-after")
         var ready = false
         defer { if !ready { session.clearTransactions() } }
         let beforeSession = session.allTransactions()
+        diagnostic("session-baseline-ledger-after", ["transactions": beforeSession.count])
         let beforeEntitlements = await verifiedEntitlements()
+        diagnostic("session-baseline-entitlements-after", ["entitlements": beforeEntitlements.count])
         session.resetToDefaultState()
+        diagnostic("session-reset-after")
         session.clearTransactions()
+        diagnostic("session-clear-after")
         session.disableDialogs = true
+        diagnostic("session-disable-dialogs-after")
         // StoreKit's session ledger and the app-facing entitlement sequence must both
         // observe the reset before a new store or purchase can belong to this test.
+        // Preparation may block on a cold StoreKit service; its duration must not
+        // consume the single post-reset observation window.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
         let result = try await waitForStoreKitReset(
             deadline: deadline,
             now: { clock.now },
@@ -38,6 +47,8 @@ final class ProStoreTests: XCTestCase {
                     sessionTransactions: session.allTransactions().count,
                     verifiedEntitlements: entitlements.count)
             })
+        diagnostic("session-reset-observation-after", ["clean": result.clean,
+            "observations": result.observations])
         guard result.clean else {
             XCTFail("StoreKit reset did not settle: before session=\(beforeSession.count), "
                 + "entitlements=\(beforeEntitlements.count); \(result.diagnostic)")

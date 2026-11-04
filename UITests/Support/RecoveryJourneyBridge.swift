@@ -266,14 +266,7 @@ final class RecoveryJourneyBridge {
     }
 
     private static func publish(_ data: Data, at destination: URL, nonce: String) throws {
-        let temporary = destination.deletingLastPathComponent()
-            .appendingPathComponent("." + destination.lastPathComponent + "." + nonce + ".tmp")
-        // A hard link publishes complete bytes atomically and fails if the final
-        // name exists. Renaming or an atomic overwrite would permit stale reuse.
-        try data.write(to: temporary, options: [.withoutOverwriting])
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        do { try FileManager.default.linkItem(at: temporary, to: destination) }
-        catch { throw BridgeError.invalid("cannot publish a new request") }
+        try RecoveryBridgePublication.publish(data, at: destination, nonce: nonce)
     }
 
     private static func readRegularFile(_ url: URL) throws -> Data {

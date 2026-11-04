@@ -1,6 +1,34 @@
 import XCTest
 
 final class RecoveryOCRReadinessWindowTests: XCTestCase {
+    func testExplicitExternalAllowanceDoesNotChangeOCRDefault() throws {
+        var now = 0.0
+        let ocr = RecoveryOCRReadinessWindow(clock: { now })
+        let external = RecoveryOCRReadinessWindow(timeout: 30, clock: { now })
+        now = 10
+        XCTAssertThrowsError(try ocr.remaining()) {
+            XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+        }
+        XCTAssertEqual(try external.remaining(), 20)
+        for elapsed in [30.0, 30.001] {
+            now = elapsed
+            var called = false
+            XCTAssertThrowsError(try external.perform { called = true })
+            XCTAssertFalse(called)
+        }
+    }
+
+    func testInvalidExternalAllowanceFailsBeforeOperation() {
+        for timeout in [-1.0, 0, 30.001, .infinity, .nan] {
+            let window = RecoveryOCRReadinessWindow(timeout: timeout, clock: { 0 })
+            var called = false
+            XCTAssertThrowsError(try window.perform { called = true }) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .invalidAllowance)
+            }
+            XCTAssertFalse(called)
+        }
+    }
+
     func testOneSnapshotServesStateAndGeometryWithinSharedBudget() throws {
         var now = 100.0
         let window = RecoveryOCRReadinessWindow(clock: { now })

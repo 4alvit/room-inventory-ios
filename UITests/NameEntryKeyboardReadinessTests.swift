@@ -13,9 +13,18 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         var advanceAt: [String: Double] = [:]
         var events: [String] = []
         let allowance: NameEntryKeyboardReadiness.ContinueAllowance
-        lazy var subject = NameEntryKeyboardReadiness(allowance: allowance, clock: { [unowned self] in self.now })
+        let timing: NameEntryKeyboardReadiness.Timing
+        var clockReads = 0
+        lazy var subject = NameEntryKeyboardReadiness(allowance: allowance, timing: timing, clock: { [unowned self] in
+            self.clockReads += 1
+            return self.now
+        })
 
-        init(allowance: NameEntryKeyboardReadiness.ContinueAllowance = .init()) { self.allowance = allowance }
+        init(allowance: NameEntryKeyboardReadiness.ContinueAllowance = .init(),
+             timing: NameEntryKeyboardReadiness.Timing = .sharedTenSeconds) {
+            self.allowance = allowance
+            self.timing = timing
+        }
         func stage(_ name: String) { events.append(name); now += advanceAt[name, default: 0] }
         func poll() throws -> Bool {
             try subject.poll(observe: { self.stage("observe"); return self.observation },
@@ -27,6 +36,16 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
                 evidence: { self.stage("evidence-" + $0.rawValue) })
         }
         func tapField() throws { try subject.tapField { self.stage("field-tap") } }
+        func wait(observe: (() throws -> NameEntryKeyboardReadiness.Observation)? = nil,
+                  tapContinue: (() throws -> Void)? = nil) throws {
+            try subject.waitForField(observe: observe ?? { self.stage("observe"); return self.observation },
+                continueHittable: { self.stage("continue-hit"); return self.continueHittable },
+                tapContinue: tapContinue ?? { self.stage("continue-tap") },
+                entryNameCount: { self.stage("entry-count"); return self.entryNameCount },
+                fieldEnabled: { self.stage("field-enabled"); return self.fieldEnabled },
+                fieldHittable: { self.stage("field-hit"); return self.fieldHittable },
+                evidence: { self.stage("evidence-" + $0.rawValue) })
+        }
         func showIntroduction() {
             observation = .init(introductionCount: 1,
                 exactMarkerCount: 1, continueButtonCount: 1, continueEnabled: true)
@@ -341,6 +360,282 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertNil(h.subject.entryNameCount)
         XCTAssertFalse(h.subject.fieldTapAttempted)
         XCTAssertTrue(h.allowance.attempted)
+    }
+
+    func testExactEchoIsProbedImmediatelyAfterOneInputWithoutAnotherQuery() throws {
+        let h = Harness()
+        XCTAssertTrue(try h.poll())
+        h.events.removeAll()
+        h.now = 9.25 // A delayed first poll would miss the original deadline.
+        try h.subject.perform { h.stage("type") }
+        let value = try h.subject.waitForExactValue("Test Home") {
+            h.stage("read")
+            return "Test Home"
+        }
+        XCTAssertEqual(value, "Test Home")
+        XCTAssertEqual(h.events, ["type", "read"])
+        XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, true)
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+            h.stage("unexpected-read")
+            return "Test Home"
+        })
+        XCTAssertEqual(h.events, ["type", "read"])
+    }
+
+    func testExactEchoWaitsThroughPartialAndNilValuesWithoutRepeatingInput() throws {
+        let h = Harness()
+        XCTAssertTrue(try h.poll())
+        h.events.removeAll()
+        h.now = 6
+        try h.subject.perform { h.stage("type") }
+        let values: [String?] = ["Test", nil, "Test Home"]
+        var reads = 0
+        let value = try h.subject.waitForExactValue("Test Home") {
+            h.stage("read")
+            h.now += 0.5
+            defer { reads += 1 }
+            return values[reads]
+        }
+        try h.subject.perform { h.stage("record-typed"); XCTAssertEqual(value, "Test Home") }
+        XCTAssertEqual(h.events, ["type", "read", "read", "read", "record-typed"])
+        XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 3)
+        XCTAssertEqual(h.subject.echoDiagnostic["mismatch_observed"] as? Bool, true)
+        XCTAssertTrue(h.subject.echoDiagnostic["last_mismatching_value"] is NSNull)
+    }
+
+    func testExactEchoAtOrAfterOriginalDeadlineIsRejectedWithoutFurtherQueries() throws {
+        for end in [10.0, 10.001] {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.75
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                h.now = end
+                return "Test Home"
+            }) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+            }
+            XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected-read") })
+            XCTAssertEqual(h.events, ["type", "read"])
+            XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 0)
+            XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+        }
+    }
+
+    func testExactEchoPreservesQueryErrorEvenWhenLateWithoutRepeatingInput() throws {
+        enum NativeFailure: Error { case read }
+        for late in [false, true] {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.75
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                if late { h.now = 10 }
+                throw NativeFailure.read
+            }) {
+                XCTAssertTrue($0 is NativeFailure)
+            }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("unexpected-read")
+                return "Test Home"
+            })
+            XCTAssertEqual(h.events, ["type", "read"])
+            XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 0)
+        }
+    }
+
+    func testUnmatchedEchoTimeoutRetainsBoundedLastValueForFailureDiagnostic() throws {
+        let cases = [(String(repeating: "\n", count: 1000), String(repeating: "\n", count: 256)),
+                     (String(repeating: "a", count: 255) + "😀", String(repeating: "a", count: 255))]
+        for (mismatch, expectedPrefix) in cases {
+            let h = Harness()
+            XCTAssertTrue(try h.poll())
+            h.events.removeAll()
+            h.now = 9.5
+            try h.subject.perform { h.stage("type") }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                h.stage("read")
+                return mismatch
+            })
+            var diagnostic = h.subject.echoDiagnostic
+            diagnostic["result"] = "failed"
+            diagnostic["stage"] = "echo"
+            let retained = try XCTUnwrap(diagnostic["last_mismatching_value"] as? String)
+            XCTAssertEqual(retained, expectedPrefix)
+            XCTAssertLessThanOrEqual(retained.utf8.count, 256)
+            XCTAssertEqual(diagnostic["last_mismatching_value_truncated"] as? Bool, true)
+            XCTAssertEqual(diagnostic["matched"] as? Bool, false)
+            XCTAssertEqual(diagnostic["timely_observation_count"] as? Int, 1)
+            XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: diagnostic).count, 4096)
+            XCTAssertEqual(h.events, ["type", "read"])
+        }
+    }
+
+    func testSplitSetupCanCompleteAfterTenSecondsThenUseOneSeparateInputWindow() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        var observations = 0
+        try h.wait(observe: {
+            h.stage("observe")
+            h.now += 12
+            observations += 1
+            return observations == 1 ? h.observation : .init()
+        })
+        XCTAssertEqual(h.now, 24)
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        try h.subject.typeTextOnce { h.stage("type"); h.now += 5 }
+        XCTAssertEqual(try h.subject.waitForExactValue("Test Home") {
+            h.stage("read"); h.now += 2; return "Test Home"
+        }, "Test Home")
+        XCTAssertEqual(h.now, 31) // Beyond setup's deadline, within the one input window.
+        let reads = h.clockReads
+        let diagnostic = h.subject.echoDiagnostic
+        XCTAssertEqual(diagnostic["setup_elapsed_seconds"] as? Double, 24)
+        XCTAssertEqual(diagnostic["input_elapsed_seconds"] as? Double, 7)
+        XCTAssertEqual(diagnostic["active_phase"] as? String, "input")
+        XCTAssertEqual(diagnostic["input_attempted_once"] as? Bool, true)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: diagnostic).count, 4096)
+        XCTAssertEqual(h.clockReads, reads)
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertFalse(h.events.contains("field-tap"))
+        XCTAssertEqual(h.events.suffix(2), ["type", "read"])
+    }
+
+    func testSplitSetupExactOrLateOperationsCannotActivateInputOrRestart() {
+        for end in [30.0, 30.001] {
+            for stage in ["observe", "continue-hit", "continue-tap", "entry-count", "field-enabled", "field-hit"] {
+                let h = Harness(timing: .keyboardSetupThenInput)
+                _ = h.subject // Start the immutable setup window at zero.
+                h.now = 29.99
+                if stage.hasPrefix("continue-") { h.showIntroduction() }
+                h.advanceAt[stage] = end - h.now
+                XCTAssertThrowsError(try h.wait(), stage) {
+                    XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+                }
+                let events = h.events
+                XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, false)
+                XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+                h.now = 0 // Even a clock rollback cannot revive a failed setup.
+                XCTAssertThrowsError(try h.wait())
+                XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+                XCTAssertEqual(h.events, events)
+                XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, stage == "continue-tap" ? 1 : 0)
+            }
+        }
+    }
+
+    func testSplitSetupNativeErrorStaysTerminalAndPreservesConsumedContinue() {
+        enum NativeFailure: Error { case action }
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        _ = h.subject
+        h.now = 29.99
+        XCTAssertThrowsError(try h.wait(tapContinue: {
+            h.stage("continue-tap"); h.now = 31; throw NativeFailure.action
+        })) { XCTAssertTrue($0 is NativeFailure) }
+        let events = h.events
+        h.now = 0
+        XCTAssertThrowsError(try h.wait()) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected-query") }) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        XCTAssertEqual(h.events, events)
+        XCTAssertTrue(h.allowance.attempted)
+        let later = Harness(allowance: h.allowance, timing: .keyboardSetupThenInput)
+        later.showIntroduction()
+        XCTAssertFalse(try later.poll())
+        XCTAssertEqual(later.events, ["observe"])
+    }
+
+    func testSplitInputRequiresCompletedWaitAndCannotRenewEitherPhase() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        XCTAssertTrue(try h.poll())
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+            h.stage("unexpected-read"); return "Test Home"
+        })
+        h.now = 20
+        try h.wait()
+        let events = h.events
+        XCTAssertThrowsError(try h.wait())
+        XCTAssertThrowsError(try h.poll())
+        XCTAssertThrowsError(try h.tapField())
+        h.now = 30
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") }) {
+            XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+        }
+        XCTAssertThrowsError(try h.wait())
+        XCTAssertEqual(h.events, events)
+    }
+
+    func testSplitInitialReadInputAndEchoRejectExactOrLateInputDeadline() throws {
+        for end in [30.0, 30.001] {
+            for stage in ["initial-value", "type", "echo"] {
+                let h = Harness(timing: .keyboardSetupThenInput)
+                _ = h.subject
+                h.now = 20
+                try h.wait()
+                h.events.removeAll()
+                h.now = 29.99
+                if stage == "initial-value" {
+                    XCTAssertThrowsError(try h.subject.perform { h.stage(stage); h.now = end })
+                } else if stage == "type" {
+                    XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage(stage); h.now = end })
+                } else {
+                    try h.subject.typeTextOnce { h.stage("type") }
+                    XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                        h.stage(stage); h.now = end; return "Test Home"
+                    })
+                }
+                let events = h.events
+                XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected-query") })
+                XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+                XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+                    h.stage("unexpected-echo"); return "Test Home"
+                })
+                XCTAssertThrowsError(try h.wait())
+                XCTAssertEqual(h.events, events)
+                XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+            }
+        }
+    }
+
+    func testSplitThrowingInputIsNotRepeatedOrFollowedByEcho() throws {
+        enum NativeFailure: Error { case input }
+        let h = Harness(timing: .keyboardSetupThenInput)
+        try h.wait()
+        h.events.removeAll()
+        XCTAssertThrowsError(try h.subject.typeTextOnce {
+            h.stage("type"); h.now = 11; throw NativeFailure.input
+        }) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+            h.stage("unexpected-read"); return "Test Home"
+        }) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertEqual(h.events, ["type"])
+        XCTAssertEqual(h.subject.echoDiagnostic["input_attempted_once"] as? Bool, true)
+    }
+
+    func testSplitWaitRejectsReentryAndLeavesNoPendingProbe() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        try h.wait(observe: {
+            h.stage("observe")
+            XCTAssertThrowsError(try h.wait())
+            XCTAssertThrowsError(try h.poll())
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            return .init()
+        })
+        let events = h.events
+        RunLoop.main.run(until: Date().addingTimeInterval(1.05))
+        XCTAssertEqual(h.events, events)
+        XCTAssertEqual(h.events.filter { $0 == "observe" }.count, 1)
+        XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, true)
     }
 
 }

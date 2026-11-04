@@ -183,6 +183,18 @@ one 60-second monotonic deadline starting before request publication with the
 wait and acknowledgement validation. Late observations cannot authorize success;
 the XCTest and controller deadlines remain active and are never renewed.
 
+All runner publications (installation, Photos seed/isolation and numbered export
+requests) write a complete exclusive temporary file in the same directory, then
+publish it with Darwin `renamex_np(RENAME_EXCL)`. An existing destination, including
+a symlink, is not replaced; an unsupported or failed rename fails the publication
+without a fallback or retry. A failed rename cleans up only its own temporary
+file, while an already existing temporary path is left untouched.
+This avoids the former hard-link-then-unlink sequence: removing the temporary
+link could change the published inode's link count and `ctime` during a strict
+collector read, even when its bytes, size and modification time were unchanged.
+The collector still rejects every observed identity, content or metadata change
+during a read. Request/acknowledgement hashes, ordering and deadlines are unchanged.
+
 The host's existing guarded callback searches only the owned Simulator's
 `data/Containers/Data/Application` directory, with at most 2,000 entries and
 no-follow metadata reads. Missing old installation metadata is not a scenario
@@ -289,10 +301,11 @@ installation-only launch shares the existing XCTest/controller deadlines; it doe
 not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
-Opening the system Photos picker has one 30-second monotonic appearance window,
+Opening the system Photos picker has one 90-second monotonic appearance window,
 starting after the single `import.photos` activation. The first live existence
 probe runs on the active waiter's first run-loop turn. A negative query schedules
-the next probe one second after it returns, so native queries cannot overlap.
+the next probe one second after it returns, so native queries cannot overlap
+and accessibility traversal leaves a quiet interval for presentation work.
 Waiter teardown disables queued probes and cancels the pending timer. This avoids
 `waitForExistence`'s additional query after its timeout; an already active native
 query may still return late, and a positive result at or after the deadline is
@@ -305,6 +318,27 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `41663409152`, the former 30-second window began at 16:06:31.516 UTC.
+Six queries returned no match; the seventh was interrupted by the waiter's
+deadline. The failure screenshot at 16:07:06.503 still showed Loading. A later
+accessibility tree at 16:07:39.797 contained the real photo, 68.281 seconds after
+the wait began; it does not establish exactly when the photo first became ready.
+The 90-second allowance accommodates this observed first-use delay with bounded
+headroom, without claiming to repair its underlying cause or guarantee a future
+pass. It remains inside the same 720-second native test allowance and existing
+controller limits; no negative probe renews the deadline.
+
+Run `41721079406` still reached the 90-second deadline with the picker showing
+Loading. Its 80 query activities occupied 81.573 seconds of that window; the
+79 gaps totaled 8.423 seconds. These are wall-clock activity spans, not CPU
+measurements. The failure screenshot and accessibility attachment retained the
+unavailable picker, and session events show the remote picker continuing to
+present after the failure. Spacing negative probes by one second reduces the
+observer's repeated accessibility work. It does not establish that polling caused
+the delayed presentation or guarantee recovery; the exact-source hosted journey
+must still pass. The first probe remains immediate, and the same 90-second
+deadline rejects late results without another picker launch or a relaxed selector.
 
 In run `41450416826`, two live existence queries completed without a match; the
 second took 26.7 seconds. The remote Photos view appeared late in that query.
@@ -428,6 +462,64 @@ The same label semantics are used by the ordinary UI tests. The existing bounded
 scrolling, live readiness, one activation and subsequent Files or import-picker
 assertions remain required; no export service is invoked directly.
 
+### Autofocused name entry
+
+New `NameEntrySheet` presentations focus their empty `entry.name` field in the
+app. Recovery uses `AutofocusedNameEntry` without a second field tap. One
+30-second monotonic setup window covers the exact keyboard introduction and a
+unique enabled and hittable text field. Only timely readiness can start the
+separate ten-second input window, covering an empty or placeholder value, one
+native `typeText`, and the exact typed value afterward. Initial live `nil` values use
+the prior empty-value normalization; the typed echo must still be a String
+equal to the requested name. After the one input action, immediate serialized
+read-only probes allow nil or partial values to settle within the remainder of
+the input window. A late exact value or a query error still fails; the wait does
+not repeat input or renew its deadline. The existing exact ledger assertion
+runs only after a timely match. On failure, `ROOM_NAME_ENTRY_ECHO_V1` records
+the stage, timely observation count and last mismatching synthetic name (or
+explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
+JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
+
+The first focused regression exposed the actual `UIContinuousPathIntroductionView`
+with the known sliding-text marker and one Continue button. The helper reuses
+Localization's exact recognizer and a per-test Continue allowance shared across
+all three sheets. It requires the introduction to disappear and the field to
+be ready afterward. Optional before/after screenshots consume the setup window;
+they do not renew it. `waitForField` omits the field tap. The helper's explicit
+setup/input mode is used for AutofocusedNameEntry; Localization retains its
+existing shared ten-second `waitAndTapField` path and field tap. A late query or
+input cannot authorize Save; there is no generic Continue action, field-tap
+fallback, retyping or keyboard-visibility requirement. Generic item-editor
+fields still use their existing tap-based input.
+
+The autofocus adapter resolves the recognized owner and Continue button with
+`firstMatch` only after the same owner-count and snapshot-recognition guards.
+The snapshot still requires the exact owner identifier, exact marker and exactly
+one enabled Continue button; native hittability and the single tap remain gated
+by the setup deadline. The name-field query is unchanged. These are sequential
+observations, not an atomic UI snapshot. In attempt 2 of hosted run `41733453608`,
+indexed owner resolution took about 17.8 seconds while fetching the resolved
+owner snapshot took 0.08 seconds. Continue resolution took another 6.6 seconds;
+the setup watchdog cancelled the later tap lookup before event synthesis.
+Short-circuit resolution reduces traversal work without increasing either
+deadline. Its effect on hosted latency still requires a fresh passing run.
+
+In hosted run `41689555867`, the former shared ten-second waiter interrupted
+the first exact introduction-owner query before it returned a count. The native
+session records the watchdog interruption and cancelled query; the failure
+screenshot and accessibility tree show the real introduction and an empty,
+focused Home field. No Continue or input action had occurred. The setup/input
+split gives cold keyboard initialization its own finite allowance without
+loosening exact-value checks. Thirty seconds is a bounded policy allowance,
+not a measured guarantee of hosted latency. Neither phase may renew its
+deadline, and a failed or late setup cannot start input.
+
+The native `NameEntryAutofocusUITests` regression creates a home, room and item
+on successive sheets using this same helper, then relaunches the same isolated
+test namespace and verifies all three exact names. This targets the redundant
+tap preceding a local empty room-name failure; it does not establish an OS-level
+cause for the observed AutoFill menu or discarded input.
+
 ### Dismissal observations
 
 `ElementDismissalReadiness` observes the count of the original, typed UI query
@@ -465,33 +557,65 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. It observes the live inline-editor query until its
-count reaches zero within the original ten-second window, starting the first
-probe inside the active waiter without its initial polling delay. It does not
-resolve the disappearing indexed editor: in the main run `41519955826`, that
-native query remained pending even though Files reported navigation into the
-correct folder before the deadline. Interrupted, failed or late observations
-cannot prove dismissal. The exact folder title and open state remain required
-before saving. The journey opens the folder if Files has not already entered it.
+unique keyboard Done button. A ten-second window then requires the exact new
+folder title to be unique, enabled and natively hittable. It does not query the
+inline editor after Files removes it. In run `41618087432`, resolving that
+disappearing editor exhausted the window even though Files had entered the new
+folder. The positive title check passed in PR run `41627999490` and actual-main
+run `41635226064`; in the latter it took 8.618 seconds. Interrupted, failed or
+late observations cannot establish readiness. The exact folder title and open
+state remain required before saving.
 The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
-Saving uses the same bounded live-query observer for the exact Save selector
-used by the tap. In run `41534245115`, inline rename passed, but the old
-element-bound Save absence predicate spent its allowance resolving a remote
-hierarchy and timed out. The native session recorded the host presentation's
-disappearance before the deadline; the later failure screenshot showed the
-dashboard. Neither observation proves that the exported file was committed.
-The journey still requires the dashboard to be interactive and the runner's
-after-export barrier to verify the actual saved bytes. A zero query count only
-proves that the matching UI control is absent; late counts and query failures
-do not authorize progress.
+After one real Save, return from the external Files service has a separate
+30-second monotonic allowance. Each serial probe classifies one immutable app
+snapshot. An observed Files action or alert blocks progress. A remaining share
+sheet may receive at most one enabled, geometrically valid, natively hittable
+Close action, identified under its unique owned header. Success requires unique,
+visible, enabled export and run-bound home anchors, the exact home text under
+that home, and a fresh native hit test of the home. Neither a missing remote
+Files node nor closing the share sheet establishes success. The after-export
+barrier must still verify the actual saved bytes.
+
+In actual-main run `41635226064`, the first three snapshots returned pending.
+The fourth was interrupted while resolving a remote AX element when the former
+ten-second allowance expired. Home and Close were never hit-tested. A later
+screenshot showed the dashboard, and a post-failure capture found a byte-equal
+saved ZIP. These establish neither the exact earlier pending reason nor timely
+return. Thirty seconds gives this external transition the same bounded readiness
+allowance as initial Files presentation; the ten-second OCR windows and overall
+XCTest/controller limits remain unchanged. It does not identify or eliminate the
+underlying native latency. Late results and native errors remain failures, and
+neither polling nor an error restarts the allowance.
+
+`ROOM_EXPORT_RETURN_V3` records bounded reasons/counts from those existing
+snapshots and the current native stage, without another accessibility query or
+private labels. This distinguishes a completed negative observation from a
+query interrupted before it returns. The complete save/export/restore journey,
+including all six byte-verification barriers, remains the acceptance gate.
 
 The first-Files-tap diagnostic keeps selector attributes from one immutable app
 snapshot, but Files' remote view may be absent from that snapshot. Its hierarchy
 therefore uses the stable app root's later `debugDescription`, which includes the
 remote picker. `hierarchy_observation` explicitly distinguishes these observations;
 they are diagnostic evidence and do not authorize an action or prove acceptance.
+
+Restore-file selection uses the exact typed hierarchy observed in the picker:
+one `Browse View (Picker)`, its run-bound local-storage `DOC.browsingRoot`, one
+`File View` collection and one cell whose identifier is the full backup filename
+followed by `, roominventory`. Each scope must be unique before querying its
+descendants. A single active ten-second window covers those live checks,
+enabled/hittable readiness and one direct tap. Missing or noninteractive targets
+remain pending; duplicate scopes, errors, late results and repeated selection
+fail. The generic scrolling/tap helper is not used for this restore selection.
+In run `41704117640`, that helper's repeated existence query ran outside its
+waiter after the file had already been found. The scoped path removes that
+unbounded query sequence; it does not establish the cause of native query latency.
+`ROOM_FILES_SELECTION_V1` records the exact folder/filename, elapsed time, last
+returned counts, current stage and tap admissions from existing operations only.
+A timely tap still requires the replacement alert and all subsequent restore,
+persistence and exported-byte checks; it is not itself proof of restoration.
 
 The replacement alert can expose two nested `restore.confirm` buttons for one
 visible Restore backup action. The journey accepts one button or a single nested
@@ -536,7 +660,9 @@ filesystems before creating a device or building. During work, free space below
 8 GiB aborts. Periodic full resource walks become due two seconds after the
 previous successfully completed full accounting. During work every guard call
 still checks the deadline and free-space floors, including calls before another
-periodic walk is due. Forced accounting always performs a full uncached walk.
+periodic walk is due. Forced accounting performs a full uncached walk except
+inside the explicit sealed offline collection scope described below, which keeps
+live output checks and brackets readers with full entry/exit censuses.
 A completion timestamp is published only after all root walks, sample persistence
 and a final deadline check succeed; failed, interrupted or late accounting does
 not advance it. This prevents a long walk from immediately triggering another
@@ -923,8 +1049,9 @@ rounded to six decimals within 0–86,400 seconds; an invalid or backwards sampl
 is null and marks capture incomplete. A null first sample is not replaced by a
 later completion. The incomplete flag stays set after a bad sample; a later valid
 last value does not prove a monotonic history. `terminal_barrier.reached` marks reaching the operational call
-boundary; `completed` marks return from its full guard and following deadline
-tick. Neither means command cleanup or the whole run succeeded. Cleanup-mode
+boundary; `completed` marks return from the applicable guard and following deadline
+tick. For sealed offline readers the sample explicitly identifies omitted device
+and DerivedData categories; these are covered by the required entry/exit censuses. Neither means command cleanup or the whole run succeeded. Cleanup-mode
 commands omit this aggregate: their time-only guard is not a full barrier.
 
 All integer counters saturate at 2,147,483,647. Saturation sets both `saturated`
@@ -938,10 +1065,42 @@ the existing indented receipt and adds no history, scans, flushes, clock calls,
 threads or native work. Aggregates survive the existing terminal guard and cleanup
 without being reset, and are saved only by existing receipt writes.
 
+### Sealed offline result collection
+
+After the single UI command succeeds and its owned process group is confirmed
+absent with its leader reaped, the collector captures the final live inputs.
+It requires all six bridge barriers and three origins, compares the final Files
+and generated-export view with the last barrier, and copies both namespaces,
+the six export payloads and the exact fixture. Existing generated-file metadata
+checks and the narrower saved-file metadata comparison remain unchanged. The
+one-use `live-input-seal.json` binds the run, device, roots, source manifests and
+captured bytes; a failed or changed seal cannot be repaired by recapturing.
+
+Before native result readers, the controller shuts down only the owned Simulator
+UUID, confirms exactly one matching `Shutdown` inventory entry, rechecks the seal,
+and completes an uncached device and DerivedData census. Only this explicit
+collection scope may omit repeated device/DerivedData traversals during readers.
+Its resource samples label those omitted categories and refer to the entry census;
+they do not claim fresh device sizes. Root identities, free space, total output,
+original and copied xcresult, attachments and logs remain checked. The three
+ordered readers accept only the verified copy, never the original or a live
+container. Each retains its 40-second cap; collection retains 240 seconds and the
+whole run retains 1800 seconds, including shutdown and the final census.
+
+After readers and offline artifact verification, the source/captured content and
+original xcresult are checked again and a full uncached resource census is
+mandatory. Final checks are attempted even when a reader fails; a secondary
+failure cannot replace the primary error. No reader retry or live recapture is
+allowed. Failed UI runs still attempt original xcresult preservation and normal
+owned cleanup. This phase change addresses repeated live resource traversal
+observed during result collection; it does not prove the prior native reader
+hung, guarantee hosted latency, or accept any previously failed run.
+
 ### Owned cleanup
 
-After evidence collection, terminate only the app/test runner and groups launched
-by this attempt, shut down its exact simulator UDID, and confirm shutdown and all
+After evidence collection (or any earlier failure), terminate only the app/test
+runner and groups launched by this attempt, shut down its exact simulator UDID
+if it is not already shut down, and confirm shutdown and all
 owned group leaders reaped. Preserve the dedicated device and evidence for review;
 do not delete the device, DerivedData or its Files folder during this first run.
 No changes to existing QA devices, accepted source/candidate/evidence, global

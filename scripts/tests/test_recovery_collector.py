@@ -135,9 +135,16 @@ class RecoveryCollectorTests(unittest.TestCase):
         for relative in self.artifact_case.manifest["startup_evidence"].values():
             self.collector._write(relative, (self.artifact_case.root / relative).read_bytes())
 
+    def capture_sealed(self):
+        if self.collector.baseline is None:
+            self.journey()
+        copied = self.collector.capture_xcresult(self.original)
+        self.collector.seal_live_inputs()
+        return copied
+
     def test_equal_zip_bytes_have_distinct_live_origins_and_verify_end_to_end_offline(self):
         self.journey()
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         manifest = self.collector.collect(copy)
         result = fixtures.VERIFIER.verify_collection(manifest, fixtures.PIN)
         self.assertEqual(result["status"], "PASS_OFFLINE_ARTIFACT_CONSISTENCY")
@@ -227,9 +234,9 @@ class RecoveryCollectorTests(unittest.TestCase):
             for label, run in [("source", fixtures.SOURCE), ("target", fixtures.TARGET)]:
                 shutil.copytree(self.artifact_case.root / label, self.app / "tmp/RoomInventoryUITests" / run)
             drift = 3
-            copy = self.collector.capture_xcresult(self.original)
+            self.copy_startup_fixture_for_offline_verification()
+            copy = self.capture_sealed()
             manifest = self.collector.collect(copy)
-        self.copy_startup_fixture_for_offline_verification()
         self.assertEqual(fixtures.VERIFIER.verify_collection(manifest, fixtures.PIN)["status"],
                          "PASS_OFFLINE_ARTIFACT_CONSISTENCY")
         self.assertEqual(self.collector.origins[1]["saved_metadata"]["ctime_ns"], original_ctime)
@@ -290,7 +297,7 @@ class RecoveryCollectorTests(unittest.TestCase):
 
     def test_saved_file_identity_change_at_final_read_rejects_collection(self):
         self.journey()
-        copy = self.collector.capture_xcresult(self.original)
+        self.collector.capture_xcresult(self.original)
         saved = self.sim / self.collector.origins[0]["saved"]
         original_read = self.collector._read
         reads = 0
@@ -306,7 +313,7 @@ class RecoveryCollectorTests(unittest.TestCase):
 
         with patch.object(self.collector, "_read", side_effect=read):
             with self.assertRaisesRegex(C.CollectorError, "export changed during final collection"):
-                self.collector.collect(copy)
+                self.collector.seal_live_inputs()
         self.assertFalse((self.collector.root / "collection.json").exists())
 
     def test_generated_export_ctime_drift_still_rejects_before_ack(self):
@@ -403,7 +410,7 @@ class RecoveryCollectorTests(unittest.TestCase):
 
     def test_reader_mutation_is_confined_to_copy_and_post_manifests_record_it(self):
         self.journey()
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         def mutate(args):
             (copy / "reader-cache").write_bytes(b"reader added cache")
         self.reader_hook = mutate
@@ -413,23 +420,44 @@ class RecoveryCollectorTests(unittest.TestCase):
         self.assertIn("reader-cache", post)
 
     def test_original_mutation_by_reader_is_detected_and_recorded(self):
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         self.reader_hook = lambda args: (self.original / "Data/payload").write_bytes(b"unexpected original change")
         with self.assertRaisesRegex(C.CollectorError, "reader changed original"):
             self.collector.collect(copy)
         self.assertTrue((self.collector.root / "xcresult/original-after-readers.json").exists())
 
     def test_reader_failure_and_post_verification_failure_are_both_preserved(self):
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
+        primary = RuntimeError("primary reader failure sentinel")
         def fail(args):
             (self.original / "Data/payload").unlink()
-            raise RuntimeError("primary reader failure sentinel")
+            raise primary
         self.reader_hook = fail
-        with self.assertRaisesRegex(C.CollectorError, "Primary reader failure: RuntimeError: primary reader failure sentinel.*reader changed original"):
+        with self.assertRaises(RuntimeError) as caught:
             self.collector.collect(copy)
+        self.assertIs(caught.exception, primary)
         report = json.loads((self.collector.root / "xcresult/reader-errors.json").read_bytes())
         self.assertIn("primary reader failure sentinel", report["primary_reader_error"])
         self.assertIn("reader changed original", report["post_reader_verification_errors"][0])
+
+    def test_reader_deadline_remains_primary_when_final_seal_also_fails(self):
+        from test_recovery_controller import controller
+        copied = self.capture_sealed()
+        primary = controller.DeadlineFailure("reader deadline sentinel")
+        captured = self.collector.root / self.collector.live_seal["artifacts"]["source_zip"]
+        def fail(args):
+            captured.write_bytes(b"damaged sealed copy")
+            raise primary
+        self.reader_hook = fail
+        with self.assertRaises(controller.DeadlineFailure) as caught:
+            self.collector.collect(copied)
+        self.assertIs(caught.exception, primary)
+        report = json.loads((self.collector.root / "xcresult/reader-errors.json").read_bytes())
+        self.assertIn("reader deadline sentinel", report["primary_reader_error"])
+        self.assertTrue(any("sealed capture changed" in error for error in report["post_reader_verification_errors"]))
+        self.assertEqual(len(self.calls), 1)
+        with self.assertRaisesRegex(C.CollectorError, "already attempted"):
+            self.collector.collect(copied)
 
     def test_pre_copy_reservation_prevents_partial_xcresult_output(self):
         self.collector.output_limit = self.collector.written + 10
@@ -439,7 +467,7 @@ class RecoveryCollectorTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_original_is_rehashed_before_first_reader(self):
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         (self.original / "Data/payload").write_bytes(b"changed before reading")
         with self.assertRaisesRegex(C.CollectorError, "original xcresult changed before readers"):
             self.collector.collect(copy)
@@ -447,7 +475,7 @@ class RecoveryCollectorTests(unittest.TestCase):
 
     def test_duplicate_final_ui_ledger_is_rejected(self):
         self.duplicate_capture = True
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         with self.assertRaisesRegex(C.CollectorError, "ambiguous UI attachment"):
             self.collector.collect(copy)
 
@@ -458,28 +486,28 @@ class RecoveryCollectorTests(unittest.TestCase):
 
     def test_missing_ui_capture_fails_collection(self):
         self.omit_capture = "14-screen"
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous UI attachment"):
             self.collector.collect(copy)
         self.assertFalse((self.collector.root / "collection.json").exists())
 
     def test_missing_user_accessibility_capture_still_fails_collection(self):
         self.omit_capture = "14-ax"
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous UI attachment"):
             self.collector.collect(copy)
         self.assertFalse((self.collector.root / "collection.json").exists())
 
     def test_missing_user_ledger_still_fails_collection(self):
         self.omit_capture = "recovery-journey-evidence.json"
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         with self.assertRaisesRegex(C.CollectorError, "missing or ambiguous UI attachment"):
             self.collector.collect(copy)
         self.assertFalse((self.collector.root / "collection.json").exists())
 
     def test_skipped_or_wrong_test_never_collects_attachments(self):
         self.summary["skippedTests"] = 1
-        copy = self.collector.capture_xcresult(self.original)
+        copy = self.capture_sealed()
         with self.assertRaisesRegex(C.CollectorError, "zero skips"):
             self.collector.collect(copy)
         self.assertEqual(len(self.calls), 2)
@@ -511,6 +539,48 @@ class RecoveryCollectorTests(unittest.TestCase):
         self.assertTrue(C.attachment_name_matches("capture.png_0_AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.png", "capture.png"))
         self.assertFalse(C.attachment_name_matches("capture_1_AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.png", "capture.png"))
         self.assertFalse(C.attachment_name_matches("other-capture.png", "capture.png"))
+
+
+    def test_no_reader_before_live_inputs_are_sealed(self):
+        self.journey()
+        copied = self.collector.capture_xcresult(self.original)
+        with self.assertRaisesRegex(C.CollectorError, "not sealed"):
+            self.collector.collect(copied)
+        self.assertEqual(self.calls, [])
+
+    def test_incomplete_barriers_cannot_seal_or_retry_capture(self):
+        self.collector.capture_initial_exports()
+        self.collector.capture_xcresult(self.original)
+        with self.assertRaisesRegex(C.CollectorError, "incomplete live export"):
+            self.collector.seal_live_inputs()
+        with self.assertRaisesRegex(C.CollectorError, "already attempted"):
+            self.collector.seal_live_inputs()
+        self.assertEqual(self.calls, [])
+
+    def test_changed_captured_bytes_are_rejected_without_recapture(self):
+        copied = self.capture_sealed()
+        captured = self.collector.root / self.collector.live_seal["artifacts"]["source_zip"]
+        captured.write_bytes(b"tampered sealed bytes")
+        with self.assertRaisesRegex(C.CollectorError, "sealed capture changed"):
+            self.collector.collect(copied)
+        self.assertEqual(self.calls, [])
+        with self.assertRaisesRegex(C.CollectorError, "already attempted"):
+            self.collector.seal_live_inputs()
+
+    def test_live_namespace_change_during_reader_is_still_fatal(self):
+        copied = self.capture_sealed()
+        source = self.app / "tmp/RoomInventoryUITests" / fixtures.SOURCE / "inventory.json"
+        self.reader_hook = lambda args: source.write_bytes(b"changed after sealing")
+        with self.assertRaisesRegex(C.CollectorError, "sealed source namespace changed"):
+            self.collector.collect(copied)
+        self.assertFalse((self.collector.root / "collection.json").exists())
+
+    def test_completed_collection_cannot_run_readers_twice(self):
+        copied = self.capture_sealed()
+        self.collector.collect(copied)
+        with self.assertRaisesRegex(C.CollectorError, "already attempted"):
+            self.collector.collect(copied)
+        self.assertEqual(len(self.calls), 3)
 
 
 if __name__ == "__main__":

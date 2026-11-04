@@ -364,7 +364,7 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price with one `XCUICoordinate.tap()` at each verified switch center. The production
+model and price with one left-to-right `XCUICoordinate` drag inside each verified switch. The production
 row uses a separate visible localized label and the same bound native Toggle
 with `labelsHidden()`. The Toggle retains its original accessibility label;
 the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
@@ -374,14 +374,28 @@ In this fixed English fixture, the native switch must have a narrow 40–80-poin
 frame. Its entire frame must lie inside the containing OCR Form's visible bounds
 with a two-point inset, below its navigation bar, and must not intersect exposed
 navigation, tab-bar, keyboard or toolbar-button frames. An alert or
-unidentifiable form fails before tapping. A switch-relative normalized coordinate
-`(0.5, 0.5)` must resolve to the admitted center inside that frame, within the
-same readiness window. A changed coordinate fails before the one tap. Coordinates
+unidentifiable form fails before the gesture. Switch-relative normalized coordinates
+`(0.25, 0.5)` and `(0.75, 0.5)` must resolve to the admitted endpoints inside that frame,
+within the same readiness window. A changed coordinate fails before the one drag.
+The gesture holds for 0.1 seconds, moves at XCTest's `.slow` velocity, then holds
+for 0.1 seconds before release. Both endpoints and the intervening straight path
+stay inside the verified switch frame. Coordinates
 remain dynamic; this check is admission evidence, not an atomic guarantee that
 the layout cannot move before event delivery.
-The test accepts the exact post-tap value `1` only within the original ten-second
+The test accepts the exact post-gesture value `1` only within the original ten-second
 observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
 selective-update artifact checks remain mandatory.
+
+In main run `41915887192`, attempt 1, the synthesized event recorded one 50 ms
+center tap at `(339.5, 366)` for the model switch at `(309, 352, 61, 28)`.
+Ten subsequent application snapshot queries completed without confirming selection;
+the last recorded value was `0`, and pre-activation and failure images were
+identical. The legacy event snapshot contains only the
+application root, so it does not prove dispatch to the switch's handler. The
+record does not support coordinate drift or a slow selection query as the cause.
+The single directed drag replaces that short tap; it still requires a fresh
+native run to prove selection and the complete recovery journey. No state is
+set through a test hook, and no second gesture or longer timeout is allowed.
 
 In run `41800293919`, attempt 2, the native element tap used the AX visible point
 `(310, 353)` for the model switch at `(309, 352, 61, 28)`, rather than its center
@@ -411,11 +425,11 @@ The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
 geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
-`activation=verified_switch_center`, `checked_region=entire_switch_frame`, and
+`activation=verified_switch_drag`, both drag endpoints, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness
-and geometry through admission of the tap; a late observation cannot authorize
+and geometry through admission of the gesture; a late observation cannot authorize
 an action. This avoids four independent remote property resolutions consuming
 the entire window. The exact post-activation value `1` remains required.
 
@@ -424,7 +438,7 @@ waiter, without the predicate expectation's initial polling delay. An unready
 probe schedules one later probe only after returning; probes cannot overlap.
 Leaving the waiter disables pending callbacks and invalidates the timer. The
 same ten-second window still covers fresh state, live hit testing, geometry and
-tap admission. Keeping the probe inside the waiter preserves
+gesture admission. Keeping the probe inside the waiter preserves
 [XCTest's nested query interruption](https://developer.apple.com/documentation/xctest/xctwaiter/result/interrupted);
 this is not a promise of termination at exactly 10.000
 seconds, because XCTest's watchdog has its own scheduling grace.
@@ -437,7 +451,7 @@ completed negative hit test. Starting the fresh probe immediately removes the
 measured polling delay; it does not identify or eliminate the cause of slow
 native queries. Expired observations still fail without a tap or a retry.
 
-After the single tap returns, a separate ten-second monotonic window starts with
+After the single gesture returns, a separate ten-second monotonic window starts with
 an immediate application snapshot. State is read from exactly one switch with the
 expected identifier in that immutable snapshot; absent, wrong-type, wrong-value
 or duplicate targets cannot establish selection. Snapshot traversal is bounded

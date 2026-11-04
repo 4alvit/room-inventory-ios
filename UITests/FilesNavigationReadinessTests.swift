@@ -4,21 +4,30 @@ final class FilesNavigationReadinessTests: XCTestCase {
     private struct TitleNode {
         let kind: FilesNavigationReadiness.TitleKind
         let label: String
+        let identifier: String
         let children: [TitleNode]
 
         init(_ kind: FilesNavigationReadiness.TitleKind, _ label: String = "",
-             children: [TitleNode] = []) {
+             identifier: String = "", children: [TitleNode] = []) {
             self.kind = kind
             self.label = label
+            self.identifier = identifier
             self.children = children
         }
 
-        var item: FilesNavigationReadiness.TitleItem { .init(kind: kind, label: label) }
+        static func owner(children: [TitleNode] = []) -> TitleNode {
+            TitleNode(.navigationBar, identifier: "FullDocumentManagerViewControllerNavigationBar",
+                      children: children)
+        }
+
+        var item: FilesNavigationReadiness.TitleItem {
+            .init(kind: kind, label: label, identifier: identifier)
+        }
     }
 
     @MainActor
     private func titleCount(_ root: TitleNode, window: FilesNavigationReadiness) throws -> Int {
-        try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: { root },
+        try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 }, snapshot: { root },
             children: { $0.children }, attributes: { $0.item })
     }
 
@@ -379,28 +388,22 @@ final class FilesNavigationReadinessTests: XCTestCase {
 
     @MainActor
     func testTitleSnapshotUsesExactDirectChildPredicate() throws {
-        let root = TitleNode(.application, children: [
-            TitleNode(.navigationBar, "Run folder", children: [
-                TitleNode(.text, "Run folder"),
-                TitleNode(.button, "Run folder, Actions Menu"),
-                TitleNode(.other, "Run folder"),
-                TitleNode(.button, "Run folder"),
-                TitleNode(.text, "Run folder, Actions Menu"),
-                TitleNode(.text, "Run folder suffix"),
-                TitleNode(.other, children: [TitleNode(.text, "Run folder")])
-            ]),
-            TitleNode(.text, "Run folder")
+        let root = TitleNode.owner(children: [
+            TitleNode(.text, "Run folder"),
+            TitleNode(.button, "Run folder, Actions Menu"),
+            TitleNode(.other, "Run folder"),
+            TitleNode(.button, "Run folder"),
+            TitleNode(.text, "Run folder, Actions Menu"),
+            TitleNode(.text, "Run folder suffix"),
+            TitleNode(.other, children: [TitleNode(.text, "Run folder")])
         ])
         XCTAssertEqual(try titleCount(root, window: FilesNavigationReadiness(clock: { 0 })), 2)
     }
 
     @MainActor
-    func testTitleSnapshotFindsDeepNavigationBarsAndRejectsDuplicateTitles() {
-        let root = TitleNode(.application, children: [
-            TitleNode(.navigationBar, children: [TitleNode(.text, "Run folder")]),
-            TitleNode(.other, children: [TitleNode(.other, children: [
-                TitleNode(.navigationBar, children: [TitleNode(.button, "Run folder, Actions Menu")])
-            ])])
+    func testTitleSnapshotRejectsDuplicateDirectTitles() {
+        let root = TitleNode.owner(children: [
+            TitleNode(.text, "Run folder"), TitleNode(.button, "Run folder, Actions Menu")
         ])
         let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
         XCTAssertThrowsError(try window.waitForTargetFolder(
@@ -412,42 +415,73 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testTitleSnapshotMissingRemoteNodesNeverAdmitsLiveQueries() {
+    func testMissingTitleOwnerNeverCapturesOrAdmitsLiveQueries() {
         var now = 0.0
-        var captures = 0
+        var counts = 0
         let window = FilesNavigationReadiness(timeout: 10, clock: { now })
         XCTAssertThrowsError(try window.waitForTargetFolder(
             titleCount: {
-                try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: {
-                    captures += 1
-                    if captures == 2 { now = 10 }
-                    return TitleNode(.application)
-                }, children: { $0.children }, attributes: { $0.item })
-            },
-            enabled: { XCTFail("Omitted title queried"); return true },
-            hittable: { XCTFail("Omitted title queried"); return true })) {
+                try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: {
+                    counts += 1
+                    if counts == 2 { now = 10 }
+                    return 0
+                }, snapshot: { XCTFail("Missing owner captured"); return TitleNode.owner() },
+                children: { _ in XCTFail("Missing owner traversed"); return [] },
+                attributes: { node in XCTFail("Missing owner inspected"); return node.item })
+            }, enabled: { XCTFail("Missing title queried"); return true },
+            hittable: { XCTFail("Missing title queried"); return true })) {
             XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
         }
-        XCTAssertEqual(captures, 2)
+        XCTAssertEqual(counts, 2)
+    }
+
+    @MainActor
+    func testInvalidOrDuplicateTitleOwnersFailBeforeSnapshot() {
+        for count in [-1, 2, Int.max] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+                ownerCount: { count },
+                snapshot: { XCTFail("Ambiguous owner captured"); return TitleNode.owner() },
+                children: { $0.children }, attributes: { $0.item })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleOwnerCount)
+            }
+            XCTAssertThrowsError(try window.perform { XCTFail("Invalid owner resumed") }) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleOwnerCount)
+            }
+        }
+    }
+
+    @MainActor
+    func testTitleSnapshotUsesResolvedOwnerWhenApplicationTreeOmitsIt() throws {
+        let application = TitleNode(.application)
+        let owner = TitleNode.owner(children: [TitleNode(.button, "Run folder, Actions Menu")])
+        XCTAssertTrue(application.children.isEmpty)
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var calls: [String] = []
+        let count = try window.captureTargetFolderTitleCount(title: "Run folder",
+            ownerCount: { calls.append("owner count"); return 1 },
+            snapshot: { calls.append("owner snapshot"); return owner },
+            children: { $0.children }, attributes: { $0.item })
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(calls, ["owner count", "owner snapshot"])
     }
 
     @MainActor
     func testTitleSnapshotRefreshesEveryProbeWithoutReusingAnEarlierMatch() throws {
-        let present = TitleNode(.application, children: [
-            TitleNode(.navigationBar, children: [TitleNode(.text, "Run folder")])
-        ])
-        let roots = [present, TitleNode(.application), present]
+        let present = TitleNode.owner(children: [TitleNode(.text, "Run folder")])
+        let roots = [present, TitleNode.owner(), present]
         let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
         var captures = 0
         var enabledChecks = 0
         var hitChecks = 0
         XCTAssertTrue(try window.waitForTargetFolder(
             titleCount: {
-                try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: {
-                    let root = roots[min(captures, roots.count - 1)]
-                    captures += 1
-                    return root
-                }, children: { $0.children }, attributes: { $0.item })
+                try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 },
+                    snapshot: {
+                        let root = roots[min(captures, roots.count - 1)]
+                        captures += 1
+                        return root
+                    }, children: { $0.children }, attributes: { $0.item })
             }, enabled: { enabledChecks += 1; return captures == 3 },
             hittable: { hitChecks += 1; return true }))
         XCTAssertEqual(captures, 3)
@@ -456,14 +490,47 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testTitleSnapshotRequiresAnApplicationRoot() {
-        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
-        let root = TitleNode(.navigationBar, children: [TitleNode(.text, "Run folder")])
-        XCTAssertThrowsError(try titleCount(root, window: window)) {
-            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
+    func testTitleSnapshotRequiresNavigationBarRootAndExactIdentifier() {
+        for root in [TitleNode(.application), TitleNode(.other,
+                     identifier: "FullDocumentManagerViewControllerNavigationBar"),
+                     TitleNode(.navigationBar, identifier: "OtherBar")] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertThrowsError(try titleCount(root, window: window)) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
+            }
+            XCTAssertThrowsError(try window.perform { XCTFail("Invalid snapshot resumed") }) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
+            }
         }
-        XCTAssertThrowsError(try window.perform { XCTFail("Invalid snapshot resumed") }) {
-            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
+    }
+
+    @MainActor
+    func testLateTitleOwnerCountPreventsSnapshot() {
+        for time in [10.0, 10.001] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+                ownerCount: { now = time; return 1 },
+                snapshot: { XCTFail("Late owner captured"); return TitleNode.owner() },
+                children: { $0.children }, attributes: { $0.item })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+        }
+    }
+
+    @MainActor
+    func testTitleOwnerCountPreservesNativeErrorEvenWhenLate() {
+        enum NativeFailure: Error { case unavailable }
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+            ownerCount: { now = 11; throw NativeFailure.unavailable },
+            snapshot: { XCTFail("Failed owner captured"); return TitleNode.owner() },
+            children: { $0.children }, attributes: { $0.item })) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        XCTAssertThrowsError(try window.perform { XCTFail("Failed owner resumed") }) {
+            XCTAssertTrue($0 is NativeFailure)
         }
     }
 
@@ -472,11 +539,10 @@ final class FilesNavigationReadinessTests: XCTestCase {
         for time in [10.0, 10.001] {
             var now = 0.0
             let window = FilesNavigationReadiness(timeout: 10, clock: { now })
-            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: {
-                now = time
-                return TitleNode(.application)
-            }, children: { _ in XCTFail("Late capture traversed"); return [] },
-            attributes: { node in XCTFail("Late capture inspected"); return node.item })) {
+            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+                ownerCount: { 1 }, snapshot: { now = time; return TitleNode.owner() },
+                children: { _ in XCTFail("Late capture traversed"); return [] },
+                attributes: { node in XCTFail("Late capture inspected"); return node.item })) {
                 XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
             }
         }
@@ -484,22 +550,25 @@ final class FilesNavigationReadinessTests: XCTestCase {
 
     @MainActor
     func testTitleSnapshotRejectsLateAttributesAndChildrenBeforeFurtherTraversal() {
-        for stage in ["attributes", "children"] {
+        for stage in ["owner attributes", "children", "title attributes"] {
             var now = 0.0
             var calls: [String] = []
             let window = FilesNavigationReadiness(timeout: 10, clock: { now })
-            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: {
-                TitleNode(.application, children: [TitleNode(.navigationBar)])
-            }, children: { node in
-                calls.append("children")
-                now = 10
-                return node.children
-            }, attributes: { node in
-                calls.append("attributes")
-                if stage == "attributes" { now = 10 }
-                return node.item
-            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
-            XCTAssertEqual(calls, stage == "attributes" ? ["attributes"] : ["attributes", "children"])
+            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+                ownerCount: { 1 },
+                snapshot: { TitleNode.owner(children: [TitleNode(.text, "Run folder")]) },
+                children: { node in
+                    calls.append("children")
+                    if stage == "children" { now = 10 }
+                    return node.children
+                }, attributes: { node in
+                    let name = node.kind == .navigationBar ? "owner attributes" : "title attributes"
+                    calls.append(name)
+                    if stage == name { now = 10 }
+                    return node.item
+                })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            let expected = ["owner attributes", "children", "title attributes"]
+            XCTAssertEqual(calls, Array(expected.prefix(expected.firstIndex(of: stage)! + 1)))
         }
     }
 
@@ -508,7 +577,7 @@ final class FilesNavigationReadinessTests: XCTestCase {
         enum NativeFailure: Error { case unavailable }
         var now = 0.0
         let window = FilesNavigationReadiness(timeout: 10, clock: { now })
-        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 },
             snapshot: { () throws -> TitleNode in now = 11; throw NativeFailure.unavailable },
             children: { _ in XCTFail("Failed capture traversed"); return [] },
             attributes: { node in XCTFail("Failed capture inspected"); return node.item })) {
@@ -520,59 +589,73 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testTitleSnapshotRejectsOversizedChildrenBeforeEnqueueing() {
+    func testTitleSnapshotRejectsOversizedDirectChildrenBeforeInspection() {
         let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
-        let root = TitleNode(.application, children:
+        let root = TitleNode.owner(children:
             Array(repeating: TitleNode(.other), count: FilesNavigationReadiness.titleSnapshotNodeLimit))
         var inspected = 0
-        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: { root },
-            children: { $0.children }, attributes: { node in inspected += 1; return node.item })) {
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 },
+            snapshot: { root }, children: { $0.children },
+            attributes: { node in inspected += 1; return node.item })) {
             XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
         }
         XCTAssertEqual(inspected, 1)
     }
 
     @MainActor
-    func testTitleSnapshotLimitIncludesAlreadyQueuedNodes() {
+    func testTitleSnapshotDoesNotTraverseOrDoubleCountDescendantTitles() throws {
+        let root = TitleNode.owner(children: [
+            TitleNode(.button, "Run folder, Actions Menu", children: [TitleNode(.text, "Run folder")]),
+            TitleNode(.other, children: [TitleNode(.text, "Run folder")])
+        ])
         let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
-        let branch = TitleNode(.other, children:
-            Array(repeating: TitleNode(.other), count: FilesNavigationReadiness.titleSnapshotNodeLimit - 2))
-        let root = TitleNode(.application, children: [TitleNode(.other), branch])
+        var childQueries = 0
         var inspected = 0
-        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: { root },
-            children: { $0.children }, attributes: { node in inspected += 1; return node.item })) {
-            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleSnapshot)
-        }
-        XCTAssertEqual(inspected, 2)
+        let count = try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 },
+            snapshot: { root }, children: { node in
+                childQueries += 1
+                XCTAssertTrue(node.kind == .navigationBar)
+                return node.children
+            }, attributes: { node in inspected += 1; return node.item })
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(childQueries, 1)
+        XCTAssertEqual(inspected, 3)
     }
 
     @MainActor
     func testTitleSnapshotAcceptsExactNodeLimitAndStillFindsTheTitle() throws {
         let filler = Array(repeating: TitleNode(.other),
-                           count: FilesNavigationReadiness.titleSnapshotNodeLimit - 3)
-        let root = TitleNode(.application, children: filler + [
-            TitleNode(.navigationBar, children: [TitleNode(.button, "Run folder, Actions Menu")])
-        ])
+                           count: FilesNavigationReadiness.titleSnapshotNodeLimit - 2)
+        let root = TitleNode.owner(children: filler + [TitleNode(.button, "Run folder, Actions Menu")])
         XCTAssertEqual(try titleCount(root, window: FilesNavigationReadiness(clock: { 0 })), 1)
+    }
+
+    @MainActor
+    func testTitleOwnerCancellationPreventsSnapshot() {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+            ownerCount: { window.cancel(); return 1 },
+            snapshot: { XCTFail("Cancelled owner captured"); return TitleNode.owner() },
+            children: { _ in XCTFail("Cancelled owner traversed"); return [] },
+            attributes: { node in XCTFail("Cancelled owner inspected"); return node.item })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled)
+        }
     }
 
     @MainActor
     func testTitleSnapshotCancellationPreventsTraversal() {
         let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
-        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", snapshot: {
-            window.cancel()
-            return TitleNode(.application)
-        }, children: { _ in XCTFail("Cancelled capture traversed"); return [] },
-        attributes: { node in XCTFail("Cancelled capture inspected"); return node.item })) {
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder", ownerCount: { 1 },
+            snapshot: { window.cancel(); return TitleNode.owner() },
+            children: { _ in XCTFail("Cancelled capture traversed"); return [] },
+            attributes: { node in XCTFail("Cancelled capture inspected"); return node.item })) {
             XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled)
         }
     }
 
     @MainActor
     func testTitleSnapshotDoesNotRelaxTheLivePropertyDeadline() {
-        let root = TitleNode(.application, children: [
-            TitleNode(.navigationBar, children: [TitleNode(.text, "Run folder")])
-        ])
+        let root = TitleNode.owner(children: [TitleNode(.text, "Run folder")])
         for lateStage in ["enabled", "hittable"] {
             var now = 0.0
             var hits = 0

@@ -260,7 +260,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                 try require(element.value as? String == folder, "Exact folder name")
                 try tap(app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")))
             }
-            // Positive exact-title proof; never query a disappeared editor.
+            // Observe the exact remote Files owner, never a disappeared editor.
             let creation = FilesNavigationReadiness(timeout: 10)
             let began = ProcessInfo.processInfo.systemUptime
             var folderReady = false
@@ -280,12 +280,15 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                     print("ROOM_RC_FILES_CREATION_V1 \(text)")
                 }
             }
-            let title = titleQuery(folder, app).firstMatch
+            let navigationBars = app.navigationBars.matching(identifier:
+                FilesNavigationReadiness.navigationBarIdentifier)
+            let title = FilesNavigationReadiness.targetFolderTitles(folder,
+                navigationBars: navigationBars).firstMatch
             folderReady = try creation.waitForTargetFolder(
                 titleCount: {
                     creationStage = "snapshot"
-                    titleCount = nil
-                    let count = try creation.captureTargetFolderTitleCount(title: folder, in: app)
+                    let count = try creation.captureTargetFolderTitleCount(title: folder,
+                        navigationBars: navigationBars)
                     titleCount = count
                     return count
                 },

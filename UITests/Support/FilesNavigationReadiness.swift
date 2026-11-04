@@ -10,11 +10,19 @@ final class FilesNavigationReadiness {
     struct TitleItem {
         let kind: TitleKind
         let label: String
+        let identifier: String
+
+        init(kind: TitleKind, label: String, identifier: String = "") {
+            self.kind = kind
+            self.label = label
+            self.identifier = identifier
+        }
     }
+    static let navigationBarIdentifier = "FullDocumentManagerViewControllerNavigationBar"
     static let titleSnapshotNodeLimit = 4_096
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
-        case invalidTitleSnapshot
+        case invalidTitleSnapshot, invalidTitleOwnerCount
         case invalidSelectionCount, selectionAlreadyStarted
 
         var description: String { "Files navigation readiness: \(self.name)" }
@@ -28,6 +36,7 @@ final class FilesNavigationReadiness {
             case .invalidClock: "invalid monotonic clock"
             case .invalidTitleCount: "target folder title count is not zero or one"
             case .invalidTitleSnapshot: "invalid or oversized folder title snapshot"
+            case .invalidTitleOwnerCount: "Files navigation bar count is not zero or one"
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
             }
@@ -101,41 +110,52 @@ final class FilesNavigationReadiness {
         return state
     }
 
-    /// Count the exact direct-child title predicate in one immutable app snapshot.
-    /// Missing remote nodes remain zero; no first match can hide a later duplicate.
-    func captureTargetFolderTitleCount<Node>(title: String, snapshot: () throws -> Node,
+    /// Resolve the unique Files bar before capturing its remote subtree. Count
+    /// only direct title children; a button's nested text is not another title.
+    func captureTargetFolderTitleCount<Node>(title: String, ownerCount: () throws -> Int,
+                                             snapshot: () throws -> Node,
                                              children: (Node) -> [Node],
                                              attributes: (Node) -> TitleItem) throws -> Int {
-        var pending = [(try perform(snapshot), false)]
-        var visited = 0
-        var count = 0
-        while let (node, parentIsNavigationBar) = pending.popLast() {
-            let item = try perform { attributes(node) }
-            try perform {
-                guard visited != 0 || item.kind == .application else {
-                    throw Failure.invalidTitleSnapshot
-                }
+        let owners = try perform(ownerCount)
+        try perform {
+            guard owners == 0 || owners == 1 else { throw Failure.invalidTitleOwnerCount }
+        }
+        guard owners == 1 else { return 0 }
+        let root = try perform(snapshot)
+        let owner = try perform { attributes(root) }
+        try perform {
+            guard owner.kind == .navigationBar,
+                  owner.identifier == Self.navigationBarIdentifier else {
+                throw Failure.invalidTitleSnapshot
             }
-            visited += 1
-            if parentIsNavigationBar && (
-                (item.kind == .text && item.label == title)
-                    || (item.kind == .button && item.label == title + ", Actions Menu")) {
+        }
+        let titles = try perform { children(root) }
+        try perform {
+            guard titles.count < Self.titleSnapshotNodeLimit else {
+                throw Failure.invalidTitleSnapshot
+            }
+        }
+        var count = 0
+        for node in titles {
+            let item = try perform { attributes(node) }
+            if (item.kind == .text && item.label == title)
+                || (item.kind == .button && item.label == title + ", Actions Menu") {
                 count += 1
             }
-            let descendants = try perform { children(node) }
-            try perform {
-                guard descendants.count <= Self.titleSnapshotNodeLimit - visited - pending.count else {
-                    throw Failure.invalidTitleSnapshot
-                }
-            }
-            pending.append(contentsOf: descendants.map { ($0, item.kind == .navigationBar) })
         }
         return count
     }
 
-    func captureTargetFolderTitleCount(title: String, in app: XCUIApplication) throws -> Int {
-        try captureTargetFolderTitleCount(title: title,
-            snapshot: { () throws -> any XCUIElementSnapshot in try app.snapshot() },
+    static func targetFolderTitles(_ title: String, navigationBars: XCUIElementQuery) -> XCUIElementQuery {
+        navigationBars.children(matching: .any).matching(NSPredicate(
+            format: "(elementType == %d AND label == %@) OR (elementType == %d AND label == %@)",
+            XCUIElement.ElementType.staticText.rawValue, title,
+            XCUIElement.ElementType.button.rawValue, title + ", Actions Menu"))
+    }
+
+    func captureTargetFolderTitleCount(title: String, navigationBars: XCUIElementQuery) throws -> Int {
+        try captureTargetFolderTitleCount(title: title, ownerCount: { navigationBars.count },
+            snapshot: { () throws -> any XCUIElementSnapshot in try navigationBars.firstMatch.snapshot() },
             children: { $0.children }, attributes: { node in
                 let kind: TitleKind
                 switch node.elementType {
@@ -145,7 +165,7 @@ final class FilesNavigationReadiness {
                 case .button: kind = .button
                 default: kind = .other
                 }
-                return TitleItem(kind: kind, label: node.label)
+                return TitleItem(kind: kind, label: node.label, identifier: node.identifier)
             })
     }
 

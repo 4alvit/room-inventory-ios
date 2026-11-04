@@ -606,23 +606,35 @@ view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
 unique keyboard Done button. A ten-second window then requires the exact new
 folder title to be unique, enabled and natively hittable. Each title-count probe
-captures one application snapshot and counts the same exact typed title predicate
-only among direct children of navigation bars. Local traversal includes all
-returned navigation bars, rejects more than 4,096 queued/visited nodes and stays
-inside the original deadline. A missing remote title remains pending; a duplicate
-fails. Only a unique title admits the existing live enabled and native hittable
-checks, using one short-circuit title query. Neither readiness property is cached.
-Every probe captures afresh; snapshot capture, traversal and live checks reject
-late results and preserve native errors. These sequential observations are not
-an atomic hierarchy guarantee. The creation diagnostic records its last stage
-and last returned title count without making additional UI queries.
+first counts the navigation bars with the exact identifier
+`FullDocumentManagerViewControllerNavigationBar`. Zero remains pending; multiple
+owners fail. One owner admits a snapshot of that resolved bar, whose root must
+have the expected type and identifier. Only direct children are inspected for the
+exact typed title predicate; nested button text is not counted twice. The owner
+and direct children are bounded to 4,096 nodes. Only a unique title admits live
+enabled and native hittable checks through the same owner-scoped title query.
+Neither readiness property is cached. Every probe captures afresh; owner count,
+snapshot, child inspection and live checks reject late results and preserve native
+errors within the original deadline. These sequential observations are not an
+atomic hierarchy guarantee. The creation diagnostic retains its last returned
+title count when a later probe fails, without making additional UI queries.
+
+In attempt 2 of run `41829513390`, eleven application-root snapshot requests
+followed Done before the last request was interrupted. The failure capture showed
+the exact target folder open under this Files navigation-bar identifier. The
+snapshot API can omit remote Files nodes; the later debug hierarchy is a separate
+observation and cannot establish the earlier counts or timely readiness. Resolving
+the known owner before snapshotting follows the same scoped-observation approach
+used for the keyboard introduction. It changes neither folder navigation nor taps;
+its current runtime outcome still requires hosted evidence.
 
 Runs `41814583789` and `41821314272` reached the new folder but exceeded the
 ten-second readiness window. In the latter, accessibility-bound title enumeration
 occupied about 8.9 seconds before live property checks; the window failed after
-10.245 seconds. Replacing that enumeration with one snapshot removes the repeated
-native query-inventory path; a speedup and successful current runtime still need
-hosted evidence. A failure screenshot captured after the window cannot establish
+10.245 seconds. The later application-snapshot implementation removed that
+enumeration, but did not establish title readiness in the attempt described above.
+A speedup and successful current runtime still need hosted evidence. A failure
+screenshot captured after the window cannot establish
 timely readiness. The check does not query the
 inline editor after Files removes it. In run `41618087432`, resolving that
 disappearing editor exhausted the window even though Files had entered the new

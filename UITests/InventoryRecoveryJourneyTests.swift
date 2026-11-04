@@ -710,12 +710,15 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                             print("ROOM_FILES_CREATION_V1 \(text)")
                         }
                     }
-                    let title = filesFolderTitles(folder, app: app).firstMatch
+                    let navigationBars = app.navigationBars.matching(identifier:
+                        FilesNavigationReadiness.navigationBarIdentifier)
+                    let title = FilesNavigationReadiness.targetFolderTitles(folder,
+                        navigationBars: navigationBars).firstMatch
                     folderReady = try creation.waitForTargetFolder(
                         titleCount: {
                             creationStage = "snapshot"
-                            titleCount = nil
-                            let count = try creation.captureTargetFolderTitleCount(title: folder, in: app)
+                            let count = try creation.captureTargetFolderTitleCount(title: folder,
+                                navigationBars: navigationBars)
                             titleCount = count
                             return count
                         },

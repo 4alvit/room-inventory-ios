@@ -671,6 +671,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                                                    app: app, initial: false)
         }
         try ledger.require("local Files location selected", filesFolderIsOpen(localTitle, app: app))
+        var createdFolderObserved = false
         if create {
             try ledger.require("run folder does not already exist", !fileItem(folder, app: app).exists)
             let more = app.buttons.matching(NSPredicate(format: "label == 'More' OR label == 'More Actions'")).firstMatch
@@ -712,20 +713,17 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                     }
                     let navigationBars = app.navigationBars.matching(identifier:
                         FilesNavigationReadiness.navigationBarIdentifier)
-                    let title = FilesNavigationReadiness.targetFolderTitles(folder,
-                        navigationBars: navigationBars).firstMatch
-                    folderReady = try creation.waitForTargetFolder(
+                    folderReady = try creation.waitForCreatedFolderObservation(
                         titleCount: {
                             creationStage = "snapshot"
                             let count = try creation.captureTargetFolderTitleCount(title: folder,
                                 navigationBars: navigationBars)
                             titleCount = count
                             return count
-                        },
-                        enabled: { creationStage = "enabled"; return title.isEnabled },
-                        hittable: { creationStage = "hittable"; return title.isHittable })
+                        })
                 }
                 try ledger.require("newly created run folder ready", folderReady)
+                createdFolderObserved = folderReady
             } else {
                 let field = app.alerts.textFields.firstMatch
                 try ledger.require("folder alert field appeared", field.waitForExistence(timeout: 10))
@@ -738,6 +736,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let createButton = app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")).firstMatch
                 try tap(createButton, app: app)
             }
+        }
+        if createdFolderObserved {
+            // The timely, unique exact title already proves both assertions.
+            // Requerying its live properties could trigger another remote wait
+            // or an unnecessary row tap in the folder that is already open.
+            try ledger.require("run folder title appeared", createdFolderObserved)
+            try ledger.require("run folder opened", createdFolderObserved)
+            return
         }
         if try !filesFolderIsOpen(folder, app: app) { try tap(fileItem(folder, app: app), app: app, scroll: true) }
         try ledger.require("run folder title appeared", filesFolderTitles(folder, app: app).element(boundBy: 0).waitForExistence(timeout: 5))

@@ -282,18 +282,14 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             }
             let navigationBars = app.navigationBars.matching(identifier:
                 FilesNavigationReadiness.navigationBarIdentifier)
-            let title = FilesNavigationReadiness.targetFolderTitles(folder,
-                navigationBars: navigationBars).firstMatch
-            folderReady = try creation.waitForTargetFolder(
+            folderReady = try creation.waitForCreatedFolderObservation(
                 titleCount: {
                     creationStage = "snapshot"
                     let count = try creation.captureTargetFolderTitleCount(title: folder,
                         navigationBars: navigationBars)
                     titleCount = count
                     return count
-                },
-                enabled: { creationStage = "enabled"; return title.isEnabled },
-                hittable: { creationStage = "hittable"; return title.isHittable })
+                })
             try require(folderReady, "New export folder ready")
         } else {
             try tap(fileRow(folder, app)); try ready(titleQuery(folder, app))

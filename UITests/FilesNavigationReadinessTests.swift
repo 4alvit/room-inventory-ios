@@ -225,6 +225,150 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    func testCreatedFolderObservationAcceptsExactTextOrActionButtonWithoutInteraction() throws {
+        for title in [TitleNode(.text, "Run folder"),
+                      TitleNode(.button, "Run folder, Actions Menu", children: [
+                        TitleNode(.text, "Run folder")
+                      ])] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            now = 9.25
+            var captures = 0
+            XCTAssertTrue(try window.waitForCreatedFolderObservation(titleCount: {
+                captures += 1
+                return try self.titleCount(.owner(children: [title]), window: window)
+            }))
+            XCTAssertEqual(captures, 1)
+            XCTAssertEqual(try window.remaining(), 0.75)
+        }
+    }
+
+    @MainActor
+    func testCreatedFolderObservationWaitsForOwnerAndExactDirectTitle() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var polls = 0
+        var captures = 0
+        XCTAssertTrue(try window.waitForCreatedFolderObservation(titleCount: {
+            polls += 1
+            return try window.captureTargetFolderTitleCount(title: "Run folder",
+                ownerCount: { polls == 1 ? 0 : 1 }, snapshot: {
+                    captures += 1
+                    if polls == 2 {
+                        return TitleNode.owner(children: [
+                            TitleNode(.text, "Run folder suffix"),
+                            TitleNode(.button, "Run folder"),
+                            TitleNode(.other, children: [TitleNode(.text, "Run folder")])
+                        ])
+                    }
+                    return TitleNode.owner(children: [TitleNode(.text, "Run folder")])
+                }, children: { $0.children }, attributes: { $0.item })
+        }))
+        XCTAssertEqual(polls, 3)
+        XCTAssertEqual(captures, 2)
+    }
+
+    @MainActor
+    func testCreatedFolderObservationRejectsInvalidCountsAndStopsWork() {
+        for count in [-1, 2, Int.max] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var calls = 0
+            XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+                calls += 1; return count
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleCount) }
+            XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+                calls += 1; return 1
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidTitleCount) }
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    @MainActor
+    func testCreatedFolderObservationRejectsLateResultAndCannotRenewAllowance() {
+        for time in [10.0, 10.001] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            var calls = 0
+            XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+                calls += 1; now = time; return 1
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+                calls += 1; return 1
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    @MainActor
+    func testCreatedFolderObservationFinalWaiterReturnMustStillBeTimely() {
+        var returned = false
+        var checks = 0
+        let window = FilesNavigationReadiness(timeout: 10, clock: {
+            guard returned else { return 0 }
+            checks += 1
+            // Both the count and the outer probe return in time. The final
+            // waiter-return check reaches the same original deadline.
+            return checks < 3 ? 9 : 10
+        })
+        XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+            returned = true; return 1
+        })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+        XCTAssertEqual(checks, 3)
+    }
+
+    @MainActor
+    func testCreatedFolderObservationPreservesNativeErrorEvenWhenLate() {
+        enum NativeFailure: Error { case unavailable }
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        var calls = 0
+        XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+            calls += 1; now = 11; throw NativeFailure.unavailable
+        })) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertThrowsError(try window.perform { calls += 1 }) { XCTAssertTrue($0 is NativeFailure) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testCreatedFolderObservationCancellationPreventsFurtherProbes() {
+        for phase in ["before", "during", "pending"] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var calls = 0
+            if phase == "before" { window.cancel() }
+            XCTAssertThrowsError(try window.waitForCreatedFolderObservation(titleCount: {
+                calls += 1
+                if phase == "during" {
+                    window.cancel()
+                    return 1
+                }
+                RunLoop.main.perform(inModes: [.default]) {
+                    MainActor.assumeIsolated { window.cancel() }
+                }
+                return 0
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(calls, phase == "before" ? 0 : 1)
+        }
+    }
+
+    @MainActor
+    func testCreatedFolderObservationCannotReenterOrPollAfterSuccess() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var active = false
+        var calls = 0
+        XCTAssertTrue(try window.waitForCreatedFolderObservation(titleCount: {
+            XCTAssertFalse(active)
+            active = true
+            defer { active = false }
+            calls += 1
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            return calls == 1 ? 0 : 1
+        }))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(calls, 2)
+    }
+
+    @MainActor
     func testTargetFolderIsProbedImmediatelyWithOnlyOrderedPositiveQueries() throws {
         var now = 0.0
         let window = FilesNavigationReadiness(timeout: 10, clock: { now })

@@ -604,20 +604,23 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. A ten-second window then requires the exact new
-folder title to be unique, enabled and natively hittable. Each title-count probe
-first counts the navigation bars with the exact identifier
+unique keyboard Done button. A ten-second folder-state observation then requires
+exactly one title for the new folder. Each probe first counts the navigation bars with the exact identifier
 `FullDocumentManagerViewControllerNavigationBar`. Zero remains pending; multiple
 owners fail. One owner admits a snapshot of that resolved bar, whose root must
 have the expected type and identifier. Only direct children are inspected for the
 exact typed title predicate; nested button text is not counted twice. The owner
-and direct children are bounded to 4,096 nodes. Only a unique title admits live
-enabled and native hittable checks through the same owner-scoped title query.
-Neither readiness property is cached. Every probe captures afresh; owner count,
-snapshot, child inspection and live checks reject late results and preserve native
-errors within the original deadline. These sequential observations are not an
-atomic hierarchy guarantee. The creation diagnostic retains its last returned
-title count when a later probe fails, without making additional UI queries.
+and direct children are bounded to 4,096 nodes. One exact title establishes the
+open folder; zero remains pending and duplicate titles fail. The title is not
+activated, so this observation does not query its live enabled or hittable state.
+Filename input and Save retain their live interaction guards. Every probe captures
+afresh; owner count, snapshot and child inspection reject late results and preserve
+native errors and cancellation within the original deadline. The successful
+observation satisfies the existing folder assertions without repeating the title
+query or navigation tap. These sequential observations are not an atomic hierarchy
+guarantee. The creation diagnostic retains its last returned title count when a
+later probe fails, without making additional UI queries. Exact saved-file and
+restored-content acceptance remains mandatory.
 
 In attempt 2 of run `41829513390`, eleven application-root snapshot requests
 followed Done before the last request was interrupted. The failure capture showed
@@ -625,8 +628,15 @@ the exact target folder open under this Files navigation-bar identifier. The
 snapshot API can omit remote Files nodes; the later debug hierarchy is a separate
 observation and cannot establish the earlier counts or timely readiness. Resolving
 the known owner before snapshotting follows the same scoped-observation approach
-used for the keyboard introduction. It changes neither folder navigation nor taps;
-its current runtime outcome still requires hosted evidence.
+used for the keyboard introduction.
+
+The subsequent run `41846510175` returned one exact title but exhausted the
+ten-second window during the live hittable stage after 10.154 seconds. Its failure
+capture showed the target folder open and empty. The marker does not record the
+returned hittable Boolean, and the later capture cannot prove timely readiness.
+The dedicated post-creation observation therefore checks the open-folder state
+without requiring the title to be an interaction target. The revised path still
+requires hosted validation; this failure is not a passing journey.
 
 Runs `41814583789` and `41821314272` reached the new folder but exceeded the
 ten-second readiness window. In the latter, accessibility-bound title enumeration

@@ -146,13 +146,6 @@ final class FilesNavigationReadiness {
         return count
     }
 
-    static func targetFolderTitles(_ title: String, navigationBars: XCUIElementQuery) -> XCUIElementQuery {
-        navigationBars.children(matching: .any).matching(NSPredicate(
-            format: "(elementType == %d AND label == %@) OR (elementType == %d AND label == %@)",
-            XCUIElement.ElementType.staticText.rawValue, title,
-            XCUIElement.ElementType.button.rawValue, title + ", Actions Menu"))
-    }
-
     func captureTargetFolderTitleCount(title: String, navigationBars: XCUIElementQuery) throws -> Int {
         try captureTargetFolderTitleCount(title: title, ownerCount: { navigationBars.count },
             snapshot: { () throws -> any XCUIElementSnapshot in try navigationBars.firstMatch.snapshot() },
@@ -169,8 +162,18 @@ final class FilesNavigationReadiness {
             })
     }
 
-    /// Confirm the newly created folder by its exact title and live readiness, without
-    /// resolving the inline editor after Files has removed it.
+    /// Observe the folder opened by creation. Its unique exact title proves the
+    /// navigation state; no interaction with that title is required.
+    func waitForCreatedFolderObservation(titleCount: @escaping () throws -> Int) throws -> Bool {
+        let state = try waitForState {
+            let count = try self.perform(titleCount)
+            guard count == 0 || count == 1 else { throw Failure.invalidTitleCount }
+            return count == 1 ? .targetFolder : nil
+        }
+        return state == .targetFolder
+    }
+
+    /// Require current native readiness when the target itself must be interactive.
     func waitForTargetFolder(titleCount: @escaping () throws -> Int,
                              enabled: @escaping () throws -> Bool,
                              hittable: @escaping () throws -> Bool) throws -> Bool {

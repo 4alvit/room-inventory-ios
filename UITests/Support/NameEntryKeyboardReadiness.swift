@@ -153,6 +153,18 @@ final class NameEntryKeyboardReadiness {
             try perform { try evidence(.dismissedAndFieldReady) }
             afterEvidenceRecorded = true
         }
+        if timing == .keyboardSetupThenInput {
+            // Cold keyboard initialization can present its introduction while
+            // the field's native readiness queries are running. Do not start
+            // the input window using the absence observed before those queries.
+            let finalObservation = try perform(observe)
+            self.observation = finalObservation
+            sawIntroduction = sawIntroduction || finalObservation.introductionCount > 0
+            guard finalObservation.introductionCount == 0 else {
+                dismissedIntroduction = false
+                return false
+            }
+        }
         fieldReady = true
         return true
     }

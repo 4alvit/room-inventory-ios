@@ -24,7 +24,9 @@ enum AutofocusedNameEntry {
                      recordTyped: @escaping (String) throws -> Void = { _ in }) throws -> Observation {
         let readiness = NameEntryKeyboardReadiness(allowance: allowance, timing: .keyboardSetupThenInput)
         let fields = app.textFields.matching(identifier: "entry.name")
-        let field = fields.element(boundBy: 0)
+        // Readiness checks the exact match count and snapshot identity before
+        // use. Avoid resolving every match again during the one native input.
+        let field = fields.firstMatch
         let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
         // Count and snapshot recognition below establish uniqueness before use.
         // Stop resolution at that known owner/button instead of indexing all matches.

@@ -12,6 +12,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         var fieldHittable = true
         var advanceAt: [String: Double] = [:]
         var events: [String] = []
+        var afterEvidence: ((NameEntryKeyboardReadiness.EvidenceStage) -> Void)?
         let allowance: NameEntryKeyboardReadiness.ContinueAllowance
         let timing: NameEntryKeyboardReadiness.Timing
         var clockReads = 0
@@ -26,14 +27,18 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             self.timing = timing
         }
         func stage(_ name: String) { events.append(name); now += advanceAt[name, default: 0] }
-        func poll() throws -> Bool {
-            try subject.poll(observe: { self.stage("observe"); return self.observation },
+        func recordEvidence(_ value: NameEntryKeyboardReadiness.EvidenceStage) {
+            stage("evidence-" + value.rawValue)
+            afterEvidence?(value)
+        }
+        func poll(observe: (() throws -> NameEntryKeyboardReadiness.Observation)? = nil) throws -> Bool {
+            try subject.poll(observe: observe ?? { self.stage("observe"); return self.observation },
                 continueHittable: { self.stage("continue-hit"); return self.continueHittable },
                 tapContinue: { self.stage("continue-tap") },
                 entryNameCount: { self.stage("entry-count"); return self.entryNameCount },
                 fieldEnabled: { self.stage("field-enabled"); return self.fieldEnabled },
                 fieldHittable: { self.stage("field-hit"); return self.fieldHittable },
-                evidence: { self.stage("evidence-" + $0.rawValue) })
+                evidence: { self.recordEvidence($0) })
         }
         func tapField() throws { try subject.tapField { self.stage("field-tap") } }
         func wait(observe: (() throws -> NameEntryKeyboardReadiness.Observation)? = nil,
@@ -44,7 +49,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
                 entryNameCount: { self.stage("entry-count"); return self.entryNameCount },
                 fieldEnabled: { self.stage("field-enabled"); return self.fieldEnabled },
                 fieldHittable: { self.stage("field-hit"); return self.fieldHittable },
-                evidence: { self.stage("evidence-" + $0.rawValue) })
+                evidence: { self.recordEvidence($0) })
         }
         func showIntroduction() {
             observation = .init(introductionCount: 1,
@@ -481,12 +486,12 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         var observations = 0
         try h.wait(observe: {
             h.stage("observe")
-            h.now += 12
             observations += 1
+            if observations <= 2 { h.now += 12 }
             return observations == 1 ? h.observation : .init()
         })
         XCTAssertEqual(h.now, 24)
-        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(observations, 3)
         XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
         XCTAssertTrue(h.subject.dismissedIntroduction)
         try h.subject.typeTextOnce { h.stage("type"); h.now += 5 }
@@ -634,8 +639,140 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         let events = h.events
         RunLoop.main.run(until: Date().addingTimeInterval(1.05))
         XCTAssertEqual(h.events, events)
-        XCTAssertEqual(h.events.filter { $0 == "observe" }.count, 1)
+        XCTAssertEqual(h.events.filter { $0 == "observe" }.count, 2)
         XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, true)
+    }
+
+    func testSplitFinalObservationCatchesLateIntroductionBeforeSingleInput() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        let introduction = h.observation
+        var observations = 0
+        try h.wait(observe: {
+            h.stage("observe")
+            observations += 1
+            if observations == 2 {
+                XCTAssertEqual(h.events.suffix(4), ["entry-count", "field-enabled", "field-hit", "observe"])
+                XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+                XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+            }
+            return (2...3).contains(observations) ? introduction : .init()
+        }, tapContinue: {
+            h.stage("continue-tap")
+            XCTAssertEqual(observations, 3)
+            XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+        })
+        XCTAssertEqual(observations, 5)
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertEqual(h.events.filter { $0 == "entry-count" }.count, 2)
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, true)
+        try h.subject.typeTextOnce { h.stage("type") }
+        XCTAssertEqual(try h.subject.waitForExactValue("Test Home") {
+            h.stage("echo"); return "Test Home"
+        }, "Test Home")
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertEqual(h.events.filter { $0 == "type" }.count, 1)
+        XCTAssertFalse(h.events.contains("unexpected-type"))
+    }
+
+    func testSplitFinalObservationBlocksUnknownAndDuplicateOwners() throws {
+        for count in [1, 2] {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            var observations = 0
+            XCTAssertFalse(try h.poll(observe: {
+                h.stage("observe")
+                observations += 1
+                return observations == 1 ? .init() : .init(introductionCount: count)
+            }))
+            XCTAssertEqual(observations, 2)
+            XCTAssertFalse(h.subject.dismissedIntroduction)
+            XCTAssertEqual(h.subject.diagnostic["introduction_count"] as? Int, count)
+            XCTAssertEqual(h.subject.diagnostic["saw_introduction"] as? Bool, true)
+            XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+            h.observation = .init(introductionCount: count)
+            XCTAssertFalse(try h.poll())
+            XCTAssertEqual(h.events.filter { $0 == "entry-count" }.count, 1)
+            XCTAssertFalse(h.events.contains("continue-tap"))
+            XCTAssertFalse(h.events.contains("unexpected-type"))
+        }
+    }
+
+    func testSplitFinalObservationRunsAfterDismissalEvidenceAndDoesNotRetap() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        XCTAssertFalse(try h.poll())
+        h.observation = .init()
+        h.afterEvidence = { [unowned h] stage in
+            if stage == .dismissedAndFieldReady { h.showIntroduction() }
+        }
+        XCTAssertFalse(try h.poll())
+        XCTAssertEqual(h.events.suffix(2), ["evidence-dismissedAndFieldReady", "observe"])
+        XCTAssertFalse(h.subject.dismissedIntroduction)
+        XCTAssertFalse(try h.poll())
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertFalse(h.events.contains("unexpected-type"))
+    }
+
+    func testSplitFinalObservationAtDeadlineCannotPublishInputOrRestart() {
+        for end in [30.0, 30.001] {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            var observations = 0
+            XCTAssertThrowsError(try h.wait(observe: {
+                h.stage("observe")
+                observations += 1
+                if observations == 2 { h.now = end }
+                return .init()
+            })) { XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired) }
+            XCTAssertEqual(observations, 2)
+            XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, false)
+            XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+            let events = h.events
+            h.now = 0
+            XCTAssertThrowsError(try h.wait())
+            XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+            XCTAssertEqual(h.events, events)
+        }
+    }
+
+    func testSplitFinalObservationPreservesLateNativeError() {
+        enum NativeFailure: Error { case observation }
+        let h = Harness(timing: .keyboardSetupThenInput)
+        var observations = 0
+        XCTAssertThrowsError(try h.wait(observe: {
+            h.stage("observe")
+            observations += 1
+            if observations == 2 { h.now = 31; throw NativeFailure.observation }
+            return .init()
+        })) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, false)
+        XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+        let events = h.events
+        h.now = 0
+        XCTAssertThrowsError(try h.wait()) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected-query") }) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertEqual(h.events, events)
+    }
+
+    func testSharedWindowDoesNotPerformSplitFinalObservation() throws {
+        enum UnexpectedObservation: Error { case repeated }
+        let h = Harness()
+        var observations = 0
+        try h.wait(observe: {
+            h.stage("observe")
+            observations += 1
+            if observations > 1 { throw UnexpectedObservation.repeated }
+            return .init()
+        })
+        try h.tapField()
+        XCTAssertEqual(observations, 1)
+        XCTAssertEqual(h.events, ["observe", "entry-count", "field-enabled", "field-hit", "field-tap"])
+        XCTAssertEqual(h.subject.echoDiagnostic["timing_mode"] as? String, "shared_ten_seconds")
     }
 
 }

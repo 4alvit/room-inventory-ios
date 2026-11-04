@@ -367,7 +367,8 @@ def build_harness(run,run_id):
     require(run.command(['uname','-m'],'architecture',cap=8).strip()==b'arm64','Unexpected host architecture')
     tool=run.command([sys.executable,'scripts/install-xcodegen.py'],'xcodegen-install',cap=120).decode().strip()
     (run.out/'project').mkdir()
-    run.command([tool,'generate','--spec','Acceptance/RC/project.yml','--project',run.out/'project'],'generate',cap=30)
+    run.command([tool,'generate','--spec',run.root/'Acceptance/RC/project.yml',
+        '--project-root',run.root,'--project',run.out/'project'],'generate',cap=30)
     run.command(['xcodebuild','-project',run.out/'project/RoomInventoryRCAcceptance.xcodeproj','-scheme','RCAcceptance',
         '-configuration','Release','-destination','generic/platform=iOS Simulator','-derivedDataPath',run.out/'DerivedData',
         'CODE_SIGNING_ALLOWED=NO','ARCHS=arm64','build-for-testing'],'build-runner',cap=600,limit=64*MIB)

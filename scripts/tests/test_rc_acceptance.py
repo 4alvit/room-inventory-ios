@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import stat
@@ -200,7 +201,7 @@ class Evidence(unittest.TestCase):
 class BuildHarnessOnly(unittest.TestCase):
     def fixture(self, root, extra=False):
         class Run:
-            def __init__(self):self.out=root;self.commands=[]
+            def __init__(self):self.root=SCRIPTS.parent;self.out=root;self.commands=[]
             def command(self,argv,name,**kwargs):
                 self.commands.append([str(x) for x in argv])
                 return {'xcode-version':b'Xcode 27.1\nBuild version 27A9275\n',
@@ -232,6 +233,36 @@ class BuildHarnessOnly(unittest.TestCase):
             run.command=checked_command
             R.build_harness(run,ID)
             self.assertEqual(observed,[run.out/'project'])
+    def test_external_project_resolves_all_six_checkout_sources(self):
+        with tempfile.TemporaryDirectory(prefix='rc build output ') as d:
+            run=self.fixture(Path(d).resolve());command=run.command;observed=[]
+            expected={p for p in R.SOURCE_INPUTS if p.endswith('.swift')}
+            self.assertEqual(len(expected),6)
+            def checked_command(argv,name,**kwargs):
+                if name=='generate':
+                    spec=Path(argv[argv.index('--spec')+1])
+                    base=Path(argv[argv.index('--project-root')+1])
+                    destination=Path(argv[argv.index('--project')+1])
+                    self.assertEqual(spec,run.root/'Acceptance/RC/project.yml')
+                    self.assertTrue(spec.is_absolute());self.assertEqual(base,run.root)
+                    entries={line.removeprefix('      - ') for line in spec.read_text().splitlines()
+                             if line.startswith('      - ')}
+                    self.assertEqual(entries,expected)
+                    for entry in entries:
+                        source=base/entry
+                        self.assertTrue(source.is_file())
+                        self.assertNotEqual(source.parent,base)
+                        # XcodeGen 2.46 emits a parent group relative to --project
+                        # for these non-root sources, followed by the file basename.
+                        group=os.path.relpath(source.parent,destination)
+                        resolved=(destination/group/source.name).resolve()
+                        self.assertEqual(resolved,source.resolve())
+                        self.assertEqual(resolved.read_bytes(),(run.root/entry).read_bytes())
+                    observed.append(entries)
+                return command(argv,name,**kwargs)
+            run.command=checked_command
+            R.build_harness(run,ID)
+            self.assertEqual(observed,[expected])
     def test_rebuilt_aut_product_fails_before_exercise(self):
         with tempfile.TemporaryDirectory() as d:
             run=self.fixture(Path(d),extra=True)

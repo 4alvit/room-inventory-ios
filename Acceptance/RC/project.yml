@@ -14,12 +14,12 @@ targets:
     type: bundle.ui-testing
     platform: iOS
     sources:
-      - RCArtifactAcceptanceTests.swift
-      - ../../UITests/Support/AutofocusedNameEntry.swift
-      - ../../UITests/Support/NameEntryKeyboardReadiness.swift
-      - ../../UITests/Support/RecoveryOCRReadinessWindow.swift
-      - ../../UITests/Support/FilesNavigationReadiness.swift
-      - ../../UITests/Support/ExportReturnReadiness.swift
+      - Acceptance/RC/RCArtifactAcceptanceTests.swift
+      - UITests/Support/AutofocusedNameEntry.swift
+      - UITests/Support/NameEntryKeyboardReadiness.swift
+      - UITests/Support/RecoveryOCRReadinessWindow.swift
+      - UITests/Support/FilesNavigationReadiness.swift
+      - UITests/Support/ExportReturnReadiness.swift
     # No app target, application dependency or reconstructed RC build.
     settings:
       base:

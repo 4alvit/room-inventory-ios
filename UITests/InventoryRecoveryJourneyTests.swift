@@ -693,30 +693,34 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let creation = FilesNavigationReadiness(timeout: 10)
                 let began = ProcessInfo.processInfo.systemUptime
                 var folderReady = false
+                var creationStage = "snapshot"
+                var titleCount: Int?
                 do {
                     defer {
                         let record: [String: Any] = [
                             "schema_version": 1, "phase": "inline_creation", "folder": folder,
                             "allowance_seconds": 10,
                             "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
-                            "result": folderReady ? "ready" : "failed"
+                            "result": folderReady ? "ready" : "failed",
+                            "last_stage": creationStage,
+                            "last_returned_title_count": titleCount as Any? ?? NSNull()
                         ]
                         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                            data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
                             print("ROOM_FILES_CREATION_V1 \(text)")
                         }
                     }
-                    let titles = filesFolderTitles(folder, app: app)
-                    var boundTitle: XCUIElement?
+                    let title = filesFolderTitles(folder, app: app).firstMatch
                     folderReady = try creation.waitForTargetFolder(
                         titleCount: {
-                            boundTitle = nil
-                            let matches = titles.allElementsBoundByAccessibilityElement
-                            if matches.count == 1 { boundTitle = matches[0] }
-                            return matches.count
+                            creationStage = "snapshot"
+                            titleCount = nil
+                            let count = try creation.captureTargetFolderTitleCount(title: folder, in: app)
+                            titleCount = count
+                            return count
                         },
-                        enabled: { boundTitle?.isEnabled ?? false },
-                        hittable: { boundTitle?.isHittable ?? false })
+                        enabled: { creationStage = "enabled"; return title.isEnabled },
+                        hittable: { creationStage = "hittable"; return title.isHittable })
                 }
                 try ledger.require("newly created run folder ready", folderReady)
             } else {

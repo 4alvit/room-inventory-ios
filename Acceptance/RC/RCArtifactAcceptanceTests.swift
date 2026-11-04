@@ -261,7 +261,37 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                 try tap(app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")))
             }
             // Positive exact-title proof; never query a disappeared editor.
-            try ready(titleQuery(folder, app))
+            let creation = FilesNavigationReadiness(timeout: 10)
+            let began = ProcessInfo.processInfo.systemUptime
+            var folderReady = false
+            var creationStage = "snapshot"
+            var titleCount: Int?
+            defer {
+                let record: [String: Any] = [
+                    "schema_version": 1, "phase": "creation", "folder": folder,
+                    "allowance_seconds": 10,
+                    "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                    "result": folderReady ? "ready" : "failed",
+                    "last_stage": creationStage,
+                    "last_returned_title_count": titleCount as Any? ?? NSNull()
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_RC_FILES_CREATION_V1 \(text)")
+                }
+            }
+            let title = titleQuery(folder, app).firstMatch
+            folderReady = try creation.waitForTargetFolder(
+                titleCount: {
+                    creationStage = "snapshot"
+                    titleCount = nil
+                    let count = try creation.captureTargetFolderTitleCount(title: folder, in: app)
+                    titleCount = count
+                    return count
+                },
+                enabled: { creationStage = "enabled"; return title.isEnabled },
+                hittable: { creationStage = "hittable"; return title.isHittable })
+            try require(folderReady, "New export folder ready")
         } else {
             try tap(fileRow(folder, app)); try ready(titleQuery(folder, app))
         }

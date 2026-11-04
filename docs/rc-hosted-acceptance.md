@@ -16,7 +16,7 @@ Each row owns one newly created Simulator UUID. Work is bounded to 1,800 seconds
 
 ## Why this uses a separate test project
 
-`Acceptance/RC/project.yml` has one UI-test target and **no application target or application dependency**. It reuses the existing keyboard, Files and export-return readiness helpers without changing their time windows. It is outside `UITests` and the normal app test plan, so the ordinary test inventory is unchanged.
+`Acceptance/RC/project.yml` has one UI-test target and **no application target or application dependency**. It reuses the existing keyboard, Files and export-return readiness helpers without changing their time windows. The RC scenario is outside `UITests` and the normal app test plan; shared helper regressions remain in the ordinary suite.
 
 The controller builds the runner in Release configuration, requires that it is the only `.app` build product, and manually installs the verified RC and that runner. It changes only the generated test-run specification: `UseDestinationArtifacts=true`, the known installed runner/bundle identifiers and its test plug-in path. Host-side AUT/install paths are removed. The test uses `XCUIApplication(bundleIdentifier:)`; the only app launch arguments select English/en_US. There is no `--ui-testing`, data-reset namespace, store mutation, Pro injection or production-code hook. Before and after the test, every installed app file and executable bit must equal the extracted RC inventory.
 
@@ -29,6 +29,8 @@ Apple documents `test-without-building` and that an `.xctestrun` specifies its t
 ## Actual exercise and evidence
 
 One test creates a home, room and item through the public UI, edits model/serial/price/date/notes, and checks them after relaunch. It saves standalone CSV and PDF, the inventory ZIP and a restorable backup through the real share/Files UI. It selects that backup and cancels the confirmation, exports another backup, changes the notes and verifies that mutation after a cold relaunch, selects the original backup again, confirms restore once, then checks restored values after another relaunch.
+
+After creating the export folder, both inline and alert routes use the same ten-second title-readiness window as Recovery. Each probe counts the exact static title or Actions Menu button among direct children of navigation bars in one fresh application snapshot. Traversal is bounded to 4,096 queued/visited nodes; omitted remote titles remain pending and duplicates fail. A unique captured title admits the existing live enabled and native hittable checks through one short-circuit query. Snapshot/traversal and live checks retain separate deadline admission/return guards, cancellation and native errors. The bounded creation diagnostic reports its last stage and title count. This avoids exhaustive native title-query enumeration; it does not claim atomic observations, measured speedup or successful RC execution.
 
 The controller verifies that the two backups have identical complete contents after cancellation, the final inventory equals the original exported backup, the CSV contains the exact synthetic record, the packaged/localized CSV matches its standalone export, and all five saved files match the generated export byte multiset in the app container. The standalone and packaged PDFs are preserved independently: renderer metadata can differ, so byte equality between separately rendered PDFs is not assumed. Their page contents still require reviewer inspection.
 

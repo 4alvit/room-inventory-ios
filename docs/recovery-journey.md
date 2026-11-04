@@ -606,12 +606,24 @@ view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
 unique keyboard Done button. A ten-second window then requires the exact new
 folder title to be unique, enabled and natively hittable. Each title-count probe
-clears its retained element, resolves the exact title matches by accessibility
-element once, and retains only a single match. The enabled and hittable checks
-use that same element; their properties are still read live. The next probe
-resolves a fresh set of matches. This binds the checks to one title identity,
-without caching readiness properties or changing the ten-second deadline;
-remote queries can still finish late. It does not query the
+captures one application snapshot and counts the same exact typed title predicate
+only among direct children of navigation bars. Local traversal includes all
+returned navigation bars, rejects more than 4,096 queued/visited nodes and stays
+inside the original deadline. A missing remote title remains pending; a duplicate
+fails. Only a unique title admits the existing live enabled and native hittable
+checks, using one short-circuit title query. Neither readiness property is cached.
+Every probe captures afresh; snapshot capture, traversal and live checks reject
+late results and preserve native errors. These sequential observations are not
+an atomic hierarchy guarantee. The creation diagnostic records its last stage
+and last returned title count without making additional UI queries.
+
+Runs `41814583789` and `41821314272` reached the new folder but exceeded the
+ten-second readiness window. In the latter, accessibility-bound title enumeration
+occupied about 8.9 seconds before live property checks; the window failed after
+10.245 seconds. Replacing that enumeration with one snapshot removes the repeated
+native query-inventory path; a speedup and successful current runtime still need
+hosted evidence. A failure screenshot captured after the window cannot establish
+timely readiness. The check does not query the
 inline editor after Files removes it. In run `41618087432`, resolving that
 disappearing editor exhausted the window even though Files had entered the new
 folder. The positive title check passed in PR run `41627999490` and actual-main

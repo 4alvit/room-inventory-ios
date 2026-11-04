@@ -6,8 +6,15 @@ import XCTest
 @MainActor
 final class FilesNavigationReadiness {
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
+    enum TitleKind { case application, navigationBar, text, button, other }
+    struct TitleItem {
+        let kind: TitleKind
+        let label: String
+    }
+    static let titleSnapshotNodeLimit = 4_096
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
+        case invalidTitleSnapshot
         case invalidSelectionCount, selectionAlreadyStarted
 
         var description: String { "Files navigation readiness: \(self.name)" }
@@ -20,6 +27,7 @@ final class FilesNavigationReadiness {
             case .invalidAllowance: "invalid allowance"
             case .invalidClock: "invalid monotonic clock"
             case .invalidTitleCount: "target folder title count is not zero or one"
+            case .invalidTitleSnapshot: "invalid or oversized folder title snapshot"
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
             }
@@ -93,7 +101,55 @@ final class FilesNavigationReadiness {
         return state
     }
 
-    /// Confirm the newly created folder by its exact live title, without
+    /// Count the exact direct-child title predicate in one immutable app snapshot.
+    /// Missing remote nodes remain zero; no first match can hide a later duplicate.
+    func captureTargetFolderTitleCount<Node>(title: String, snapshot: () throws -> Node,
+                                             children: (Node) -> [Node],
+                                             attributes: (Node) -> TitleItem) throws -> Int {
+        var pending = [(try perform(snapshot), false)]
+        var visited = 0
+        var count = 0
+        while let (node, parentIsNavigationBar) = pending.popLast() {
+            let item = try perform { attributes(node) }
+            try perform {
+                guard visited != 0 || item.kind == .application else {
+                    throw Failure.invalidTitleSnapshot
+                }
+            }
+            visited += 1
+            if parentIsNavigationBar && (
+                (item.kind == .text && item.label == title)
+                    || (item.kind == .button && item.label == title + ", Actions Menu")) {
+                count += 1
+            }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard descendants.count <= Self.titleSnapshotNodeLimit - visited - pending.count else {
+                    throw Failure.invalidTitleSnapshot
+                }
+            }
+            pending.append(contentsOf: descendants.map { ($0, item.kind == .navigationBar) })
+        }
+        return count
+    }
+
+    func captureTargetFolderTitleCount(title: String, in app: XCUIApplication) throws -> Int {
+        try captureTargetFolderTitleCount(title: title,
+            snapshot: { () throws -> any XCUIElementSnapshot in try app.snapshot() },
+            children: { $0.children }, attributes: { node in
+                let kind: TitleKind
+                switch node.elementType {
+                case .application: kind = .application
+                case .navigationBar: kind = .navigationBar
+                case .staticText: kind = .text
+                case .button: kind = .button
+                default: kind = .other
+                }
+                return TitleItem(kind: kind, label: node.label)
+            })
+    }
+
+    /// Confirm the newly created folder by its exact title and live readiness, without
     /// resolving the inline editor after Files has removed it.
     func waitForTargetFolder(titleCount: @escaping () throws -> Int,
                              enabled: @escaping () throws -> Bool,

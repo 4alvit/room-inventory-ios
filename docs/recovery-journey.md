@@ -364,7 +364,7 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price with one native `XCUIElement.tap()` per switch. The production
+model and price with one `XCUICoordinate.tap()` at each verified switch center. The production
 row uses a separate visible localized label and the same bound native Toggle
 with `labelsHidden()`. The Toggle retains its original accessibility label;
 the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
@@ -374,11 +374,24 @@ In this fixed English fixture, the native switch must have a narrow 40–80-poin
 frame. Its entire frame must lie inside the containing OCR Form's visible bounds
 with a two-point inset, below its navigation bar, and must not intersect exposed
 navigation, tab-bar, keyboard or toolbar-button frames. An alert or
-unidentifiable form fails before tapping. XCTest chooses the native hit point;
-the recorded center is geometry evidence, not an instruction to tap that point.
+unidentifiable form fails before tapping. A switch-relative normalized coordinate
+`(0.5, 0.5)` must resolve to the admitted center inside that frame, within the
+same readiness window. A changed coordinate fails before the one tap. Coordinates
+remain dynamic; this check is admission evidence, not an atomic guarantee that
+the layout cannot move before event delivery.
 The test accepts the exact post-tap value `1` only within the original ten-second
 observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
 selective-update artifact checks remain mandatory.
+
+In run `41800293919`, attempt 2, the native element tap used the AX visible point
+`(310, 353)` for the model switch at `(309, 352, 61, 28)`, rather than its center
+`(339.5, 366)`. The Session log confirms one touch down/up at that corner. The
+post-tap window completed ten snapshot queries without establishing selection;
+the final exact switch value was `0`. Pre-tap and failure images were identical,
+with all switches off and `Apply 0` disabled. This supports choosing an interior
+point explicitly; it does not prove why the corner touch failed or an app state
+reset. The next hosted journey must still establish selection and all later
+persistence, export and restore outcomes. No timeout or assertion is relaxed.
 
 An isolated iOS 27.0 diagnostic using the production source at `fde75fa` exposed
 the original labeled Toggle as a 338×28-point row. Its one native tap at
@@ -398,7 +411,7 @@ The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
 geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
-`activation=native_switch_tap`, `checked_region=entire_switch_frame`, and
+`activation=verified_switch_center`, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness

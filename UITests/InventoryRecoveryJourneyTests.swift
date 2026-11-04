@@ -412,8 +412,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             throw RecoveryJourneyFailure.assertion("OCR \(id) readiness observation", "missing", "completed")
         }
         // The visible label is separate from the native switch, whose frame
-        // must stay narrow in this fixed English fixture. Let XCTest choose its
-        // native hit point. Never retry a toggle: a second tap can undo a delayed
+        // must stay narrow in this fixed English fixture. Use its verified
+        // center: XCTest can choose an unresponsive point at the rounded edge.
+        // Never retry a toggle: a second tap can undo a delayed
         // first activation and hide a real interaction failure.
         let (snapshot, nodes, switches, navigation) = observation
         try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
@@ -445,7 +446,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                       "no_alert": !nodes.contains { $0.element.elementType == .alert }]
         func rectangle(_ frame: CGRect) -> [CGFloat] { [frame.minX, frame.minY, frame.width, frame.height] }
         let geometry: [String: Any] = ["field": id, "basis": "single_application_snapshot",
-            "activation": "native_switch_tap", "checked_region": "entire_switch_frame",
+            "activation": "verified_switch_center", "checked_region": "entire_switch_frame",
             "center": [center.x, center.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
             "navigation": rectangle(navigation.element.frame), "checks": checks,
             "chrome": chrome.map { ["type": $0.element.elementType.rawValue, "frame": rectangle($0.element.frame)] },
@@ -455,8 +456,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
+        let activation = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let point = try window.perform { activation.screenPoint }
+        guard point == center, frame.contains(point) else {
+            throw RecoveryJourneyFailure.assertion("OCR \(id) activation geometry",
+                "resolved center=\(point); admitted center=\(center)", "unchanged center inside the verified switch")
+        }
         _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
-        toggle.tap()
+        activation.tap()
         let selectionWindow = RecoveryOCRSelectionWindow()
         var selectionObservation: RecoveryOCRSelectionWindow.Observation?
         var selectionError: Error?

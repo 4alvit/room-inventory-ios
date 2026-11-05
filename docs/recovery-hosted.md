@@ -274,6 +274,15 @@ still uses that complete response. No additional query or retry is performed.
 All other discovery command caps remain unchanged. In particular, the XcodeGen installer
 requests 70 seconds within the same absolute 120-second discovery window.
 
+The digest-pinned XcodeGen download permits at most three GET attempts for HTTP
+429, 500, 502, 503 or 504. Attempts and 1/2-second backoffs share a 60-second
+acquisition budget; a valid `Retry-After` can lengthen a wait but cannot extend
+that budget. Invalid or out-of-budget delays, transport/TLS errors, body failures
+and size or digest mismatches fail immediately. A Unix process timer interrupts
+blocking I/O, and monotonic checks reject late results. Python signal handling
+can be delayed by C code, so the existing hosted command owner remains the
+authoritative process deadline; its 70-second cap is unchanged.
+
 For each command, its deadline is the earlier of start plus its requested cap
 and the absolute discovery deadline; work must finish four seconds before that.
 The adapter refuses to start a command with fewer than eight seconds remaining

@@ -571,11 +571,25 @@ setup expired after 21 keyboard queries, with the last returned count zero and
 no input attempted. That change also added
 the software-keyboard prerequisite, so comparison with the earlier passing
 Ordinary run does not isolate the cause or establish the field's responder state.
-The appearance observer now makes an explicit focus request at UIKit's
-[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller),
-instead of relying on a default-focus preference or a pre-presentation task.
-SwiftUI manages the observer's containment and layout; it neither accesses
-private text-field internals nor changes the field's value.
+The subsequent background appearance observer requested SwiftUI focus at UIKit's
+[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller).
+In hosted run `42071309515`, the first home sheet again exhausted setup without
+input. Its recording shows the caret and software keyboard appear, followed by
+the keyboard withdrawing while the sheet remains visible. The intervening test
+operations only read accessibility state; they do not tap, type, dismiss or
+background the app. The final screenshot alone would have missed that initial
+appearance. These observations establish a loss of visible keyboard readiness,
+not the precise cause of the responder transition.
+
+The name field now belongs directly to a UIKit controller rather than splitting
+the field and focus request between SwiftUI and a background observer. That
+controller owns one stable `UITextField`, requests first responder only while
+visible in its key window, and records the actual responder outcome without
+logging entered text. Updates preserve the existing field and marked text;
+ending editing does not trigger a focus retry. The existing single-input,
+no-field-tap UI regression remains the behavioral acceptance check. This
+ownership change needs a fresh hosted run; the prior recording is diagnostic
+evidence, not evidence that the new implementation passes.
 The setup prerequisite now prevents input while the keyboard is absent; missing,
 duplicate, late or throwing keyboard observations cannot start or renew input.
 Localization's tap-based path does not require an existing keyboard before its

@@ -1,0 +1,261 @@
+import XCTest
+import UIKit
+@testable import RoomInventory
+
+@MainActor
+final class NameEntryTextFieldTests: XCTestCase {
+    private final class TrackingTextField: UITextField {
+        private(set) var focusRequests = 0
+        var permitsFocus = true
+
+        override func becomeFirstResponder() -> Bool {
+            focusRequests += 1
+            guard permitsFocus else { return false }
+            return super.becomeFirstResponder()
+        }
+    }
+
+    @MainActor
+    private final class WindowHost {
+        let window: UIWindow
+        private let previousKeyWindow: UIWindow?
+
+        init(_ controller: UIViewController) throws {
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }.first)
+            previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            window = UIWindow(windowScene: scene)
+            window.frame = scene.coordinateSpace.bounds
+            window.rootViewController = controller
+        }
+
+        func show(makeKey: Bool = true) {
+            if makeKey { window.makeKeyAndVisible() }
+            else { window.isHidden = false }
+            window.layoutIfNeeded()
+        }
+
+        func close() {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !condition() {
+            guard clock.now < deadline else { return false }
+            do { try await Task.sleep(for: .milliseconds(20)) }
+            catch { return false }
+        }
+        return true
+    }
+
+    private func configure(_ controller: NameEntryTextField.Controller,
+                           text: String = "Home", enabled: Bool = true,
+                           onChange: @escaping (String) -> Void = { _ in },
+                           onSubmit: @escaping () -> Void = {}) {
+        controller.configure(text: text, placeholder: "Home name", enabled: enabled,
+                             onChange: onChange, onSubmit: onSubmit)
+    }
+
+    func testPresentationOwnsRealResponderAndUpdatesPreserveFieldAndSelection() async throws {
+        let field = TrackingTextField()
+        let controller = NameEntryTextField.Controller(textField: field)
+        configure(controller, text: "Main home")
+        let host = try WindowHost(controller)
+        defer { controller.dismantle(); host.close() }
+        host.show()
+        guard await waitUntil({ field.isFirstResponder }) else {
+            XCTFail("Presented name field never became the actual first responder")
+            return
+        }
+        let start = try XCTUnwrap(field.position(from: field.beginningOfDocument, offset: 1))
+        let end = try XCTUnwrap(field.position(from: field.beginningOfDocument, offset: 4))
+        field.selectedTextRange = try XCTUnwrap(field.textRange(from: start, to: end))
+
+        for _ in 0..<3 { configure(controller, text: "Main home") }
+
+        XCTAssertTrue(controller.textField === field)
+        XCTAssertTrue(field.isFirstResponder)
+        XCTAssertEqual(field.focusRequests, 1)
+        XCTAssertEqual(field.text, "Main home")
+        let selection = try XCTUnwrap(field.selectedTextRange)
+        XCTAssertEqual(field.offset(from: field.beginningOfDocument, to: selection.start), 1)
+        XCTAssertEqual(field.offset(from: field.beginningOfDocument, to: selection.end), 4)
+        XCTAssertEqual(field.accessibilityIdentifier, "entry.name")
+        XCTAssertEqual(field.placeholder, "Home name")
+        XCTAssertEqual(field.returnKeyType, .done)
+        XCTAssertTrue(field.adjustsFontForContentSizeCategory)
+
+        XCTAssertTrue(field.resignFirstResponder())
+        configure(controller, text: "Main home")
+        NotificationCenter.default.post(name: UIWindow.didBecomeKeyNotification, object: host.window)
+        XCTAssertFalse(field.isFirstResponder, "A normal update must not undo intentional focus dismissal")
+        XCTAssertEqual(field.focusRequests, 1)
+    }
+
+    func testNonKeyPresentationDefersItsSingleRequestUntilItsOwnWindowBecomesKey() async throws {
+        let blocker = try WindowHost(UIViewController())
+        blocker.show()
+        defer { blocker.close() }
+        let field = TrackingTextField()
+        let controller = NameEntryTextField.Controller(textField: field)
+        configure(controller)
+        let host = try WindowHost(controller)
+        defer { controller.dismantle(); host.close() }
+        host.show(makeKey: false)
+        guard await waitUntil({ controller.view.window === host.window }) else {
+            XCTFail("Name field was not attached to its non-key window")
+            return
+        }
+        XCTAssertFalse(host.window.isKeyWindow)
+        XCTAssertEqual(field.focusRequests, 0)
+        NotificationCenter.default.post(name: UIWindow.didBecomeKeyNotification, object: blocker.window)
+        XCTAssertEqual(field.focusRequests, 0, "Another window cannot admit the name field")
+
+        host.window.makeKey()
+        guard await waitUntil({ field.isFirstResponder }) else {
+            XCTFail("The pending name field did not acquire focus when its own window became key")
+            return
+        }
+        XCTAssertEqual(field.focusRequests, 1)
+    }
+
+    func testRejectedResponderRequestIsNotRetriedByConfigurationOrKeyNotifications() async throws {
+        let field = TrackingTextField()
+        field.permitsFocus = false
+        let controller = NameEntryTextField.Controller(textField: field)
+        configure(controller)
+        let host = try WindowHost(controller)
+        defer { controller.dismantle(); host.close() }
+        host.show()
+        guard await waitUntil({ field.focusRequests == 1 }) else {
+            XCTFail("Expected one admitted responder request")
+            return
+        }
+        field.permitsFocus = true
+        configure(controller, text: "Updated home")
+        NotificationCenter.default.post(name: UIWindow.didBecomeKeyNotification, object: host.window)
+        XCTAssertEqual(field.focusRequests, 1)
+        XCTAssertFalse(field.isFirstResponder)
+    }
+
+    func testConfigurationDoesNotOverwriteAnActiveMarkedTextComposition() async throws {
+        let field = TrackingTextField()
+        let controller = NameEntryTextField.Controller(textField: field)
+        var submissions = 0
+        configure(controller, text: "", onSubmit: { submissions += 1 })
+        let host = try WindowHost(controller)
+        defer { controller.dismantle(); host.close() }
+        host.show()
+        guard await waitUntil({ field.isFirstResponder }) else {
+            XCTFail("Name field did not acquire focus for composition")
+            return
+        }
+        field.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertNotNil(field.markedTextRange, "The fixture must establish a real marked composition")
+        let composingText = field.text
+        configure(controller, text: "stale binding", onSubmit: { submissions += 1 })
+        XCTAssertEqual(field.text, composingText)
+        XCTAssertNotNil(field.markedTextRange)
+        XCTAssertTrue(field.isFirstResponder)
+        XCTAssertEqual(field.focusRequests, 1)
+        _ = field.delegate?.textFieldShouldReturn?(field)
+        XCTAssertEqual(submissions, 0, "Return must not submit an unfinished composition")
+        field.unmarkText()
+        configure(controller, text: "Committed name")
+        XCTAssertEqual(field.text, "Committed name")
+    }
+
+    func testEditingUsesLatestBindingAndReturnIsSuppressedWhileSaving() throws {
+        let controller = NameEntryTextField.Controller()
+        defer { controller.dismantle() }
+        var oldChanges: [String] = []
+        var currentChanges: [String] = []
+        var submissions = 0
+        configure(controller, onChange: { oldChanges.append($0) })
+        configure(controller, onChange: { currentChanges.append($0) },
+                  onSubmit: { submissions += 1 })
+        let field = controller.textField
+        field.text = "Renamed home"
+        field.sendActions(for: .editingChanged)
+        XCTAssertTrue(oldChanges.isEmpty)
+        XCTAssertEqual(currentChanges, ["Renamed home"])
+        let delegate = try XCTUnwrap(field.delegate)
+        _ = delegate.textFieldShouldReturn?(UITextField())
+        XCTAssertEqual(submissions, 0, "Only the owned field can submit")
+        _ = delegate.textFieldShouldReturn?(field)
+        _ = delegate.textFieldShouldReturn?(field)
+        XCTAssertEqual(submissions, 2, "A later enabled Return may retry a rejected submission")
+
+        configure(controller, text: "Renamed home", enabled: false,
+                  onChange: { currentChanges.append($0) }, onSubmit: { submissions += 1 })
+        XCTAssertFalse(field.isEnabled)
+        _ = delegate.textFieldShouldReturn?(field)
+        field.sendActions(for: .editingChanged)
+        XCTAssertEqual(submissions, 2)
+        XCTAssertEqual(currentChanges, ["Renamed home"])
+        configure(controller, text: "Renamed home", enabled: true,
+                  onChange: { currentChanges.append($0) }, onSubmit: { submissions += 1 })
+        XCTAssertTrue(field.isEnabled)
+        field.text = "Another name"
+        field.sendActions(for: .editingChanged)
+        _ = delegate.textFieldShouldReturn?(field)
+        XCTAssertEqual(currentChanges, ["Renamed home", "Another name"])
+        XCTAssertEqual(submissions, 3)
+    }
+
+    func testDismantlingPendingFieldPreventsLaterWindowFocusAndCallbacks() async throws {
+        let blocker = try WindowHost(UIViewController())
+        blocker.show()
+        defer { blocker.close() }
+        let field = TrackingTextField()
+        let controller = NameEntryTextField.Controller(textField: field)
+        var callbacks = 0
+        configure(controller, onChange: { _ in callbacks += 1 }, onSubmit: { callbacks += 1 })
+        let host = try WindowHost(controller)
+        defer { controller.dismantle(); host.close() }
+        host.show(makeKey: false)
+        guard await waitUntil({ controller.view.window === host.window }) else {
+            XCTFail("Pending field was not attached to its non-key window")
+            return
+        }
+        // Exercise the pending key-window admission before dismantling, using
+        // an actual attached field and window rather than faked responder state.
+        controller.viewDidAppear(false)
+        XCTAssertFalse(host.window.isKeyWindow)
+        XCTAssertEqual(field.focusRequests, 0)
+        controller.dismantle()
+        host.window.makeKey()
+        NotificationCenter.default.post(name: UIWindow.didBecomeKeyNotification, object: host.window)
+        field.text = "After teardown"
+        field.sendActions(for: .editingChanged)
+        _ = field.delegate?.textFieldShouldReturn?(field)
+        XCTAssertEqual(field.focusRequests, 0)
+        XCTAssertFalse(field.isFirstResponder)
+        XCTAssertEqual(callbacks, 0)
+    }
+
+    func testDismantlingActiveFieldReleasesResponderWithoutReacquiringIt() async throws {
+        let field = TrackingTextField()
+        let controller = NameEntryTextField.Controller(textField: field)
+        configure(controller)
+        let host = try WindowHost(controller)
+        defer { host.close() }
+        host.show()
+        guard await waitUntil({ field.isFirstResponder }) else {
+            XCTFail("Name field did not acquire focus before teardown")
+            controller.dismantle()
+            return
+        }
+        controller.dismantle()
+        XCTAssertFalse(field.isFirstResponder)
+        configure(controller)
+        NotificationCenter.default.post(name: UIWindow.didBecomeKeyNotification, object: host.window)
+        XCTAssertFalse(field.isFirstResponder)
+        XCTAssertEqual(field.focusRequests, 1)
+    }
+}

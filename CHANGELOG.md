@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Select Recovery's Save to Files action through its exact system cell, with unique, enabled and hittable checks plus one tap inside a shared 30-second window; avoid the broad duplicate-label query and reject late results.
+
 - Allow one bounded Simulator shutdown before Recovery result collection to finish within the existing collection deadline, retaining all state, resource and cleanup checks.
 
 - Give the single Recovery Photos authorization command the same bounded cold-start allowance as app installation, retaining the original startup deadline, resource checks and cleanup reserve.

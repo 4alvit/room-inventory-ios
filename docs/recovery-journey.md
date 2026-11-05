@@ -718,6 +718,26 @@ state remain required before saving.
 The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
 
+Before Files opens, Recovery selects the share sheet's exact `Cell` with
+identifier `actionGroupCell` and label `Save to Files`. Its nested static text
+has the same label, so an all-element label query does not identify only the
+action. The existing `FilesNavigationReadiness` selection path, also used by
+the standalone RC runner, checks zero/one/multiple matches, enabled state and
+native hittability, then performs one direct tap in the same active waiter.
+This share transition has one 30-second monotonic allowance, including the tap;
+there is no second generic wait or scrolling fallback. In-flight native queries
+cannot be preempted by this helper, but late results cannot authorize a tap.
+
+In PR run `41988596028`, the former all-element `firstMatch` query timed out
+before any Save to Files tap. The teardown screenshot and typed accessibility
+attachment later showed the action visible in `activityCollectionView`, with
+the duplicate-label static text beneath it. They do not establish when the
+action first became ready or prove that query breadth caused the native delay.
+An earlier successful trace also exceeded the nominal ten-second existence
+wait before tapping the cell. The combined allowance replaces that wait plus
+subsequent unshared checks; it does not claim to cure native service latency.
+Current hosted execution must still verify all three exports and their bytes.
+
 After one real Save, return from the external Files service has a separate
 30-second monotonic allowance. Each serial probe classifies one immutable app
 snapshot. An observed Files action or alert blocks progress. A remaining share

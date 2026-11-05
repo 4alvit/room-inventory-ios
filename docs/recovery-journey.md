@@ -494,7 +494,7 @@ assertions remain required; no export service is invoked directly.
 New `NameEntrySheet` presentations focus their empty `entry.name` field in the
 app. Recovery uses `AutofocusedNameEntry` without a second field tap. One
 30-second monotonic setup window covers the exact keyboard introduction and a
-unique enabled and hittable text field. Only timely readiness can start the
+unique enabled text field. Only timely readiness can start the
 separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
@@ -538,7 +538,16 @@ from one direct application snapshot, traversing at most 1,024 nodes. It counts
 all matching typed fields and uses enabled state and placeholder only from the
 sole match in that same snapshot. Each capture clears the prior field proof;
 missing, duplicate, oversized, late or throwing captures cannot reuse it. The
-live `firstMatch.isHittable` check and native input remain separate operations.
+autofocus path omits a coordinate hit test because it never taps this field;
+native `typeText` requires keyboard focus and a missing-focus error remains a
+failure. Localization's tap-based path still requires live hittability. The
+initial value, single native input and exact echo use the exact `entry.name`
+identifier predicate with unique `element` resolution, so a missing or ambiguous
+live field fails instead of selecting its first match. These operations retain
+the separate ten-second input deadline. In hosted run `41941238836`, the unused
+coordinate hit query exceeded the 30-second setup window after the introduction
+was dismissed and the snapshot had established one enabled field; no input was
+attempted. Omitting that query does not establish a native performance guarantee.
 The keyboard owner still uses its separate query because an application snapshot
 can omit that sibling. These are sequential observations, not an atomic UI
 transaction. In attempt 2 of hosted run `41733453608`,

@@ -23,10 +23,9 @@ enum AutofocusedNameEntry {
                      recordInitial: @escaping (String, String?) throws -> Void = { _, _ in },
                      recordTyped: @escaping (String) throws -> Void = { _ in }) throws -> Observation {
         let readiness = NameEntryKeyboardReadiness(allowance: allowance, timing: .keyboardSetupThenInput)
-        let fields = app.textFields.matching(identifier: "entry.name")
-        // A complete app snapshot establishes the exact typed match count and
-        // attributes before the live hit test and one native input.
-        let field = fields.firstMatch
+        let fields = app.textFields.matching(NSPredicate(format: "identifier == %@", "entry.name"))
+        // Resolve the unique live element only inside an admitted callback:
+        // even element resolution can traverse the native accessibility tree.
         let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
         // Count and snapshot recognition below establish uniqueness before use.
         // Stop resolution at that known owner/button instead of indexing all matches.
@@ -81,17 +80,17 @@ enum AutofocusedNameEntry {
                 }
                 placeholder = snapshot.placeholder
                 return snapshot.enabled
-            }, fieldHittable: { field.isHittable }, evidence: evidence)
+            }, fieldHittable: { fields.element.isHittable }, evidence: evidence)
             // Empty controls may expose nil. Preserve the original live-value
             // normalization only before input; nil is never a successful typed echo.
             stage = "initial_value"
-            let before = try readiness.perform { field.value as? String ?? "" }
+            let before = try readiness.perform { fields.element.value as? String ?? "" }
             try readiness.perform { try recordInitial(before, placeholder) }
             guard before.isEmpty || before == placeholder else { throw Failure.notEmpty }
             stage = "input"
-            try readiness.typeTextOnce { field.typeText(value) }
+            try readiness.typeTextOnce { fields.element.typeText(value) }
             stage = "echo"
-            let after = try readiness.waitForExactValue(value) { field.value as? String }
+            let after = try readiness.waitForExactValue(value) { fields.element.value as? String }
             stage = "record_typed"
             try readiness.perform { try recordTyped(after) }
             guard after == value else { throw Failure.valueNotRetained }

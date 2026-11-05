@@ -617,9 +617,57 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertEqual(h.events.suffix(2), ["type", "read"])
     }
 
+    func testAutofocusedSetupSkipsCoordinateHitTestAfterKeyboardIntroduction() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        h.showIntroduction()
+        h.fieldHittable = false
+        h.advanceAt["field-hit"] = 100 // This query must never run in the autofocus path.
+        var observations = 0
+        try h.wait(observe: {
+            h.stage("observe")
+            observations += 1
+            if observations == 1 { h.now = 12; return h.observation }
+            h.now = 24
+            return .init()
+        })
+        XCTAssertEqual(h.events, ["observe", "continue-hit", "evidence-beforeContinue", "continue-tap",
+            "observe", "entry-count", "field-enabled", "evidence-dismissedAndFieldReady", "observe"])
+        XCTAssertNil(h.subject.fieldHittable) // Unknown, never fabricated as true.
+        XCTAssertEqual(h.subject.entryNameCount, 1)
+        XCTAssertEqual(h.subject.fieldEnabled, true)
+        XCTAssertThrowsError(try h.tapField())
+        try h.subject.typeTextOnce { h.stage("type"); h.now = 29 }
+        XCTAssertEqual(try h.subject.waitForExactValue("Test Home") {
+            h.stage("echo"); h.now = 31; return "Test Home"
+        }, "Test Home")
+        XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
+        XCTAssertEqual(h.events.suffix(2), ["type", "echo"])
+
+        let shared = Harness()
+        shared.fieldHittable = false
+        XCTAssertFalse(try shared.poll())
+        XCTAssertEqual(shared.events, ["observe", "entry-count", "field-enabled", "field-hit"])
+        XCTAssertThrowsError(try shared.tapField())
+    }
+
+    func testBothInputModesStillRejectMissingDuplicateAndDisabledFields() throws {
+        for timing in [NameEntryKeyboardReadiness.Timing.sharedTenSeconds, .keyboardSetupThenInput] {
+            for (count, enabled) in [(0, true), (2, true), (1, false)] {
+                let h = Harness(timing: timing)
+                h.entryNameCount = count
+                h.fieldEnabled = enabled
+                XCTAssertFalse(try h.poll())
+                XCTAssertFalse(h.events.contains("field-hit"))
+                XCTAssertThrowsError(try h.tapField())
+                XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Invalid field cannot receive input") })
+                XCTAssertEqual(h.events.filter { $0 == "observe" }.count, 1)
+            }
+        }
+    }
+
     func testSplitSetupExactOrLateOperationsCannotActivateInputOrRestart() {
         for end in [30.0, 30.001] {
-            for stage in ["observe", "continue-hit", "continue-tap", "entry-count", "field-enabled", "field-hit"] {
+            for stage in ["observe", "continue-hit", "continue-tap", "entry-count", "field-enabled"] {
                 let h = Harness(timing: .keyboardSetupThenInput)
                 _ = h.subject // Start the immutable setup window at zero.
                 h.now = 29.99
@@ -757,7 +805,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             h.stage("observe")
             observations += 1
             if observations == 2 {
-                XCTAssertEqual(h.events.suffix(4), ["entry-count", "field-enabled", "field-hit", "observe"])
+                XCTAssertEqual(h.events.suffix(3), ["entry-count", "field-enabled", "observe"])
                 XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
                 XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
             }

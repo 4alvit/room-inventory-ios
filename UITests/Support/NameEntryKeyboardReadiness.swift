@@ -175,8 +175,13 @@ final class NameEntryKeyboardReadiness {
         guard self.entryNameCount == 1 else { return false }
         self.fieldEnabled = try perform(fieldEnabled)
         guard self.fieldEnabled == true else { return false }
-        self.fieldHittable = try perform(fieldHittable)
-        guard self.fieldHittable == true else { return false }
+        // Only the shared path taps the field. Autofocused input needs keyboard
+        // focus, which native typeText enforces; a coordinate hit test does not
+        // establish that focus and can stall while the cold keyboard settles.
+        if timing == .sharedTenSeconds {
+            self.fieldHittable = try perform(fieldHittable)
+            guard self.fieldHittable == true else { return false }
+        }
         if try dismissedIntroduction && !afterEvidenceRecorded && window.remaining() > 2 {
             try perform { try evidence(.dismissedAndFieldReady) }
             afterEvidenceRecorded = true

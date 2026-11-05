@@ -593,7 +593,44 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("export filename editable", !existingName.isEmpty)
         filename.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingName.count) + baseName)
-        let observedName = filename.value as? String ?? ""
+        let observedName: String
+        do {
+            // One observation allowance after the single input. A partial echo
+            // never triggers another interaction or renews this deadline.
+            let began = ProcessInfo.processInfo.systemUptime
+            let echo = FilesNavigationReadiness(timeout: 10)
+            var lastReturned: String?
+            var readsStarted = 0
+            var readsReturned = 0
+            var stage = "waiting"
+            var matched = false
+            defer {
+                let record: [String: Any] = [
+                    "schema_version": 1, "phase": "export_filename_echo", "role": role.rawValue,
+                    "expected": baseName, "last_returned": lastReturned.map { $0 as Any } ?? NSNull(),
+                    "reads_started": readsStarted, "reads_returned": readsReturned,
+                    "stage": stage, "allowance_seconds": 10,
+                    "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                    "result": matched ? "matched" : "failed"
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_FILES_FILENAME_ECHO_V1 \(text)")
+                }
+            }
+            observedName = try echo.waitForFilenameEcho(expected: baseName, readValue: {
+                stage = "reading_value"
+                readsStarted += 1
+                // Resolve the unique typed field on every fresh value read.
+                let value = pickers.textFields.matching(identifier: "DOCPicker.filenameTextField").element.value as? String
+                lastReturned = value
+                readsReturned += 1
+                stage = "value_returned"
+                return value
+            })
+            matched = true
+            stage = "completed"
+        }
         try ledger.require("unique export base name", actual: observedName, expected: baseName)
         let observedTitle = filesFolderTitles(folder, app: app).element(boundBy: 0).label
         let actionsSuffix = ", Actions Menu"

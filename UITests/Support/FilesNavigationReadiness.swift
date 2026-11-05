@@ -99,6 +99,17 @@ final class FilesNavigationReadiness {
         try waitForResult(probe: probe)
     }
 
+    /// Observe the result of one completed filename input. Missing, partial or
+    /// wrong values stay pending; only the full exact value can admit Save.
+    /// Every fresh native read shares this window's original deadline.
+    func waitForFilenameEcho(expected: String,
+                             readValue: @escaping () throws -> String?) throws -> String {
+        try waitForResult {
+            let value = try self.perform(readValue)
+            return value == expected ? value : nil
+        }
+    }
+
     private func waitForResult<Value>(probe: @escaping () throws -> Value?) throws -> Value {
         _ = try remaining()
         guard cancelPending == nil else { throw remember(Failure.alreadyWaiting) }

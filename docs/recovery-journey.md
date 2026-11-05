@@ -807,6 +807,32 @@ cannot authorize a tap. Replacing four serial scope-count queries does not promi
 that any native operation will finish in time. The complete new hosted journey
 must still verify all exported and restored bytes.
 
+After the single filename `typeText`, one ten-second monotonic observation window
+waits for the full exact base name. Each fresh read resolves the unique typed
+`DOCPicker.filenameTextField`; the original window checks its deadline before
+and after that read and again when the waiter returns. Missing, wrong and partial
+values remain pending. A stable mismatch expires without a second input, tap,
+shortened name or prefix acceptance. Native resolver errors and cancellation
+remain terminal. Only timely full equality reaches the existing ledger assertion
+and later Save phase. The navigation, Save and overall journey budgets are unchanged.
+
+`ROOM_FILES_FILENAME_ECHO_V1` records schema version 1, export role, exact expected
+and last returned values, started and returned read counts, last stage, elapsed
+seconds and `matched`/`failed`. A JSON null means no String value was returned;
+the counts distinguish an absent value from no completed read. The diagnostic
+uses only values already read, makes no extra UI query and cannot replace the
+primary native error. A full value returned at or after the deadline can appear
+in the diagnostic while the result remains `failed`.
+
+In source `e54025bb357b2aa7f2c2a4fe13a041ed0f0c4c72`, Recovery run
+`42099598151` failed the first export's immediate value assertion: it returned
+`source-E1836DD1-50AE-4CE6-9473-89` instead of the complete
+`source-E1836DD1-50AE-4CE6-9473-89348E24DB97`. Later failure imagery showed the
+previously missing tail and a caret. That does not establish the full field's
+equality at the assertion or whether the original read reflected delayed echo
+or incomplete input. Bounded exact observation tests that distinction without
+accepting an incorrect filename; the fresh hosted journey remains required.
+
 After one real Save, return from the external Files service has a separate
 30-second monotonic allowance. Each serial probe classifies one immutable app
 snapshot. An observed Files action or alert blocks progress. A remaining share

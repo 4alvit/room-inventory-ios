@@ -55,6 +55,171 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    func testFilenameEchoAcceptsImmediateExactValueAndStopsReading() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        let expected = "source-E1836DD1-50AE-4CE6-9473-89348E24DB97"
+        var reads = 0
+        XCTAssertEqual(try window.waitForFilenameEcho(expected: expected, readValue: {
+            XCTAssertTrue(Thread.isMainThread)
+            reads += 1
+            return expected
+        }), expected)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(reads, 1)
+    }
+
+    @MainActor
+    func testFilenameEchoMissingOrPrefixThenFullUsesOriginalDeadline() throws {
+        let expected = "source-E1836DD1-50AE-4CE6-9473-89348E24DB97"
+        let initialValues: [String?] = [nil, "source-E1836DD1-50AE-4CE6-9473-89"]
+        for initial in initialValues {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            var reads = 0
+            XCTAssertEqual(try window.waitForFilenameEcho(expected: expected, readValue: {
+                reads += 1
+                if reads == 1 { now = 9.5; return initial }
+                return expected
+            }), expected)
+            XCTAssertEqual(reads, 2)
+            XCTAssertEqual(try window.remaining(), 0.5)
+            now = 10
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: expected, readValue: {
+                reads += 1; return expected
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertEqual(reads, 2)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoStableMissingPartialOrWrongValueExpiresWithoutAdmission() {
+        let expected = "source-E1836DD1-50AE-4CE6-9473-89348E24DB97"
+        let values: [String?] = [nil, "", "source-E1836DD1-50AE-4CE6-9473-89", "wrong",
+                                 expected + ".zip", expected.lowercased()]
+        for value in values {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            var reads = 0
+            var admissions = 0
+            XCTAssertThrowsError(try {
+                _ = try window.waitForFilenameEcho(expected: expected, readValue: {
+                    reads += 1; now += 5; return value
+                })
+                admissions += 1
+            }()) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(reads, 2)
+            XCTAssertEqual(admissions, 0)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoExpiredBeforeReadNeverResolvesNativeField() {
+        for time in [10.0, 10.001] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            now = time
+            var reads = 0
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+                reads += 1; return "source-run"
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertEqual(reads, 0)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoExactOrLateFullReturnCannotAdmitOrRenew() {
+        for time in [10.0, 10.001] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            var reads = 0
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+                reads += 1; now = time; return "source-run"
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+                reads += 1; return "source-run"
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(reads, 1)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoFinalWaiterReturnStillChecksOriginalDeadline() {
+        var returned = false
+        var checks = 0
+        let window = FilesNavigationReadiness(timeout: 10, clock: {
+            guard returned else { return 0 }
+            checks += 1
+            // Native value and outer probe return in time; waiter return does not.
+            return checks < 3 ? 9 : 10
+        })
+        var reads = 0
+        XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+            reads += 1; returned = true; return "source-run"
+        })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(checks, 3)
+    }
+
+    @MainActor
+    func testFilenameEchoPreservesUniqueResolverErrorEvenWhenLate() {
+        for time in [0.0, 11.0] {
+            let native = NSError(domain: "UniqueFilenameResolution", code: 1)
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            var reads = 0
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+                reads += 1; now = time; throw native
+            })) { XCTAssertTrue(($0 as NSError) === native) }
+            XCTAssertThrowsError(try window.perform { reads += 1 }) {
+                XCTAssertTrue(($0 as NSError) === native)
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(reads, 1)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoCancellationBeforeDuringOrBetweenReadsStopsWork() {
+        for phase in ["before", "during", "pending"] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var reads = 0
+            if phase == "before" { window.cancel() }
+            XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+                reads += 1
+                if phase == "during" {
+                    window.cancel()
+                    return "source-run"
+                }
+                RunLoop.main.perform(inModes: [.default]) {
+                    MainActor.assumeIsolated { window.cancel() }
+                }
+                return "source-"
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(reads, phase == "before" ? 0 : 1)
+        }
+    }
+
+    @MainActor
+    func testFilenameEchoNativeReadCannotOverlapOrContinueAfterSuccess() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var active = false
+        var reads = 0
+        XCTAssertEqual(try window.waitForFilenameEcho(expected: "source-run", readValue: {
+            XCTAssertFalse(active)
+            active = true
+            defer { active = false }
+            reads += 1
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            return reads == 1 ? "source-" : "source-run"
+        }), "source-run")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(reads, 2)
+    }
+
+    @MainActor
     func testSaveSnapshotUsesCurrentDirectTitleInsteadOfProviderEntryTitle() throws {
         for title in [TitleNode(.text, "Run folder"),
                       TitleNode(.button, "Run folder, Actions Menu", children: [TitleNode(.text, "Run folder")])] {

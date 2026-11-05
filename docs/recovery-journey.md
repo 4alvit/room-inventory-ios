@@ -1154,7 +1154,22 @@ accounting). Both remain single attempts inside the effective 660-second startup
 This finite hosted cold-start allowance does not predict installation latency or
 turn prior timed-out runs into accepted evidence.
 
-This finite allowance addresses the observed failure before app installation,
+The single `simctl privacy ... grant photos` command for the owned test runner
+also allows 90 seconds, including the same four-second cleanup reserve, and is
+clipped to that original 660-second startup boundary. In run `41963934642`,
+the previous 30-second cap left only 26 seconds for child work and live resource
+accounting. The command still had no observed exit after 68 cooperative polls;
+the last completed service checkpoint was 0.311 seconds before that work
+deadline. The deadline was raised during a DerivedData walk, but these polls
+do not support a claim that an already-finished command was hidden by the walk.
+The reason for the native command's latency remains unknown. The new allowance
+matches installation; it does not add a retry, skip accounting, extend the
+startup pool or treat that failed run as accepted. Timely exit, both pipe EOFs,
+owned-group cleanup, fresh complete resource accounting and the later PhotoKit
+authorization/content checks remain required. No XCTest case ran in that failed
+attempt (`test_count == 0`).
+
+The 660-second startup allowance addresses the observed failure before app installation,
 where successful boot/bootstatus and full resource accounting consumed nearly all
 of the earlier 180-second device phase. It does not guarantee filesystem or
 simulator latency, collector completion, XCTest success or simulator shutdown;

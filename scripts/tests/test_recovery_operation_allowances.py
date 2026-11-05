@@ -29,7 +29,7 @@ class OperationAllowanceTests(base.ControllerCase):
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
                          ["boot-device", "boot-status", "install-app", "install-runner", "authorize-runner-photos"])
-        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 90, 90, 30])
+        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 90, 90, 90])
         self.assertEqual(calls[1].args[0], ["xcrun", "simctl", "bootstatus", run.device_id, "-b"])
         self.boot_request = calls[1]
         self.assertEqual(calls[4].args[0], ["xcrun", "simctl", "privacy", run.device_id,
@@ -226,31 +226,104 @@ class OperationAllowanceTests(base.ControllerCase):
         C.validate_runner_photos_metadata({"NSPhotoLibraryUsageDescription": "Automated testing"})
         self.popen.assert_not_called()
 
-    def test_photos_grant_uses_existing_thirty_second_admission_and_startup_end(self):
+    def test_photos_grant_allows_cold_service_and_requires_fresh_full_accounting(self):
         self.install_requests()
         request = self.permission_request
-        with devices.World(module=C) as w:
+        for elapsed, work, scan_step in ((344.180151, 80, 2), (620, 30, .25)):
+            with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
+                run = w.run
+                w.clock.now = run.start + elapsed
+                run.phase("device")
+                original = run.phase_end, run.work_end, run.outer_end
+                start = w.clock.now
+                w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + work) or 0)
+                w.cleanup_action = lambda: setattr(w.clock, "now", w.clock.now + .25)
+                def inspect(info, active):
+                    if w.cleaned:
+                        w.clock.now += scan_step
+                    return info
+                w.stat_action = inspect
+                run.command(*request.args, **request.kwargs)
+                record = run.record["commands"][0]
+                self.assertAlmostEqual(record["end_deadline_elapsed"], min(elapsed + 90, 660))
+                self.assertGreater(record["child_completed_elapsed"] - elapsed, 26)
+                self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
+                self.assertEqual(record["cleanup"]["group_state"], "absent")
+                self.assertTrue(record["cleanup"]["leader_reaped"])
+                self.assertEqual(w.barrier_walked, 17)
+                self.assertEqual(run.last_samples[-1]["device"]["entries"], 17)
+                self.assertEqual(record["post_command_accounting"]["status"], "COMPLETED")
+                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 660)
+                if elapsed < 620:
+                    self.assertGreater(record["post_command_accounting"]["end_elapsed"],
+                                       record["end_deadline_elapsed"])
+                self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_photos_grant_rejects_own_and_clipped_work_boundaries(self):
+        self.install_requests()
+        request = self.permission_request
+        for elapsed, work in ((344.180151, 86), (344.180151, 86.5), (620, 36)):
+            with self.subTest(elapsed=elapsed, work=work), devices.World(module=C) as w:
+                run = w.run
+                w.clock.now = run.start + elapsed
+                run.phase("device")
+                original = run.phase_end, run.work_end, run.outer_end
+                run.guard = lambda force=False: run.tick()
+                start = w.clock.now
+                w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + work) or 0)
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(*request.args, **request.kwargs)
+                record = run.record["commands"][0]
+                self.assertAlmostEqual(record["end_deadline_elapsed"], min(elapsed + 90, 660))
+                self.assertIsNone(record["child_completed_elapsed"])
+                self.assertIsNone(record["post_command_accounting"])
+                self.assertTrue(w.cleaned)
+                self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_photos_grant_cannot_succeed_with_incomplete_terminal_accounting(self):
+        self.install_requests()
+        with devices.World(module=C, actual_guard=True, count=17) as w:
             run = w.run
-            w.clock.now = run.start + 200
+            w.clock.now = run.start + 620
             run.phase("device")
-            original = run.work_end, run.outer_end
-            run.guard = lambda force=False: run.tick()
+            original = run.phase_end, run.work_end, run.outer_end
             start = w.clock.now
-            w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + 25.5) or 0)
-            run.command(*request.args, **request.kwargs)
+            w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + 30) or 0)
+            w.cleanup_action = lambda: setattr(w.clock, "now", w.clock.now + .25)
+            def inspect(info, active):
+                if w.cleaned:
+                    w.clock.now += 1
+                return info
+            w.stat_action = inspect
+            with self.assertRaises(C.DeadlineFailure):
+                run.command(*self.permission_request.args, **self.permission_request.kwargs)
             record = run.record["commands"][0]
-            self.assertEqual(record["end_deadline_elapsed"], 230)
-            self.assertLess(record["child_completed_elapsed"], 226)
-            self.assertEqual((run.work_end, run.outer_end), original)
-        for elapsed in (656, 660):
+            self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
+            self.assertEqual(record["post_command_accounting"]["status"], "FAILED")
+            self.assertEqual(record["device_service"]["terminal_barrier"],
+                             {"reached": True, "completed": False})
+            self.assertTrue(w.cleaned)
+            self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_photos_grant_cannot_renew_startup_or_spawn_without_cleanup_time(self):
+        self.install_requests()
+        request = self.permission_request
+        for elapsed in (653, 656, 660):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 run.phase("device")
+                original = run.phase_end, run.work_end, run.outer_end
                 w.clock.now = run.start + elapsed
                 run.guard = lambda force=False: run.tick()
                 with self.assertRaises(C.DeadlineFailure):
+                    run.phase("device")
                     run.command(*request.args, **request.kwargs)
                 self.assertFalse(any(e[0] == "spawn" for e in w.events))
+                self.assertEqual(run.record["commands"], [])
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
 
     def cleanup_requests(self):
         run = self.run_fixture(output=False)

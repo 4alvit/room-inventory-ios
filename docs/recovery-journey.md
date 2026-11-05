@@ -1166,8 +1166,8 @@ under the armed original `min(phase_end, work_end, outer_end)`, followed by a
 deadline tick, before command success or another command. The old command timer
 is disarmed after bounded cleanup and before the phase-bound arm; a pending old
 alarm still fails closed. No phase is reset and no cleanup reserve is borrowed.
-Preflight, pre-Popen and live guards are unchanged. This moves only terminal
-accounting out of the child-work allowance; all resource caps, allocation metrics,
+This terminal transition moves completed-child accounting out of the child-work
+allowance; all resource caps, allocation metrics,
 free-space floors, entry limits and the full barrier remain. Owned-group absence
 does not prove simulator or DerivedData quiescence, so no root is cached or skipped.
 Accounting and subsequent device commands share the original nominal startup
@@ -1192,6 +1192,27 @@ existing four-second process-cleanup allowance (86 seconds for child work and li
 accounting). Both remain single attempts inside the effective 660-second startup pool.
 This finite hosted cold-start allowance does not predict installation latency or
 turn prior timed-out runs into accepted evidence.
+
+For ordinary commands, log setup and the required pre-spawn resource guard run inside
+the existing phase/outer deadline, with four seconds reserved for cleanup. Only
+after that admission succeeds is the existing command cap armed once, immediately
+before process creation. Preparation does not renew the phase or outer deadline;
+insufficient remaining time or a failed guard prevents process creation. Live
+resource checks, cooperative pipe/exit observation, late-result rejection and
+the complete post-command resource barrier remain required. Cleanup-mode commands
+retain their original cap covering both setup and execution.
+
+In run `42009238371`, the app build succeeded but no UI test started. Before
+`install-app` spawned, its resource guard spent 52.174502 seconds traversing
+DerivedData and 14.215623 seconds traversing the device directory. These scans
+consumed at least 66.390125 seconds of the already armed 90-second command cap.
+The saved sample timing bounds the remaining native work window at no more than
+18.789945 seconds; it does not provide an exact spawn time or prove an installer
+hang. A later resource scan crossed the work deadline, and cleanup terminated
+the child whose completion had not been observed. Three cleanup errors remain part of that failed run,
+despite the final observed `Shutdown` state. Separating preparation from the
+native command allowance addresses this budget attribution without increasing
+any numeric cap or accepting the historical failure.
 
 The single `simctl privacy ... grant photos` command for the owned test runner
 also allows 90 seconds, including the same four-second cleanup reserve, and is
@@ -1227,8 +1248,9 @@ time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.
 The outer log drain also checks complete write counts.
 
-The command's `elapsed_seconds` remains total elapsed through accounting up to
-the existing receipt boundary, rather than child duration alone. Optional
+After admission, the command's `elapsed_seconds` remains elapsed from its cap
+start through accounting up to the existing receipt boundary, rather than child
+duration alone. Phase-bound preparation is recorded separately. Optional
 `child_completed_elapsed` samples the post-wait work check; it is not actual OS
 exit time. `cleanup_completed_elapsed` reuses the existing post-cleanup clock.
 `post_command_accounting` holds fixed `start_elapsed`, `deadline_elapsed`,
@@ -1239,6 +1261,18 @@ Accounting failure uses the closed `command_accounting` stage and preserves its
 primary error through best-effort timing/origin capture and later receipt failures.
 Barrier completion, receipt success, group cleanup and simulator shutdown remain
 separate facts. Failed cleanup skips accounting and leaves its barrier flags false.
+
+The `preparation` object records its own start, phase-bound deadline, log
+readiness, admission start, completion time and `STARTED`, `COMPLETED` or `FAILED`
+status. After ordinary-command admission, `start_elapsed` is set to the command
+cap start, retaining the existing native-window semantics for diagnostic readers.
+`command_cap_started_elapsed` remains null until admission; for cleanup commands
+it retains the setup-inclusive start. Before admission, `start_elapsed` and
+`end_deadline_elapsed` describe preparation rather than a running child. After
+admission, the latter records the actual command cleanup boundary.
+`spawn_started_elapsed` and `spawn_returned_elapsed` bracket process creation;
+neither reports the child's OS completion time. Missing observations do not
+establish successful preparation or execution.
 
 This is cooperative service, not a worker or a latency guarantee. A single blocked
 stat, select, read, write, disk query or log walk cannot be preempted by the hook;

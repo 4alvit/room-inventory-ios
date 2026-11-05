@@ -219,13 +219,17 @@ class CommandAccountingTests(fixtures.ControllerCase):
     def test_timer_rearm_follows_confirmed_cleanup_without_reserve_borrowing(self):
         with self.boundary() as b:
             timer_events = []
-            self.timers.side_effect = lambda which, duration: timer_events.append((self.clock.now, duration, b.child.stop.call_count))
+            self.timers.side_effect = lambda which, duration: timer_events.append(
+                (self.clock.now, duration, b.child.stop.call_count, b.child.start.call_count))
             b.invoke()
-            self.assertTrue(any(now + duration == 126 for now, duration, _ in timer_events if duration))
-            self.assertTrue(any(now + duration == 130 for now, duration, _ in timer_events if duration))
-            extended = [(now, duration, stops) for now, duration, stops in timer_events if duration and now + duration > 130]
+            self.assertTrue(any(now + duration == 126 for now, duration, _, _ in timer_events if duration))
+            self.assertTrue(any(now + duration == 130 for now, duration, _, _ in timer_events if duration))
+            preparation = [event for event in timer_events if event[1] and event[0] + event[1] > 130 and not event[3]]
+            self.assertTrue(preparation)
+            self.assertTrue(all(now + duration == 216 and stops == 0 for now, duration, stops, _ in preparation))
+            extended = [event for event in timer_events if event[1] and event[0] + event[1] > 130 and event[3]]
             self.assertTrue(extended)
-            self.assertTrue(all(stops == 1 and now + duration == 220 for now, duration, stops in extended))
+            self.assertTrue(all(stops == 1 and now + duration == 220 for now, duration, stops, _ in extended))
             first = next(i for i, event in enumerate(timer_events) if event in extended)
             self.assertEqual(timer_events[first - 1][1], 0)
             self.assert_closed(b)

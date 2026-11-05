@@ -1192,23 +1192,31 @@ class RecoveryRun:
                 and self._device_scan_context is None and self._derived_scan_context is None,
                 "Stale scan service", ConfigurationFailure)
         self.guard()
-        end = min(self.phase_end, self.clock() + cap)
-        require(end - self.clock() >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
-        # Include log creation and the pre-spawn receipt in this command's cap.
+        preparation_started = self.clock()
+        # No child exists during log setup and admission accounting. Charge
+        # that work to the unchanged phase/outer budget, reserving cleanup time.
+        # Emergency cleanup commands retain their original setup-inclusive cap.
+        end = min(self.phase_end, self.outer_end,
+                  preparation_started + cap if self.cleanup_mode else self.outer_end)
+        require(min(end - self.clock(), cap) >= 8,
+                "Insufficient command and cleanup budget", DeadlineFailure)
         self.diagnostic_stage = "command_setup"
-        self.arm(end - 4)
         logs = self.output / "logs"
-        logs.mkdir(exist_ok=True)
-        record = {"name": name, "args": [str(a) for a in args], "start_elapsed": self.clock() - self.start,
+        record = {"name": name, "args": [str(a) for a in args], "start_elapsed": preparation_started - self.start,
                   "end_deadline_elapsed": end - self.start, "primary_error": None, "exit_code": None,
                   "child_completed_elapsed": None, "cleanup_completed_elapsed": None,
-                  "post_command_accounting": None}
+                  "post_command_accounting": None,
+                  "preparation": {"start_elapsed": preparation_started - self.start,
+                                  "deadline_elapsed": end - 4 - self.start,
+                                  "logs_ready_elapsed": None, "admission_started_elapsed": None,
+                                  "end_elapsed": None, "status": "STARTED"},
+                  "command_cap_started_elapsed": preparation_started - self.start if self.cleanup_mode else None,
+                  "spawn_started_elapsed": None, "spawn_returned_elapsed": None}
         self.record["commands"].append(record)
         self._scan_cost_command = record
-        self.flush()
         buffers, streams = [bytearray(), bytearray()], []
         process, entry, primary = None, None, None
-        selector = selectors.DefaultSelector()
+        selector = None
         previous_deadline = self.command_deadline
         self.command_deadline = end - 4
         service_checkpoints, service_last, service_busy = 0, None, False
@@ -1354,25 +1362,52 @@ class RecoveryRun:
                 pass
 
         try:
+            self.arm(end - 4)
+            logs.mkdir(exist_ok=True)
+            self.tick()
+            self.flush()
+            self.tick()
+            selector = selectors.DefaultSelector()
+            self.tick()
             if not self.cleanup_mode:
                 self.observe_derived_service(record, "init")
                 if device_root is not None:
                     self.observe_device_service(record, "init")
-            self.arm(end - 4)
             for suffix in ("stdout", "stderr"):
                 streams.append((logs / (name + "." + suffix)).open("xb", buffering=0))
+                self.tick()
+            record["preparation"]["logs_ready_elapsed"] = self.diagnostic_elapsed()
+            record["preparation"]["admission_started_elapsed"] = self.diagnostic_elapsed()
             self.guard()
+            self.tick()
+            if not self.cleanup_mode:
+                # Arm the native command's cap exactly once, only after the
+                # required pre-spawn census has returned within phase time.
+                cap_started = self.clock()
+                end = min(self.phase_end, self.outer_end, cap_started + cap)
+                require(end - cap_started >= 8, "Insufficient command and cleanup budget", DeadlineFailure)
+                # Keep legacy command-window consumers scoped to the native
+                # budget; preparation retains its separate original start.
+                record["start_elapsed"] = cap_started - self.start
+                record["command_cap_started_elapsed"] = cap_started - self.start
+                record["end_deadline_elapsed"] = end - self.start
+                self.command_deadline = end - 4
+                self.arm(end - 4)
+            record["preparation"]["end_elapsed"] = self.diagnostic_elapsed()
+            record["preparation"]["status"] = "COMPLETED"
             self.diagnostic_stage = "command_spawn"
             # Block only alarm delivery while registering ownership. A pending
             # deadline is delivered after the PID/group has entered our ledger.
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}) if self.timer_enabled else None
             try:
+                record["spawn_started_elapsed"] = self.diagnostic_elapsed()
                 self.tick()
                 process = subprocess.Popen(record["args"], cwd=self.repo, env=self.environment, start_new_session=True,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
                 entry = {"process": process, "state": {}, "record": record}
                 self.groups.append(entry)
                 record["pid"] = record["pgid"] = process.pid
+                record["spawn_returned_elapsed"] = self.diagnostic_elapsed()
                 if xcresult_producer:
                     self._active_xcresult_producer = (entry, self.xcresult)
             finally:
@@ -1465,6 +1500,12 @@ class RecoveryRun:
         except BaseException as error:
             primary = error
             record["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+            if record["preparation"]["status"] == "STARTED":
+                record["preparation"]["status"] = "FAILED"
+                try:
+                    record["preparation"]["end_elapsed"] = self.diagnostic_elapsed()
+                except BaseException:
+                    pass
             try:
                 if not self.cleanup_mode:
                     self.observe_derived_service(record, "incomplete", preserve_primary=True)
@@ -1494,7 +1535,8 @@ class RecoveryRun:
                 self.diagnostic_stage = "selector_cleanup"
                 require(self.clock() < end, "Selector cleanup deadline expired", DeadlineFailure)
                 self.arm(end)
-                selector.close()
+                if selector is not None:
+                    selector.close()
             except BaseException as error:
                 cleanup_error("selector_close", error)
             for stream in streams + ([process.stdout, process.stderr] if process else []):

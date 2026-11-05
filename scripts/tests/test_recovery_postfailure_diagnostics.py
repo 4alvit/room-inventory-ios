@@ -1,6 +1,7 @@
 """Post-controller diagnostics: fake clocks/process ledgers, no native work."""
 from copy import deepcopy
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -213,6 +214,43 @@ class PostfailureTests(unittest.TestCase):
                                           385.65469395900004, 460.99660479199997)
         self.assertEqual(args[args.index("--start") + 1], "1970-01-01 00:18:05+0000")
         self.assertEqual(args[args.index("--end") + 1], "1970-01-01 00:23:06+0000")
+
+    def fractional_command_window(self, *, overrun=False):
+        self.runner.start = 1800.0
+        cap_started = 1900.0000000000007
+        cap_end = cap_started + 300
+        if overrun:
+            cap_end = math.nextafter(cap_end, math.inf)
+        command = self.runner.record["commands"][0]
+        command.update(name="boot-status", start_elapsed=cap_started - self.runner.start,
+                       end_deadline_elapsed=cap_end - self.runner.start, elapsed_seconds=301,
+                       args=["xcrun", "simctl", "bootstatus", "owned-device", "-b"])
+        self.runner.record["cleanup_errors"][0]["command"] = command["name"]
+        self.runner.record["elapsed_seconds"] = 403.0
+        self.now = self.runner.start + 404
+        self.anchor = {"before": self.runner.start, "wall": self.runner.start + 900,
+                       "after": self.runner.start}
+        return command
+
+    def test_fractional_exact_300_second_absolute_window_is_accepted(self):
+        command = self.fractional_command_window()
+        # Subtracting relative offsets rounds this valid interval upwards.
+        self.assertGreater(command["end_deadline_elapsed"] - command["start_elapsed"], 300)
+        original = deepcopy(self.runner.record)
+        row = self.diagnose(outer_end=4000)
+        self.assertTrue(row["complete"])
+        self.assertEqual(row["clock_validation_stage"], "complete")
+        self.assertEqual(row["command_window"]["selected_end_elapsed"], command["end_deadline_elapsed"])
+        self.assertTrue(row["command_window"]["clipped_to_command_deadline"])
+        self.discovery.command.assert_called_once()
+        self.assertEqual(self.runner.record, original)
+
+    def test_one_representable_absolute_tick_over_300_seconds_is_rejected(self):
+        self.fractional_command_window(overrun=True)
+        row = self.diagnose(outer_end=4000)
+        self.assertFalse(row["complete"])
+        self.assertEqual(row["clock_validation_stage"], "source_interval")
+        self.discovery.command.assert_not_called()
 
     def test_seed_cleanup_overrun_keeps_exact_bounded_command_window(self):
         # Retained attempt 2: the original 91.22-second duration stays visible.

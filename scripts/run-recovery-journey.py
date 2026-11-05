@@ -1747,7 +1747,7 @@ class RecoveryRun:
         self.collector.verify_live_seal()
         self.record["offline_collection"] = {"status": "SHUTTING_DOWN", "device": self.device_id,
             "device_root": str(self.device_root), "live_input_seal_sha256": self.collector.seal_sha256}
-        self.command(["xcrun", "simctl", "shutdown", self.device_id], "collection-shutdown", cap=25)
+        self.command(["xcrun", "simctl", "shutdown", self.device_id], "collection-shutdown", cap=90)
         raw = self.command(["xcrun", "simctl", "list", "devices", "--json"], "collection-device-state", cap=24)
         states = [d for values in json.loads(raw)["devices"].values() for d in values
                   if d.get("udid") == self.device_id]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow one bounded Simulator shutdown before Recovery result collection to finish within the existing collection deadline, retaining all state, resource and cleanup checks.
+
 - Give the single Recovery Photos authorization command the same bounded cold-start allowance as app installation, retaining the original startup deadline, resource checks and cleanup reserve.
 - Request name-field focus once after the sheet finishes appearing, and wait for the software keyboard during bounded autofocus setup before native input.
 - Match name-field readiness to the interaction: keep live hit testing for tap-based entry, and use unique native input plus exact echo for the already-autofocused field without an unused coordinate hit query. Retain the keyboard setup and input deadlines.

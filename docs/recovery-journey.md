@@ -1272,6 +1272,19 @@ ordered readers accept only the verified copy, never the original or a live
 container. Each retains its 40-second cap; collection retains 240 seconds and the
 whole run retains 1800 seconds, including shutdown and the final census.
 
+The single normal-path `collection-shutdown` command allows 90 seconds, including
+four seconds for owned-process cleanup. Its 86-second work window is still
+clipped to the original 240-second collection phase and overall work deadline.
+In main run `41979396891`, the UI test passed, but this command had no observed
+exit or pipe EOF before its former 21-second work window ended, despite 292
+returned device-service polls. That evidence does not establish the cause of the
+native delay or show an already-finished command hidden by resource accounting.
+The new allowance adds no retry or deadline renewal: successful group cleanup,
+exact `Shutdown` state, seal revalidation and full resource accounting remain
+required before readers begin. The separate emergency-cleanup shutdown retains
+its 25-second cap and the existing 60-second final-cleanup reserve. The failed
+run remains unaccepted, including its cleanup errors.
+
 After readers and offline artifact verification, the source/captured content and
 original xcresult are checked again and a full uncached resource census is
 mandatory. Final checks are attempted even when a reader fails; a secondary

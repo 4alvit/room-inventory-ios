@@ -325,6 +325,136 @@ class OperationAllowanceTests(base.ControllerCase):
                 self.assertEqual(run.record["commands"], [])
                 self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
 
+    def collection_shutdown_request(self):
+        # Exercise the actual collection-entry builder and its admission gates.
+        run = self.run_fixture()
+        run.bind_output_resource_root()
+        run.prepare_derived_resource_root()
+        run.device_id = "44444444-4444-4444-8444-444444444444"
+        run.device_root = self.devices / run.device_id
+        run.device_root.mkdir()
+        run.bind_device_resource_root()
+        root = run.output / "evidence/collection"
+        copied, original = root / "xcresult/verified.xcresult", run.output / "original.xcresult"
+        copied.mkdir(parents=True)
+        original.mkdir()
+        run.collector = Mock(root=root, xc_copy=copied, xc_original=original,
+                             live_seal={"test": True}, seal_sha256="a" * 64)
+        run.record["phase"] = "collect"
+        run.record["commands"].append({"name": "ui-test", "exit_code": 0, "primary_error": None,
+            "cleanup": {"success": True, "group_state": "absent", "leader_reaped": True}})
+        run.groups = [{"state": {"group_state": "absent", "leader_reaped": True}}]
+        state = json.dumps({"devices": {"runtime": [{"udid": run.device_id, "state": "Shutdown"}]}}).encode()
+        run.command = Mock(side_effect=[b"", state])
+        run.begin_offline_collection(copied)
+        calls = run.command.call_args_list
+        self.assertEqual([c.args[1] for c in calls], ["collection-shutdown", "collection-device-state"])
+        self.assertEqual(calls[1].kwargs["cap"], 24)
+        self.assertEqual(calls[0].args[0], ["xcrun", "simctl", "shutdown", run.device_id])
+        self.assertEqual(run.record["offline_collection"]["shutdown_state"], "Shutdown")
+        self.assertIn("device", run.last_samples[-1])
+        self.assertIn("derived_data", run.last_samples[-1])
+        self.popen.assert_not_called()
+        return calls[0]
+
+    def test_collection_shutdown_allows_slow_exit_with_fresh_full_accounting(self):
+        request = self.collection_shutdown_request()
+        for phase_start, elapsed, work, scan_step in ((700, 700, 80, 2),
+                                                     (700, 900, 30, .25),
+                                                     (1600, 1700, 30, .25)):
+            with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
+                run = w.run
+                w.clock.now = run.start + phase_start
+                run.phase("collect")
+                original = run.phase_end, run.work_end, run.outer_end
+                w.clock.now = start = run.start + elapsed
+                w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + work) or 0)
+                w.cleanup_action = lambda: setattr(w.clock, "now", w.clock.now + .25)
+                def inspect(info, active):
+                    if w.cleaned:
+                        w.clock.now += scan_step
+                    return info
+                w.stat_action = inspect
+                run.command(*request.args, **request.kwargs)
+                record = run.record["commands"][0]
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 90, phase_start + 240, 1740))
+                self.assertGreater(record["child_completed_elapsed"] - elapsed, 21)
+                self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
+                self.assertTrue(record["cleanup"]["success"])
+                self.assertEqual(record["cleanup"]["group_state"], "absent")
+                self.assertTrue(record["cleanup"]["leader_reaped"])
+                self.assertEqual(w.barrier_walked, 17)
+                self.assertEqual(run.last_samples[-1]["device"]["entries"], 17)
+                self.assertEqual(record["post_command_accounting"]["status"], "COMPLETED")
+                self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], original[0] - run.start)
+                if elapsed == 700:
+                    self.assertGreater(record["post_command_accounting"]["end_elapsed"], record["end_deadline_elapsed"])
+                self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_collection_shutdown_rejects_own_collection_and_outer_work_boundaries(self):
+        request = self.collection_shutdown_request()
+        for phase_start, elapsed, work in ((700, 700, 86), (700, 700, 86.5),
+                                           (700, 900, 36), (1600, 1700, 36)):
+            with self.subTest(elapsed=elapsed, work=work), devices.World(module=C) as w:
+                run = w.run
+                w.clock.now = run.start + phase_start
+                run.phase("collect")
+                original = run.phase_end, run.work_end, run.outer_end
+                w.clock.now = start = run.start + elapsed
+                run.guard = lambda force=False: run.tick()
+                w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + work) or 0)
+                with self.assertRaises(C.DeadlineFailure):
+                    run.command(*request.args, **request.kwargs)
+                record = run.record["commands"][0]
+                self.assertIsNone(record["child_completed_elapsed"])
+                self.assertIsNone(record["post_command_accounting"])
+                self.assertTrue(w.cleaned)
+                self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_collection_shutdown_cannot_spawn_with_exhausted_existing_budget(self):
+        request = self.collection_shutdown_request()
+        for phase_start in (700, 1600):
+            for remaining in (7, 4, 0):
+                with self.subTest(phase_start=phase_start, remaining=remaining), devices.World(module=C) as w:
+                    run = w.run
+                    w.clock.now = run.start + phase_start
+                    run.phase("collect")
+                    original = run.phase_end, run.work_end, run.outer_end
+                    w.clock.now = run.phase_end - remaining
+                    run.guard = lambda force=False: run.tick()
+                    with self.assertRaises(C.DeadlineFailure):
+                        run.command(*request.args, **request.kwargs)
+                    self.assertFalse(any(e[0] == "spawn" for e in w.events))
+                    self.assertEqual(run.record["commands"], [])
+                    self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_collection_shutdown_cannot_skip_late_full_accounting(self):
+        request = self.collection_shutdown_request()
+        with devices.World(module=C, actual_guard=True, count=17) as w:
+            run = w.run
+            w.clock.now = run.start + 700
+            run.phase("collect")
+            original = run.phase_end, run.work_end, run.outer_end
+            w.clock.now = start = run.start + 900
+            w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + 30) or 0)
+            w.cleanup_action = lambda: setattr(w.clock, "now", w.clock.now + .25)
+            def inspect(info, active):
+                if w.cleaned:
+                    w.clock.now += 1
+                return info
+            w.stat_action = inspect
+            with self.assertRaises(C.DeadlineFailure):
+                run.command(*request.args, **request.kwargs)
+            record = run.record["commands"][0]
+            self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
+            self.assertEqual(record["post_command_accounting"]["status"], "FAILED")
+            self.assertEqual(record["device_service"]["terminal_barrier"], {"reached": True, "completed": False})
+            self.assertTrue(w.cleaned)
+            self.assertEqual(sum(e[0] == "spawn" for e in w.events), 1)
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
     def cleanup_requests(self):
         run = self.run_fixture(output=False)
         run.device_id = "44444444-4444-4444-8444-444444444444"

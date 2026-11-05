@@ -21,6 +21,7 @@ struct NameEntrySheet: View {
     @State private var saving = false
     @State private var errorMessage: String?
     @State private var discarding = false
+    @State private var initialFocusRequested = false
     @FocusState private var focused: Bool
 
     init(title: String, placeholder: String, explanation: String, initialName: String = "", actionTitle: String = UIL10n.text("Add"), save: @escaping (String) async -> Bool) {
@@ -59,7 +60,15 @@ struct NameEntrySheet: View {
                 Button(UIL10n.text("Discard changes"), role: .destructive) { dismiss() }
                 Button(UIL10n.text("Keep editing"), role: .cancel) {}
             }
-            .task { focused = true }
+        }
+        .background {
+            NameEntryAppearance {
+                guard !initialFocusRequested else { return }
+                initialFocusRequested = true
+                focused = true
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
     }
     private func submit() {
@@ -73,6 +82,53 @@ struct NameEntrySheet: View {
             }
             saving = false
         }
+    }
+}
+
+/// Request focus after the sheet's presentation, once its field is onscreen.
+/// SwiftUI's onAppear/task can run before the presentation has completed.
+@MainActor
+private struct NameEntryAppearance: UIViewControllerRepresentable {
+    let onAppear: () -> Void
+
+    @MainActor
+    final class Coordinator {
+        var onAppear: (() -> Void)?
+        init(onAppear: @escaping () -> Void) { self.onAppear = onAppear }
+    }
+
+    final class Controller: UIViewController {
+        weak var coordinator: Coordinator?
+
+        override func loadView() {
+            view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard view.window != nil, !isBeingDismissed else { return }
+            coordinator?.onAppear?()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onAppear: onAppear) }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.coordinator = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        context.coordinator.onAppear = onAppear
+    }
+
+    static func dismantleUIViewController(_ controller: Controller, coordinator: Coordinator) {
+        coordinator.onAppear = nil
+        controller.coordinator = nil
     }
 }
 

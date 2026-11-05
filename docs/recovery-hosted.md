@@ -226,6 +226,15 @@ the bounded command and successful cleanup records. Missing or contradictory
 readiness evidence prevents a `COMPLETE` packet. Offline validation checks the
 recorded mount observation; it cannot inspect a mount on a torn-down runner.
 
+The receipt stores an absolute monotonic deadline. Retention checks
+`start < deadline <= start + 30`, matching the producer's bound without a
+tolerance. Subtracting the timestamps can round a valid interval above 30:
+the recorded start `234.230182041` and deadline `264.23018204100003` caused
+run `41930311878` to reject retention after its UI test and artifact checks
+passed. Regression tests cover that receipt, a shorter preflight window and
+rejection of a deadline one representable value beyond the bound. The change
+does not extend the readiness window or relax command, identity or cleanup checks.
+
 This is a readiness mitigation and additional evidence, not an assertion that a
 runtime mount race caused a particular failure. For example, run `41333130962`
 built successfully but timed out before UI in silent `bootstatus`; later cleanup

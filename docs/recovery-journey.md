@@ -364,7 +364,7 @@ later result-lifecycle policy is described under storage admission below.
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only
-model and price with one `XCUICoordinate.tap()` at each verified switch center. The production
+model and price with one left-to-right `XCUICoordinate` drag inside each verified switch. The production
 row uses a separate visible localized label and the same bound native Toggle
 with `labelsHidden()`. The Toggle retains its original accessibility label;
 the visible Text uses `accessibilityHidden(true)`. Raw snapshot Text nodes do not
@@ -374,14 +374,28 @@ In this fixed English fixture, the native switch must have a narrow 40–80-poin
 frame. Its entire frame must lie inside the containing OCR Form's visible bounds
 with a two-point inset, below its navigation bar, and must not intersect exposed
 navigation, tab-bar, keyboard or toolbar-button frames. An alert or
-unidentifiable form fails before tapping. A switch-relative normalized coordinate
-`(0.5, 0.5)` must resolve to the admitted center inside that frame, within the
-same readiness window. A changed coordinate fails before the one tap. Coordinates
+unidentifiable form fails before the gesture. Switch-relative normalized coordinates
+`(0.25, 0.5)` and `(0.75, 0.5)` must resolve to the admitted endpoints inside that frame,
+within the same readiness window. A changed coordinate fails before the one drag.
+The gesture holds for 0.1 seconds, moves at XCTest's `.slow` velocity, then holds
+for 0.1 seconds before release. Both endpoints and the intervening straight path
+stay inside the verified switch frame. Coordinates
 remain dynamic; this check is admission evidence, not an atomic guarantee that
 the layout cannot move before event delivery.
-The test accepts the exact post-tap value `1` only within the original ten-second
+The test accepts the exact post-gesture value `1` only within the original ten-second
 observation window, with no toggle retry. The later four-field observation, `Apply 2` check and
 selective-update artifact checks remain mandatory.
+
+In main run `41915887192`, attempt 1, the synthesized event recorded one 50 ms
+center tap at `(339.5, 366)` for the model switch at `(309, 352, 61, 28)`.
+Ten subsequent application snapshot queries completed without confirming selection;
+the last recorded value was `0`, and pre-activation and failure images were
+identical. The legacy event snapshot contains only the
+application root, so it does not prove dispatch to the switch's handler. The
+record does not support coordinate drift or a slow selection query as the cause.
+The single directed drag replaces that short tap; it still requires a fresh
+native run to prove selection and the complete recovery journey. No state is
+set through a test hook, and no second gesture or longer timeout is allowed.
 
 In run `41800293919`, attempt 2, the native element tap used the AX visible point
 `(310, 353)` for the model switch at `(309, 352, 61, 28)`, rather than its center
@@ -411,11 +425,11 @@ The old whole-container check rejected the switch before tapping it. Navigation
 bars, tab bars and keyboards still use their full frames; alerts still block the
 action. One immutable application snapshot supplies the form, switch and chrome
 geometry, and a bounded `ROOM_OCR_TAP_GEOMETRY` record reports those inputs,
-`activation=verified_switch_center`, `checked_region=entire_switch_frame`, and
+`activation=verified_switch_drag`, both drag endpoints, `checked_region=entire_switch_frame`, and
 individual checks before the single activation. Readiness uses that same
 snapshot for the unique switch, enabled state and value `0`, followed by one
 live hittability check. A single ten-second monotonic window covers readiness
-and geometry through admission of the tap; a late observation cannot authorize
+and geometry through admission of the gesture; a late observation cannot authorize
 an action. This avoids four independent remote property resolutions consuming
 the entire window. The exact post-activation value `1` remains required.
 
@@ -424,7 +438,7 @@ waiter, without the predicate expectation's initial polling delay. An unready
 probe schedules one later probe only after returning; probes cannot overlap.
 Leaving the waiter disables pending callbacks and invalidates the timer. The
 same ten-second window still covers fresh state, live hit testing, geometry and
-tap admission. Keeping the probe inside the waiter preserves
+gesture admission. Keeping the probe inside the waiter preserves
 [XCTest's nested query interruption](https://developer.apple.com/documentation/xctest/xctwaiter/result/interrupted);
 this is not a promise of termination at exactly 10.000
 seconds, because XCTest's watchdog has its own scheduling grace.
@@ -437,7 +451,7 @@ completed negative hit test. Starting the fresh probe immediately removes the
 measured polling delay; it does not identify or eliminate the cause of slow
 native queries. Expired observations still fail without a tap or a retry.
 
-After the single tap returns, a separate ten-second monotonic window starts with
+After the single gesture returns, a separate ten-second monotonic window starts with
 an immediate application snapshot. State is read from exactly one switch with the
 expected identifier in that immutable snapshot; absent, wrong-type, wrong-value
 or duplicate targets cannot establish selection. Snapshot traversal is bounded
@@ -477,10 +491,16 @@ assertions remain required; no export service is invoked directly.
 
 ### Autofocused name entry
 
-New `NameEntrySheet` presentations focus their empty `entry.name` field in the
-app. Recovery uses `AutofocusedNameEntry` without a second field tap. One
+New `NameEntrySheet` presentations request initial focus for their
+`entry.name` field from a noninteractive UIKit appearance observer at the sheet
+root. Its `viewDidAppear` callback assigns the field's `FocusState` after the
+presentation, while a sheet-owned state flag permits only one request per
+presentation, including if SwiftUI recreates the observer. The observer requires
+an attached window, rejects dismissal, and clears its callback on dismantle.
+It does not schedule delayed requests or repeat focus when an alert returns.
+Recovery uses `AutofocusedNameEntry` without a second field tap. One
 30-second monotonic setup window covers the exact keyboard introduction and a
-unique enabled and hittable text field. Only timely readiness can start the
+unique enabled text field with exactly one software keyboard. Only timely readiness can start the
 separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
@@ -494,7 +514,7 @@ explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
 JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
 Before starting that input window, the autofocus setup rechecks the exact
-introduction owner after the field-readiness queries and optional evidence.
+introduction owner after the field/keyboard-readiness queries and optional evidence.
 An introduction that appeared during those queries uses the same guarded
 Continue action immediately when its complete observation is recognized, without
 waiting to resolve that owner a second time. A tap still returns control to the
@@ -512,7 +532,8 @@ they do not renew it. `waitForField` omits the field tap. The helper's explicit
 setup/input mode is used for AutofocusedNameEntry; Localization retains its
 existing shared ten-second `waitAndTapField` path and field tap. A late query or
 input cannot authorize Save; there is no generic Continue action, field-tap
-fallback, retyping or keyboard-visibility requirement. Generic item-editor
+fallback or retyping. Keyboard presence is a setup prerequisite, not proof that
+the intended field has focus: native input and its exact echo remain required. Generic item-editor
 fields still use their existing tap-based input.
 
 The autofocus adapter resolves the recognized owner and Continue button with
@@ -524,7 +545,36 @@ from one direct application snapshot, traversing at most 1,024 nodes. It counts
 all matching typed fields and uses enabled state and placeholder only from the
 sole match in that same snapshot. Each capture clears the prior field proof;
 missing, duplicate, oversized, late or throwing captures cannot reuse it. The
-live `firstMatch.isHittable` check and native input remain separate operations.
+autofocus path omits a coordinate hit test because it never taps this field;
+native `typeText` requires keyboard focus and a missing-focus error remains a
+failure. Localization's tap-based path still requires live hittability. The
+initial value, single native input and exact echo use the exact `entry.name`
+identifier predicate with unique `element` resolution, so a missing or ambiguous
+live field fails instead of selecting its first match. These operations retain
+the separate ten-second input deadline. In hosted run `41941238836`, the unused
+coordinate hit query exceeded the 30-second setup window after the introduction
+was dismissed and the snapshot had established one enabled field; no input was
+attempted. Omitting that query does not establish a native performance guarantee.
+In hosted run `41952876149`, setup observed no introduction and one enabled
+field, but native input failed because neither that field nor a descendant had
+keyboard focus. The later failure screenshot and accessibility tree show an
+empty name field and no keyboard. Those later observations do not establish
+when focus was lost or why the original focus request failed. A subsequent
+default-focus region followed Apple's [sheet example](https://developer.apple.com/videos/play/wwdc2023/10162/),
+but hosted run `41959681684` stopped before input on the first home sheet:
+setup expired after 21 keyboard queries, with the last returned count zero and
+no input attempted. That change also added
+the software-keyboard prerequisite, so comparison with the earlier passing
+Ordinary run does not isolate the cause or establish the field's responder state.
+The appearance observer now makes an explicit focus request at UIKit's
+[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller),
+instead of relying on a default-focus preference or a pre-presentation task.
+SwiftUI manages the observer's containment and layout; it neither accesses
+private text-field internals nor changes the field's value.
+The setup prerequisite now prevents input while the keyboard is absent; missing,
+duplicate, late or throwing keyboard observations cannot start or renew input.
+Localization's tap-based path does not require an existing keyboard before its
+field tap. The complete hosted scenario must verify the lifecycle change.
 The keyboard owner still uses its separate query because an application snapshot
 can omit that sibling. These are sequential observations, not an atomic UI
 transaction. In attempt 2 of hosted run `41733453608`,
@@ -1104,7 +1154,22 @@ accounting). Both remain single attempts inside the effective 660-second startup
 This finite hosted cold-start allowance does not predict installation latency or
 turn prior timed-out runs into accepted evidence.
 
-This finite allowance addresses the observed failure before app installation,
+The single `simctl privacy ... grant photos` command for the owned test runner
+also allows 90 seconds, including the same four-second cleanup reserve, and is
+clipped to that original 660-second startup boundary. In run `41963934642`,
+the previous 30-second cap left only 26 seconds for child work and live resource
+accounting. The command still had no observed exit after 68 cooperative polls;
+the last completed service checkpoint was 0.311 seconds before that work
+deadline. The deadline was raised during a DerivedData walk, but these polls
+do not support a claim that an already-finished command was hidden by the walk.
+The reason for the native command's latency remains unknown. The new allowance
+matches installation; it does not add a retry, skip accounting, extend the
+startup pool or treat that failed run as accepted. Timely exit, both pipe EOFs,
+owned-group cleanup, fresh complete resource accounting and the later PhotoKit
+authorization/content checks remain required. No XCTest case ran in that failed
+attempt (`test_count == 0`).
+
+The 660-second startup allowance addresses the observed failure before app installation,
 where successful boot/bootstatus and full resource accounting consumed nearly all
 of the earlier 180-second device phase. It does not guarantee filesystem or
 simulator latency, collector completion, XCTest success or simulator shutdown;

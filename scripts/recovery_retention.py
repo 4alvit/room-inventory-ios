@@ -579,7 +579,9 @@ def validate_runtime_readiness(work, context, envelope, files):
         return type(value) in (int, float) and math.isfinite(value)
 
     start, end = receipt.get("start"), receipt.get("deadline")
-    require(number(start) and number(end) and 0 < end - start <= 30,
+    # Match the producer's absolute bound. Subtracting a fractional start can
+    # round a correctly constructed 30-second window slightly above 30.
+    require(number(start) and number(end) and start < end <= start + 30,
             "runtime readiness deadline differs")
     previous = 0
     for index, (observed, command) in enumerate(zip(observations, command_rows), 1):

@@ -1695,7 +1695,7 @@ class RecoveryRun:
         self.command(["xcrun", "simctl", "bootstatus", self.device_id, "-b"], "boot-status", cap=300)
         for app, label in [(self.app, "app"), (self.runner, "runner")]:
             self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=90)
-        self.command(["xcrun", "simctl", "privacy", self.device_id, "grant", "photos", RUNNER_BUNDLE], "authorize-runner-photos", cap=30)
+        self.command(["xcrun", "simctl", "privacy", self.device_id, "grant", "photos", RUNNER_BUNDLE], "authorize-runner-photos", cap=90)
         app_container = self.app_container(BUNDLE, "app-container")
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")
         config = {**self.ids, "app_container": app_container, "runner_container": runner_container,

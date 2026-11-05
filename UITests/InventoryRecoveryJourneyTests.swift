@@ -413,9 +413,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         // The visible label is separate from the native switch, whose frame
         // must stay narrow in this fixed English fixture. Use its verified
-        // center: XCTest can choose an unresponsive point at the rounded edge.
-        // Never retry a toggle: a second tap can undo a delayed
-        // first activation and hide a real interaction failure.
+        // track with one left-to-right drag. Even a recorded center tap
+        // has left this native switch off on the hosted runtime.
+        // Never retry: a second gesture could hide an interaction failure.
         let (snapshot, nodes, switches, navigation) = observation
         try ledger.require("OCR \(id) visible form is identifiable", switches.count == 1
             && switches.first?.form != nil && navigation.count == 1)
@@ -424,6 +424,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         let frame = target.element.frame
         let center = CGPoint(x: frame.midX, y: frame.midY)
+        let dragStart = CGPoint(x: frame.minX + frame.width * 0.25, y: frame.midY)
+        let dragEnd = CGPoint(x: frame.minX + frame.width * 0.75, y: frame.midY)
         let viewport = form.frame.intersection(snapshot.frame).insetBy(dx: 2, dy: 2)
         let chrome = nodes.filter {
             [.navigationBar, .tabBar, .keyboard].contains($0.element.elementType)
@@ -446,8 +448,9 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                       "no_alert": !nodes.contains { $0.element.elementType == .alert }]
         func rectangle(_ frame: CGRect) -> [CGFloat] { [frame.minX, frame.minY, frame.width, frame.height] }
         let geometry: [String: Any] = ["field": id, "basis": "single_application_snapshot",
-            "activation": "verified_switch_center", "checked_region": "entire_switch_frame",
-            "center": [center.x, center.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
+            "activation": "verified_switch_drag", "checked_region": "entire_switch_frame",
+            "center": [center.x, center.y], "drag_start": [dragStart.x, dragStart.y],
+            "drag_end": [dragEnd.x, dragEnd.y], "switch": rectangle(frame), "form_viewport": rectangle(viewport),
             "navigation": rectangle(navigation.element.frame), "checks": checks,
             "chrome": chrome.map { ["type": $0.element.elementType.rawValue, "frame": rectangle($0.element.frame)] },
             "toolbar_containers": toolbars.map { rectangle($0.element.frame) }]
@@ -456,14 +459,18 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
-        let activation = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let point = try window.perform { activation.screenPoint }
-        guard point == center, frame.contains(point) else {
+        let start = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
+        let end = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        let startPoint = try window.perform { start.screenPoint }
+        let endPoint = try window.perform { end.screenPoint }
+        guard startPoint == dragStart, endPoint == dragEnd,
+              frame.contains(startPoint), frame.contains(endPoint) else {
             throw RecoveryJourneyFailure.assertion("OCR \(id) activation geometry",
-                "resolved center=\(point); admitted center=\(center)", "unchanged center inside the verified switch")
+                "resolved start=\(startPoint), end=\(endPoint); admitted start=\(dragStart), end=\(dragEnd)",
+                "unchanged drag endpoints inside the verified switch")
         }
-        _ = try window.remaining() // Geometry and evidence cannot authorize a late tap.
-        activation.tap()
+        _ = try window.remaining() // Geometry and evidence cannot authorize a late gesture.
+        start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
         let selectionWindow = RecoveryOCRSelectionWindow()
         var selectionObservation: RecoveryOCRSelectionWindow.Observation?
         var selectionError: Error?

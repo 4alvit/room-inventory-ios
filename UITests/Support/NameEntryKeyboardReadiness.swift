@@ -81,6 +81,7 @@ final class NameEntryKeyboardReadiness {
     private(set) var entryNameCount: Int?
     private(set) var fieldEnabled: Bool?
     private(set) var fieldHittable: Bool?
+    private(set) var keyboardCount: Int?
     private(set) var fieldTapAttempted = false
     private var fieldReady = false
     private var afterEvidenceRecorded = false
@@ -150,6 +151,7 @@ final class NameEntryKeyboardReadiness {
               entryNameCount: () throws -> Int,
               fieldEnabled: () throws -> Bool,
               fieldHittable: () throws -> Bool,
+              keyboardCount: () throws -> Int = { 0 },
               evidence: (EvidenceStage) throws -> Void = { _ in }) throws -> Bool {
         if let terminalError { throw terminalError }
         guard inputWindow == nil, !polling else { throw Failure.notReady }
@@ -159,6 +161,7 @@ final class NameEntryKeyboardReadiness {
         self.entryNameCount = nil
         self.fieldEnabled = nil
         self.fieldHittable = nil
+        self.keyboardCount = nil
         let observation = try perform(observe)
         self.observation = observation
         sawIntroduction = sawIntroduction || observation.introductionCount > 0
@@ -175,8 +178,21 @@ final class NameEntryKeyboardReadiness {
         guard self.entryNameCount == 1 else { return false }
         self.fieldEnabled = try perform(fieldEnabled)
         guard self.fieldEnabled == true else { return false }
-        self.fieldHittable = try perform(fieldHittable)
-        guard self.fieldHittable == true else { return false }
+        if timing == .keyboardSetupThenInput {
+            // An enabled field can precede keyboard presentation. Keep that
+            // initialization inside setup instead of spending input's deadline
+            // in native typeText retries. Presence is not proof of target focus;
+            // native input and its exact echo must still establish that.
+            self.keyboardCount = try perform(keyboardCount)
+            guard self.keyboardCount == 1 else { return false }
+        }
+        // Only the shared path taps the field. Autofocused input needs keyboard
+        // focus, which native typeText enforces; a coordinate hit test does not
+        // establish that focus and can stall while the cold keyboard settles.
+        if timing == .sharedTenSeconds {
+            self.fieldHittable = try perform(fieldHittable)
+            guard self.fieldHittable == true else { return false }
+        }
         if try dismissedIntroduction && !afterEvidenceRecorded && window.remaining() > 2 {
             try perform { try evidence(.dismissedAndFieldReady) }
             afterEvidenceRecorded = true
@@ -234,6 +250,7 @@ final class NameEntryKeyboardReadiness {
                       entryNameCount: @escaping () throws -> Int,
                       fieldEnabled: @escaping () throws -> Bool,
                       fieldHittable: @escaping () throws -> Bool,
+                      keyboardCount: @escaping () throws -> Int = { 0 },
                       evidence: @escaping (EvidenceStage) throws -> Void) throws {
         if let terminalError { throw terminalError }
         guard !setupWaitStarted, !polling else { throw Failure.notReady }
@@ -242,7 +259,7 @@ final class NameEntryKeyboardReadiness {
             try waitUntil {
                 try self.poll(observe: observe, continueHittable: continueHittable,
                     tapContinue: tapContinue, entryNameCount: entryNameCount, fieldEnabled: fieldEnabled,
-                    fieldHittable: fieldHittable, evidence: evidence)
+                    fieldHittable: fieldHittable, keyboardCount: keyboardCount, evidence: evidence)
             }
             guard fieldReady else { throw Failure.notReady }
             if timing == .keyboardSetupThenInput {
@@ -375,6 +392,7 @@ final class NameEntryKeyboardReadiness {
             return value.isFinite && value >= 0 ? value as Any : NSNull()
         }
         return ["timing_mode": timing == .keyboardSetupThenInput ? "keyboard_setup_then_input" : "shared_ten_seconds",
+                "keyboard_count": keyboardCount.map { $0 as Any } ?? NSNull(),
                 "active_phase": inputWindow != nil ? "input" : "setup",
                 "setup_allowance_seconds": timing == .keyboardSetupThenInput ? 30 : 10,
                 "input_allowance_seconds": 10,

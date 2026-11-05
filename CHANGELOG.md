@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Handle the exact keyboard introduction if it appears while waiting for a typed name, retaining one Continue action, one native input and the original input deadline.
+
 - Select Recovery's Save to Files action through its exact system cell, with unique, enabled and hittable checks plus one tap inside a shared 30-second window; avoid the broad duplicate-label query and reject late results.
 
 - Allow one bounded Simulator shutdown before Recovery result collection to finish within the existing collection deadline, retaining all state, resource and cleanup checks.

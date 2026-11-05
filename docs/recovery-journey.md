@@ -505,9 +505,14 @@ separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
 equal to the requested name. After the one input action, immediate serialized
-read-only probes allow nil or partial values to settle within the remainder of
-the input window. A late exact value or a query error still fails; the wait does
-not repeat input or renew its deadline. The existing exact ledger assertion
+probes allow nil or partial values to settle within the remainder of the input
+window. They also observe the same exact keyboard introduction: if it appears
+late, the existing per-test Continue allowance can dismiss it once. A subsequent
+observation must establish its absence before reading and accepting the exact
+typed value. The echo phase does not capture optional screenshots; observations
+and any Continue action share the original ten-second input deadline. A late
+exact value or a query error still fails; the wait does not repeat input or renew
+its deadline. The existing exact ledger assertion
 runs only after a timely match. On failure, `ROOM_NAME_ENTRY_ECHO_V1` records
 the stage, timely observation count and last mismatching synthetic name (or
 explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
@@ -616,6 +621,20 @@ on successive sheets using this same helper, then relaunches the same isolated
 test namespace and verifies all three exact names. This targets the redundant
 tap preceding a local empty room-name failure; it does not establish an OS-level
 cause for the observed AutoFill menu or discarded input.
+
+In hosted run `42000686878`, setup completed in 2.732 seconds with one keyboard.
+Native input returned normally, but six timely echo observations did not match;
+the last recorded mismatch was the `Home name` placeholder. The next native
+query overran the ten-second input window. The failure screenshot and later
+accessibility snapshot show the complete requested name, a focused field and
+the exact keyboard introduction with Continue. These later captures establish
+neither when the name became observable nor when the introduction appeared.
+They do show a reachable state that the former echo loop did not handle: it
+only read the field value after setup had finished. Reusing the exact
+introduction handler during that loop preserves the deadline, single-input
+rule and untapped autofocus coverage. It does not establish that the
+introduction caused the earlier mismatches or that all hosted delays are
+resolved; the complete scenario still requires a fresh successful run.
 
 ### Dismissal observations
 

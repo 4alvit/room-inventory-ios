@@ -565,11 +565,31 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             enabled: { try shareAction.perform { saveToFiles.element }.isEnabled },
             hittable: { try shareAction.perform { saveToFiles.element }.isHittable },
             tap: { try shareAction.perform { saveToFiles.element }.tap() })
-        let saveButtons = app.buttons.matching(identifier: "Save")
-        let saveButton = saveButtons.element
-        try ledger.require("Files save dialog presented", saveButton.waitForExistence(timeout: 10))
+        // Let the existing Files presentation window observe a positive
+        // navigation state before querying the save action. The remote picker
+        // can appear after a short, label-only existence wait has already ended.
         try enterFilesFolder(folder, create: createFolder, app: app)
-        let filename = app.textFields.firstMatch
+        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
+        let folders = pickers.otherElements.matching(identifier:
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: \(folder)")
+        let bars = folders.navigationBars.matching(identifier:
+            FilesNavigationReadiness.navigationBarIdentifier)
+        let saveButtons = bars.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "DOCPicker.actionButton", "Save"))
+        let dialog = FilesNavigationReadiness(timeout: 10)
+        let saveReady = try dialog.waitForTargetFolder(titleCount: {
+            for query in [pickers, folders, bars, saveButtons] {
+                let count = try dialog.perform { query.count }
+                guard count == 0 || count == 1 else {
+                    throw FilesNavigationReadiness.Failure.invalidSelectionCount
+                }
+                guard count == 1 else { return 0 }
+            }
+            return 1
+        }, enabled: { try dialog.perform { saveButtons.element }.isEnabled },
+           hittable: { try dialog.perform { saveButtons.element }.isHittable })
+        try ledger.require("Files save dialog presented", saveReady)
+        let filename = pickers.textFields.matching(identifier: "DOCPicker.filenameTextField").element
         try tap(filename, app: app)
         let existingName = filename.value as? String ?? ""
         try ledger.require("export filename editable", !existingName.isEmpty)
@@ -586,7 +606,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         guard let homeName = ledger.expected["home_name"] else {
             throw RecoveryJourneyFailure.assertion("export return home", "missing", "run-bound home")
         }
-        try tap(saveButton, app: app)
+        // Editing and capture can change the remote hierarchy. Resolve and
+        // admit the exact Save action again, then tap once in that same window.
+        let saving = FilesNavigationReadiness(timeout: 10)
+        try saving.waitAndTapFile(pickerCount: { pickers.count }, folderCount: { folders.count },
+            fileViewCount: { bars.count }, fileCount: { saveButtons.count },
+            enabled: { try saving.perform { saveButtons.element }.isEnabled },
+            hittable: { try saving.perform { saveButtons.element }.isHittable },
+            tap: { try saving.perform { saveButtons.element }.tap() })
         let returning = ExportReturnReadiness(homeName: homeName)
         var returnSucceeded = false
         do {

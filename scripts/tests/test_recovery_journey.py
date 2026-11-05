@@ -430,6 +430,34 @@ class RecoveryJourneyVerifierTests(unittest.TestCase):
                 self.save_json("ui-evidence.json", ui)
                 self.reject("UI observations|receipt picker")
 
+    def test_failed_files_presentation_rejects_valid_saved_folder_and_name(self):
+        for name in ("source_zip_saved", "backup_saved", "recovered_zip_saved"):
+            with self.subTest(step=name):
+                ui = copy.deepcopy(self.ui)
+                event = next(event for event in ui["events"] if event["name"] == name)
+                # The bytes, recorded destination and all other checkpoints
+                # remain valid; a failed UI assertion must still reject them.
+                event["assertions"].append({
+                    "name": "Files save dialog presented", "actual": "false",
+                    "expected": "true", "passed": False,
+                })
+                self.save_json("ui-evidence.json", ui)
+                self.reject("UI assertion failed or inconsistent")
+
+    def test_presented_files_dialog_does_not_authorize_wrong_save_destination(self):
+        for name in ("source_zip_saved", "backup_saved", "recovered_zip_saved"):
+            for field in ("folder", "save_name"):
+                with self.subTest(step=name, field=field):
+                    ui = copy.deepcopy(self.ui)
+                    event = next(event for event in ui["events"] if event["name"] == name)
+                    event["assertions"].append({
+                        "name": "Files save dialog presented", "actual": "true",
+                        "expected": "true", "passed": True,
+                    })
+                    event["observations"][field] = event["observations"][field].replace(JOURNEY, SOURCE)
+                    self.save_json("ui-evidence.json", ui)
+                    self.reject("Required UI observations differ at " + name)
+
     def test_reported_issues_reject_otherwise_passed_ui_evidence(self):
         self.ui["issues"] = ["a recorded XCTest failure"]
         self.save_json("ui-evidence.json", self.ui)

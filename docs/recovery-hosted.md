@@ -440,6 +440,18 @@ Snapshot APIs do not expose hit testing: `hittable: null` is
 explicitly unknown, not false, and cannot establish a non-hittable failure.
 The real tap and readiness assertions still use live UI controls.
 
+Export saving enters the existing 30-second Files presentation/navigation
+window before checking the Save control. A separate early lookup by the label
+`Save` must not prevent that navigation window from observing the remote picker.
+Once the run's folder is open, the test requires unique picker, local-folder,
+navigation-bar and `DOCPicker.actionButton`/`Save` scopes, with current enabled
+and hittable observations within ten seconds. Filename editing uses the exact
+`DOCPicker.filenameTextField` identifier. After editing and evidence capture,
+another ten-second window resolves those Save scopes again and admits one tap;
+late results or ambiguous scopes fail. A failure screenshot taken after a
+deadline can establish the later visible state, but not when the picker appeared
+or whether it was interactive during the earlier wait.
+
 If the original result reaches its active 512 MiB allowance or reaches the
 192 MiB final-result bound, the small capture can still be retained in a
 `PARTIAL` archive. Only after its

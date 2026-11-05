@@ -552,9 +552,19 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         try bridge.synchronize(role: role, phase: .before, test: self)
         try selectExport(action, app: app)
-        let saveToFiles = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Save to Files")).firstMatch
-        if !saveToFiles.waitForExistence(timeout: 10) { try reveal(saveToFiles, app: app) }
-        try tap(saveToFiles, app: app, scroll: true)
+        // The share action is a cell whose child text repeats its label. Match
+        // the typed action, not every element in the remote share hierarchy.
+        let saveToFiles = app.cells.matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
+        let shareAction = FilesNavigationReadiness(timeout: 30)
+        // As in the standalone RC runner, this action has no Files navigation
+        // scopes yet. Check its unique count and live readiness, then tap once
+        // inside the same waiter. A late native query cannot authorize a tap.
+        try shareAction.waitAndTapFile(pickerCount: { 1 }, folderCount: { 1 }, fileViewCount: { 1 },
+            fileCount: { saveToFiles.count },
+            enabled: { try shareAction.perform { saveToFiles.element }.isEnabled },
+            hittable: { try shareAction.perform { saveToFiles.element }.isHittable },
+            tap: { try shareAction.perform { saveToFiles.element }.tap() })
         let saveButtons = app.buttons.matching(identifier: "Save")
         let saveButton = saveButtons.element
         try ledger.require("Files save dialog presented", saveButton.waitForExistence(timeout: 10))

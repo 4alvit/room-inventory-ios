@@ -230,11 +230,16 @@ class RuntimeObservationTests(fixtures.ControllerCase):
         run = self.command_run()
         original = C.DeadlineFailure("after pipe read")
         run.resource_size = Mock(side_effect=original)
+        diagnostic_elapsed = run.diagnostic_elapsed
+        def secondary_after_primary(*args, **kwargs):
+            if run.record["commands"][-1]["primary_error"] is not None:
+                raise KeyboardInterrupt("secondary")
+            return diagnostic_elapsed(*args, **kwargs)
         with self.fake_child(active=True) as child:
             self.preserve_exit(child)
             child.selector.select.return_value = [(SimpleNamespace(fileobj=child.process.stdout, data=0), 1)]
             with patch.object(C.os, "read", return_value=b"payload") as read, \
-                    patch.object(run, "diagnostic_elapsed", side_effect=KeyboardInterrupt("secondary")):
+                    patch.object(run, "diagnostic_elapsed", side_effect=secondary_after_primary):
                 with self.assertRaises(C.DeadlineFailure) as caught:
                     run.command(["injected-child"], "fake", cap=30)
             self.assertIs(caught.exception, original)

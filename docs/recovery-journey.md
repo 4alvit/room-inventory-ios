@@ -505,9 +505,14 @@ separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
 equal to the requested name. After the one input action, immediate serialized
-read-only probes allow nil or partial values to settle within the remainder of
-the input window. A late exact value or a query error still fails; the wait does
-not repeat input or renew its deadline. The existing exact ledger assertion
+probes allow nil or partial values to settle within the remainder of the input
+window. They also observe the same exact keyboard introduction: if it appears
+late, the existing per-test Continue allowance can dismiss it once. A subsequent
+observation must establish its absence before reading and accepting the exact
+typed value. The echo phase does not capture optional screenshots; observations
+and any Continue action share the original ten-second input deadline. A late
+exact value or a query error still fails; the wait does not repeat input or renew
+its deadline. The existing exact ledger assertion
 runs only after a timely match. On failure, `ROOM_NAME_ENTRY_ECHO_V1` records
 the stage, timely observation count and last mismatching synthetic name (or
 explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
@@ -617,6 +622,20 @@ test namespace and verifies all three exact names. This targets the redundant
 tap preceding a local empty room-name failure; it does not establish an OS-level
 cause for the observed AutoFill menu or discarded input.
 
+In hosted run `42000686878`, setup completed in 2.732 seconds with one keyboard.
+Native input returned normally, but six timely echo observations did not match;
+the last recorded mismatch was the `Home name` placeholder. The next native
+query overran the ten-second input window. The failure screenshot and later
+accessibility snapshot show the complete requested name, a focused field and
+the exact keyboard introduction with Continue. These later captures establish
+neither when the name became observable nor when the introduction appeared.
+They do show a reachable state that the former echo loop did not handle: it
+only read the field value after setup had finished. Reusing the exact
+introduction handler during that loop preserves the deadline, single-input
+rule and untapped autofocus coverage. It does not establish that the
+introduction caused the earlier mismatches or that all hosted delays are
+resolved; the complete scenario still requires a fresh successful run.
+
 ### Dismissal observations
 
 `ElementDismissalReadiness` observes the count of the original, typed UI query
@@ -717,6 +736,26 @@ late observations cannot establish readiness. The exact folder title and open
 state remain required before saving.
 The earlier alert-based creation path remains available when that inline
 editor is absent; neither path creates directories through a filesystem API.
+
+Before Files opens, Recovery selects the share sheet's exact `Cell` with
+identifier `actionGroupCell` and label `Save to Files`. Its nested static text
+has the same label, so an all-element label query does not identify only the
+action. The existing `FilesNavigationReadiness` selection path, also used by
+the standalone RC runner, checks zero/one/multiple matches, enabled state and
+native hittability, then performs one direct tap in the same active waiter.
+This share transition has one 30-second monotonic allowance, including the tap;
+there is no second generic wait or scrolling fallback. In-flight native queries
+cannot be preempted by this helper, but late results cannot authorize a tap.
+
+In PR run `41988596028`, the former all-element `firstMatch` query timed out
+before any Save to Files tap. The teardown screenshot and typed accessibility
+attachment later showed the action visible in `activityCollectionView`, with
+the duplicate-label static text beneath it. They do not establish when the
+action first became ready or prove that query breadth caused the native delay.
+An earlier successful trace also exceeded the nominal ten-second existence
+wait before tapping the cell. The combined allowance replaces that wait plus
+subsequent unshared checks; it does not claim to cure native service latency.
+Current hosted execution must still verify all three exports and their bytes.
 
 After one real Save, return from the external Files service has a separate
 30-second monotonic allowance. Each serial probe classifies one immutable app
@@ -1127,8 +1166,8 @@ under the armed original `min(phase_end, work_end, outer_end)`, followed by a
 deadline tick, before command success or another command. The old command timer
 is disarmed after bounded cleanup and before the phase-bound arm; a pending old
 alarm still fails closed. No phase is reset and no cleanup reserve is borrowed.
-Preflight, pre-Popen and live guards are unchanged. This moves only terminal
-accounting out of the child-work allowance; all resource caps, allocation metrics,
+This terminal transition moves completed-child accounting out of the child-work
+allowance; all resource caps, allocation metrics,
 free-space floors, entry limits and the full barrier remain. Owned-group absence
 does not prove simulator or DerivedData quiescence, so no root is cached or skipped.
 Accounting and subsequent device commands share the original nominal startup
@@ -1153,6 +1192,27 @@ existing four-second process-cleanup allowance (86 seconds for child work and li
 accounting). Both remain single attempts inside the effective 660-second startup pool.
 This finite hosted cold-start allowance does not predict installation latency or
 turn prior timed-out runs into accepted evidence.
+
+For ordinary commands, log setup and the required pre-spawn resource guard run inside
+the existing phase/outer deadline, with four seconds reserved for cleanup. Only
+after that admission succeeds is the existing command cap armed once, immediately
+before process creation. Preparation does not renew the phase or outer deadline;
+insufficient remaining time or a failed guard prevents process creation. Live
+resource checks, cooperative pipe/exit observation, late-result rejection and
+the complete post-command resource barrier remain required. Cleanup-mode commands
+retain their original cap covering both setup and execution.
+
+In run `42009238371`, the app build succeeded but no UI test started. Before
+`install-app` spawned, its resource guard spent 52.174502 seconds traversing
+DerivedData and 14.215623 seconds traversing the device directory. These scans
+consumed at least 66.390125 seconds of the already armed 90-second command cap.
+The saved sample timing bounds the remaining native work window at no more than
+18.789945 seconds; it does not provide an exact spawn time or prove an installer
+hang. A later resource scan crossed the work deadline, and cleanup terminated
+the child whose completion had not been observed. Three cleanup errors remain part of that failed run,
+despite the final observed `Shutdown` state. Separating preparation from the
+native command allowance addresses this budget attribution without increasing
+any numeric cap or accepting the historical failure.
 
 The single `simctl privacy ... grant photos` command for the owned test runner
 also allows 90 seconds, including the same four-second cleanup reserve, and is
@@ -1188,8 +1248,9 @@ time-only, so a resource failure cannot prevent required cleanup. The same call
 does not perform a full resource barrier for cleanup commands.
 The outer log drain also checks complete write counts.
 
-The command's `elapsed_seconds` remains total elapsed through accounting up to
-the existing receipt boundary, rather than child duration alone. Optional
+After admission, the command's `elapsed_seconds` remains elapsed from its cap
+start through accounting up to the existing receipt boundary, rather than child
+duration alone. Phase-bound preparation is recorded separately. Optional
 `child_completed_elapsed` samples the post-wait work check; it is not actual OS
 exit time. `cleanup_completed_elapsed` reuses the existing post-cleanup clock.
 `post_command_accounting` holds fixed `start_elapsed`, `deadline_elapsed`,
@@ -1200,6 +1261,18 @@ Accounting failure uses the closed `command_accounting` stage and preserves its
 primary error through best-effort timing/origin capture and later receipt failures.
 Barrier completion, receipt success, group cleanup and simulator shutdown remain
 separate facts. Failed cleanup skips accounting and leaves its barrier flags false.
+
+The `preparation` object records its own start, phase-bound deadline, log
+readiness, admission start, completion time and `STARTED`, `COMPLETED` or `FAILED`
+status. After ordinary-command admission, `start_elapsed` is set to the command
+cap start, retaining the existing native-window semantics for diagnostic readers.
+`command_cap_started_elapsed` remains null until admission; for cleanup commands
+it retains the setup-inclusive start. Before admission, `start_elapsed` and
+`end_deadline_elapsed` describe preparation rather than a running child. After
+admission, the latter records the actual command cleanup boundary.
+`spawn_started_elapsed` and `spawn_returned_elapsed` bracket process creation;
+neither reports the child's OS completion time. Missing observations do not
+establish successful preparation or execution.
 
 This is cooperative service, not a worker or a latency guarantee. A single blocked
 stat, select, read, write, disk query or log walk cannot be preempted by the hook;
@@ -1271,6 +1344,19 @@ original and copied xcresult, attachments and logs remain checked. The three
 ordered readers accept only the verified copy, never the original or a live
 container. Each retains its 40-second cap; collection retains 240 seconds and the
 whole run retains 1800 seconds, including shutdown and the final census.
+
+The single normal-path `collection-shutdown` command allows 90 seconds, including
+four seconds for owned-process cleanup. Its 86-second work window is still
+clipped to the original 240-second collection phase and overall work deadline.
+In main run `41979396891`, the UI test passed, but this command had no observed
+exit or pipe EOF before its former 21-second work window ended, despite 292
+returned device-service polls. That evidence does not establish the cause of the
+native delay or show an already-finished command hidden by resource accounting.
+The new allowance adds no retry or deadline renewal: successful group cleanup,
+exact `Shutdown` state, seal revalidation and full resource accounting remain
+required before readers begin. The separate emergency-cleanup shutdown retains
+its 25-second cap and the existing 60-second final-cleanup reserve. The failed
+run remains unaccepted, including its cleanup errors.
 
 After readers and offline artifact verification, the source/captured content and
 original xcresult are checked again and a full uncached resource census is

@@ -562,6 +562,200 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         }
     }
 
+    func testLateEchoIntroductionRequiresFreshAbsenceAfterOneContinue() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        _ = h.subject
+        h.now = 20
+        try h.wait()
+        h.events.removeAll()
+        try h.subject.typeTextOnce { h.stage("type"); h.now += 1 }
+        h.showIntroduction()
+        let value = try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+            h.stage("observe"); h.now += 0.25; return h.observation
+        }, continueHittable: { h.stage("continue-hit"); return true }, tapContinue: {
+            h.stage("continue-tap"); h.now += 1; h.observation = .init()
+        }) {
+            h.stage("read"); h.now += 1; return "Test Home"
+        }
+        XCTAssertEqual(value, "Test Home")
+        XCTAssertEqual(h.events, ["type", "observe", "continue-hit", "continue-tap", "observe", "read", "observe"])
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        XCTAssertTrue(h.allowance.attempted)
+        XCTAssertFalse(h.subject.fieldTapAttempted)
+        XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Input cannot repeat after Continue") })
+        let clockReads = h.clockReads
+        let diagnostic = h.subject.echoDiagnostic
+        XCTAssertEqual(diagnostic["setup_elapsed_seconds"] as? Double, 20)
+        XCTAssertEqual(diagnostic["input_elapsed_seconds"] as? Double, 3.75)
+        XCTAssertEqual(diagnostic["echo_introduction_observation_count"] as? Int, 3)
+        XCTAssertEqual(diagnostic["echo_introduction_count"] as? Int, 0)
+        XCTAssertEqual(diagnostic["echo_saw_introduction"] as? Bool, true)
+        XCTAssertEqual(diagnostic["echo_continue_attempted_once"] as? Bool, true)
+        XCTAssertEqual(diagnostic["timely_observation_count"] as? Int, 1)
+        XCTAssertEqual(diagnostic["matched"] as? Bool, true)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: diagnostic).count, 4096)
+        XCTAssertEqual(h.clockReads, clockReads)
+    }
+
+    func testIntroductionArrivingDuringExactEchoDiscardsValueUntilNewRead() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        try h.wait()
+        h.events.removeAll()
+        try h.subject.typeTextOnce { h.stage("type") }
+        var reads = 0
+        let value = try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+            h.stage("observe"); return h.observation
+        }, continueHittable: { h.stage("continue-hit"); return true }, tapContinue: {
+            h.stage("continue-tap"); h.observation = .init()
+        }) {
+            h.stage("read"); reads += 1
+            if reads == 1 { h.showIntroduction() }
+            return "Test Home"
+        }
+        XCTAssertEqual(value, "Test Home")
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(h.events, ["type", "observe", "read", "observe", "continue-hit", "continue-tap",
+                                 "observe", "read", "observe"])
+        XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 2)
+        XCTAssertEqual(h.subject.echoDiagnostic["echo_continue_attempted_once"] as? Bool, true)
+        XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Never retype after a late introduction") })
+    }
+
+    func testEchoBlockedByUnrecognizedDisabledOrConsumedIntroductionDoesNotReadOrAct() throws {
+        for kind in 0..<8 {
+            let allowance = NameEntryKeyboardReadiness.ContinueAllowance()
+            if kind == 7 {
+                let previous = Harness(allowance: allowance)
+                previous.showIntroduction()
+                XCTAssertFalse(try previous.poll())
+            }
+            let h = Harness(allowance: allowance, timing: .keyboardSetupThenInput)
+            try h.wait()
+            h.events.removeAll()
+            try h.subject.typeTextOnce { h.stage("type") }
+            h.now = 9.5
+            h.showIntroduction()
+            switch kind {
+            case 0: h.observation.introductionCount = 2
+            case 1: h.observation.exactMarkerCount = 0
+            case 2: h.observation.exactMarkerCount = 2
+            case 3: h.observation.continueButtonCount = 0
+            case 4: h.observation.continueButtonCount = 2
+            case 5: h.observation.continueEnabled = false
+            case 6: h.continueHittable = false
+            default: break
+            }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+                h.stage("observe"); h.now += 0.25; return h.observation
+            }, continueHittable: { h.stage("continue-hit"); return h.continueHittable }, tapContinue: {
+                XCTFail("Unrecognized or already consumed Continue cannot act")
+            }) {
+                XCTFail("A known present owner blocks even an exact value"); return "Test Home"
+            })
+            XCTAssertFalse(h.subject.continueAttempted)
+            XCTAssertEqual(h.allowance.attempted, kind == 7)
+            XCTAssertEqual(h.events.filter { $0 == "continue-hit" }.count, kind == 6 ? 1 : 0)
+            XCTAssertEqual(h.subject.echoDiagnostic["timely_observation_count"] as? Int, 0)
+            XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+        }
+    }
+
+    func testPersistentEchoIntroductionCannotPassOrTapAgain() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        try h.wait()
+        h.events.removeAll()
+        try h.subject.typeTextOnce { h.stage("type") }
+        h.now = 8.5
+        h.showIntroduction()
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+            h.stage("observe"); h.now += 0.25; return h.observation
+        }, continueHittable: { h.stage("continue-hit"); return true }, tapContinue: {
+            h.stage("continue-tap") // Deliberately leave the owner present.
+        }) {
+            XCTFail("A tap cannot stand in for owner disappearance"); return "Test Home"
+        })
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertEqual(h.events.filter { $0 == "continue-hit" }.count, 1)
+        XCTAssertFalse(h.subject.dismissedIntroduction)
+        XCTAssertEqual(h.subject.echoDiagnostic["echo_introduction_count"] as? Int, 1)
+        XCTAssertEqual(h.subject.echoDiagnostic["echo_continue_attempted_once"] as? Bool, true)
+        XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+        let events = h.events
+        h.now = 0
+        XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Input cannot be retried") })
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") { XCTFail("Echo cannot restart"); return "Test Home" })
+        XCTAssertEqual(h.events, events)
+    }
+
+    func testEveryLateEchoIntroductionStageRetainsOriginalInputDeadline() throws {
+        for end in [10.0, 10.001] {
+            for stage in ["observe", "continue-hit", "continue-tap", "read", "final-observe"] {
+                let h = Harness(timing: .keyboardSetupThenInput)
+                try h.wait()
+                h.events.removeAll()
+                try h.subject.typeTextOnce { h.stage("type") }
+                h.now = 9.75
+                if stage.hasPrefix("continue-") { h.showIntroduction() }
+                var observations = 0
+                @MainActor func record(_ name: String) {
+                    h.stage(name)
+                    if name == stage { h.now = end }
+                }
+                XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+                    observations += 1
+                    record(observations == 1 ? "observe" : "final-observe")
+                    return h.observation
+                }, continueHittable: { record("continue-hit"); return true }, tapContinue: {
+                    record("continue-tap")
+                }) { record("read"); return "Test Home" }) {
+                    XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired, stage)
+                }
+                XCTAssertEqual(h.events.last, stage)
+                XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+                XCTAssertEqual(h.allowance.attempted, stage == "continue-tap")
+                let events = h.events
+                h.now = 0
+                XCTAssertThrowsError(try h.subject.perform { XCTFail("Late stage remains terminal") })
+                XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("No retyping") })
+                XCTAssertThrowsError(try h.wait())
+                XCTAssertEqual(h.events, events)
+            }
+        }
+    }
+
+    func testThrowingEchoIntroductionStagesPreserveErrorAndConsumedAction() throws {
+        enum NativeFailure: Error { case operation }
+        for stage in ["observe", "continue-hit", "continue-tap", "read", "final-observe"] {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            try h.wait()
+            h.events.removeAll()
+            try h.subject.typeTextOnce { h.stage("type") }
+            h.now = 9.75
+            if stage.hasPrefix("continue-") { h.showIntroduction() }
+            var observations = 0
+            @MainActor func record(_ name: String) throws {
+                h.stage(name)
+                if name == stage { h.now = 11; throw NativeFailure.operation }
+            }
+            XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+                observations += 1
+                try record(observations == 1 ? "observe" : "final-observe")
+                return h.observation
+            }, continueHittable: { try record("continue-hit"); return true }, tapContinue: {
+                try record("continue-tap")
+            }) { try record("read"); return "Test Home" }) { XCTAssertTrue($0 is NativeFailure, stage) }
+            XCTAssertEqual(h.events.last, stage)
+            XCTAssertEqual(h.allowance.attempted, stage == "continue-tap")
+            XCTAssertEqual(h.subject.echoDiagnostic["echo_continue_attempted_once"] as? Bool, stage == "continue-tap")
+            XCTAssertEqual(h.subject.echoDiagnostic["matched"] as? Bool, false)
+            let events = h.events
+            h.now = 0
+            XCTAssertThrowsError(try h.subject.perform { XCTFail("Preserve original error") }) { XCTAssertTrue($0 is NativeFailure) }
+            XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("No retyping") })
+            XCTAssertEqual(h.events, events)
+        }
+    }
+
     func testUnmatchedEchoTimeoutRetainsBoundedLastValueForFailureDiagnostic() throws {
         let cases = [(String(repeating: "\n", count: 1000), String(repeating: "\n", count: 256)),
                      (String(repeating: "a", count: 255) + "😀", String(repeating: "a", count: 255))]

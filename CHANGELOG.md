@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Complete phase-bounded resource admission before starting a Recovery command's existing execution allowance, preserving cleanup reserves, resource checks and all numeric limits.
+
+- Handle the exact keyboard introduction if it appears while waiting for a typed name, retaining one Continue action, one native input and the original input deadline.
+
+- Select Recovery's Save to Files action through its exact system cell, with unique, enabled and hittable checks plus one tap inside a shared 30-second window; avoid the broad duplicate-label query and reject late results.
+
+- Allow one bounded Simulator shutdown before Recovery result collection to finish within the existing collection deadline, retaining all state, resource and cleanup checks.
+
 - Give the single Recovery Photos authorization command the same bounded cold-start allowance as app installation, retaining the original startup deadline, resource checks and cleanup reserve.
 - Request name-field focus once after the sheet finishes appearing, and wait for the software keyboard during bounded autofocus setup before native input.
 - Match name-field readiness to the interaction: keep live hit testing for tap-based entry, and use unique native input plus exact echo for the already-autofocused field without an unused coordinate hit query. Retain the keyboard setup and input deadlines.

@@ -790,11 +790,21 @@ def diagnose_controller_failure(discovery, runner, context, anchor, outer_end, *
             log_require(0 <= start < observed_end <= total <= POLICY["recovery_seconds"],
                         "clock_window_unconfirmed")
             row["clock_validation_stage"] = "source_interval"
-            log_require(start < limit and limit - start <= 300, "clock_window_unconfirmed")
+            # Offsets subtracted from the same monotonic origin can round a
+            # nominal 300-second interval slightly upwards. Compare restored
+            # absolute endpoints, matching the controller's cap arithmetic.
+            absolute_start, absolute_limit = runner.start + start, runner.start + limit
+            absolute_cap = absolute_start + 300
+            log_require(all(finite_number(v) for v in (absolute_start, absolute_limit, absolute_cap))
+                        and start < limit and absolute_start < absolute_limit <= absolute_cap,
+                        "clock_window_unconfirmed")
             # elapsed includes child cleanup and may exceed the nominal command
             # deadline. Observe only its bounded command interval, not that tail.
             selected_end = min(observed_end, limit, total)
-            log_require(0 < selected_end - start <= 300, "clock_window_unconfirmed")
+            absolute_selected_end = runner.start + selected_end
+            log_require(finite_number(absolute_selected_end) and start < selected_end
+                        and absolute_start < absolute_selected_end <= absolute_cap,
+                        "clock_window_unconfirmed")
             row["command_window"] = {"start_elapsed": start, "actual_elapsed_seconds": elapsed,
                                      "observed_end_elapsed": observed_end, "end_deadline_elapsed": limit,
                                      "selected_end_elapsed": selected_end,

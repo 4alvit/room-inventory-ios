@@ -91,6 +91,10 @@ final class NameEntryKeyboardReadiness {
     private var echoMismatchObserved = false
     private var lastEchoMismatch: String?
     private var lastEchoMismatchTruncated = false
+    private var echoIntroductionObservation: Observation?
+    private var echoIntroductionObservationCount = 0
+    private var echoSawIntroduction = false
+    private var echoContinueAttempted = false
 
     init(allowance: ContinueAllowance, timing: Timing = .sharedTenSeconds,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
@@ -218,7 +222,8 @@ final class NameEntryKeyboardReadiness {
     private func handleIntroduction(_ observation: Observation,
                                     continueHittable: () throws -> Bool,
                                     tapContinue: () throws -> Void,
-                                    evidence: (EvidenceStage) throws -> Void) throws {
+                                    evidence: (EvidenceStage) throws -> Void,
+                                    captureEvidence: Bool = true) throws {
         guard observation.introductionCount == 1,
               observation.exactMarkerCount == 1,
               observation.continueButtonCount == 1,
@@ -226,7 +231,7 @@ final class NameEntryKeyboardReadiness {
               !allowance.attempted else { return }
         guard try perform(continueHittable) else { return }
         // Evidence is optional near the deadline and cannot renew it.
-        if try window.remaining() > 2 { try perform { try evidence(.beforeContinue) } }
+        if captureEvidence, try window.remaining() > 2 { try perform { try evidence(.beforeContinue) } }
         try perform {
             allowance.attempted = true
             continueAttempted = true
@@ -288,17 +293,29 @@ final class NameEntryKeyboardReadiness {
         }
     }
 
-    /// Input has already happened once. Only read its echo, using the remainder
-    /// of its ten seconds; nil and partial values do not authorize progress.
-    func waitForExactValue(_ expected: String, read: @escaping () throws -> String?) throws -> String {
+    /// Input has already happened once. A newly arrived exact introduction may
+    /// consume the same Continue allowance, never another input or deadline.
+    /// Nil, partial values and a present introduction cannot authorize progress.
+    func waitForExactValue(_ expected: String,
+                           observeIntroduction: (() throws -> Observation)? = nil,
+                           continueHittable: @escaping () throws -> Bool = { false },
+                           tapContinue: @escaping () throws -> Void = {},
+                           read: @escaping () throws -> String?) throws -> String {
         guard fieldReady, !echoWaitStarted,
               timing == .sharedTenSeconds || (inputWindow != nil && inputAttempted) else { throw Failure.notReady }
         echoWaitStarted = true
         var matchedValue: String?
         try waitUntil {
+            guard try self.echoIntroductionAbsent(observeIntroduction,
+                continueHittable: continueHittable, tapContinue: tapContinue) else { return false }
             let value = try self.perform(read)
             self.echoObservationCount += 1
             if value == expected {
+                // The native value query can span the introduction's arrival.
+                // Discard this candidate if blocked; after Continue, a later
+                // absence and a new exact read are required in this same window.
+                guard try self.echoIntroductionAbsent(observeIntroduction,
+                    continueHittable: continueHittable, tapContinue: tapContinue) else { return false }
                 matchedValue = value
                 return true
             }
@@ -319,6 +336,29 @@ final class NameEntryKeyboardReadiness {
         guard let matchedValue else { throw Failure.notReady }
         echoMatched = true
         return matchedValue
+    }
+
+    private func echoIntroductionAbsent(_ observe: (() throws -> Observation)?,
+                                        continueHittable: () throws -> Bool,
+                                        tapContinue: () throws -> Void) throws -> Bool {
+        guard let observe else { return true } // Existing read-only callers keep their contract.
+        let current = try perform(observe)
+        echoIntroductionObservation = current
+        echoIntroductionObservationCount += 1
+        echoSawIntroduction = echoSawIntroduction || current.introductionCount > 0
+        observation = current
+        sawIntroduction = sawIntroduction || current.introductionCount > 0
+        guard current.introductionCount == 0 else {
+            dismissedIntroduction = false
+            let previouslyAttempted = continueAttempted
+            defer { echoContinueAttempted = echoContinueAttempted || (!previouslyAttempted && continueAttempted) }
+            // Optional screenshots must not consume the input/echo allowance.
+            try handleIntroduction(current, continueHittable: continueHittable,
+                tapContinue: tapContinue, evidence: { _ in }, captureEvidence: false)
+            return false // A tap is not proof of disappearance.
+        }
+        dismissedIntroduction = sawIntroduction && continueAttempted
+        return true
     }
 
     private func waitUntil(_ probe: @escaping () throws -> Bool) throws {
@@ -364,7 +404,15 @@ final class NameEntryKeyboardReadiness {
          "matched": echoMatched,
          "mismatch_observed": echoMismatchObserved,
          "last_mismatching_value": lastEchoMismatch.map { $0 as Any } ?? NSNull(),
-         "last_mismatching_value_truncated": lastEchoMismatchTruncated]
+         "last_mismatching_value_truncated": lastEchoMismatchTruncated,
+         "echo_introduction_observation_count": echoIntroductionObservationCount,
+         "echo_introduction_count": echoIntroductionObservation.map { $0.introductionCount as Any } ?? NSNull(),
+         "echo_exact_marker_count": echoIntroductionObservation.map { $0.exactMarkerCount as Any } ?? NSNull(),
+         "echo_continue_button_count": echoIntroductionObservation.map { $0.continueButtonCount as Any } ?? NSNull(),
+         "echo_continue_enabled": echoIntroductionObservation.map { $0.continueEnabled as Any } ?? NSNull(),
+         "echo_saw_introduction": echoSawIntroduction,
+         "echo_continue_attempted_once": echoContinueAttempted,
+         "test_case_continue_consumed": allowance.attempted]
         return timingDiagnostic.merging(record) { _, value in value }
     }
 

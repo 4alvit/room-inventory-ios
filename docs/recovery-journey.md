@@ -491,10 +491,14 @@ assertions remain required; no export service is invoked directly.
 
 ### Autofocused name entry
 
-New `NameEntrySheet` presentations request initial focus for their empty
-`entry.name` field using the Form's `defaultFocus` region. This lets SwiftUI
-evaluate focus when the sheet is presented, instead of assigning it once from
-an eager view task. Recovery uses `AutofocusedNameEntry` without a second field tap. One
+New `NameEntrySheet` presentations request initial focus for their
+`entry.name` field from a noninteractive UIKit appearance observer at the sheet
+root. Its `viewDidAppear` callback assigns the field's `FocusState` after the
+presentation, while a sheet-owned state flag permits only one request per
+presentation, including if SwiftUI recreates the observer. The observer requires
+an attached window, rejects dismissal, and clears its callback on dismantle.
+It does not schedule delayed requests or repeat focus when an alert returns.
+Recovery uses `AutofocusedNameEntry` without a second field tap. One
 30-second monotonic setup window covers the exact keyboard introduction and a
 unique enabled text field with exactly one software keyboard. Only timely readiness can start the
 separate ten-second input window, covering an empty or placeholder value, one
@@ -555,8 +559,18 @@ In hosted run `41952876149`, setup observed no introduction and one enabled
 field, but native input failed because neither that field nor a descendant had
 keyboard focus. The later failure screenshot and accessibility tree show an
 empty name field and no keyboard. Those later observations do not establish
-when focus was lost or why the original focus request failed. The default-focus
-region follows Apple's [sheet example](https://developer.apple.com/videos/play/wwdc2023/10162/).
+when focus was lost or why the original focus request failed. A subsequent
+default-focus region followed Apple's [sheet example](https://developer.apple.com/videos/play/wwdc2023/10162/),
+but hosted run `41959681684` stopped before input on the first home sheet:
+setup expired after 21 keyboard queries, with the last returned count zero and
+no input attempted. That change also added
+the software-keyboard prerequisite, so comparison with the earlier passing
+Ordinary run does not isolate the cause or establish the field's responder state.
+The appearance observer now makes an explicit focus request at UIKit's
+[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller),
+instead of relying on a default-focus preference or a pre-presentation task.
+SwiftUI manages the observer's containment and layout; it neither accesses
+private text-field internals nor changes the field's value.
 The setup prerequisite now prevents input while the keyboard is absent; missing,
 duplicate, late or throwing keyboard observations cannot start or renew input.
 Localization's tap-based path does not require an existing keyboard before its

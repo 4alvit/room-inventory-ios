@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Initialize name-field focus through SwiftUI's default-focus region when presenting the sheet, and wait for the software keyboard during bounded autofocus setup before native input.
+- Request name-field focus once after the sheet finishes appearing, and wait for the software keyboard during bounded autofocus setup before native input.
 - Match name-field readiness to the interaction: keep live hit testing for tap-based entry, and use unique native input plus exact echo for the already-autofocused field without an unused coordinate hit query. Retain the keyboard setup and input deadlines.
 - Validate the absolute runtime-readiness deadline during evidence retention so floating-point subtraction cannot reject a successful Recovery run, while retaining the 30-second bound and late-result rejection.
 - Bind export-return checks to the snapshot-selected home's stable accessibility ID in Recovery and RC, retaining unique identity, overlay rejection, one live interaction check and the 30-second deadline.

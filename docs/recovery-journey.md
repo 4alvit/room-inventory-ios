@@ -491,10 +491,12 @@ assertions remain required; no export service is invoked directly.
 
 ### Autofocused name entry
 
-New `NameEntrySheet` presentations focus their empty `entry.name` field in the
-app. Recovery uses `AutofocusedNameEntry` without a second field tap. One
+New `NameEntrySheet` presentations request initial focus for their empty
+`entry.name` field using the Form's `defaultFocus` region. This lets SwiftUI
+evaluate focus when the sheet is presented, instead of assigning it once from
+an eager view task. Recovery uses `AutofocusedNameEntry` without a second field tap. One
 30-second monotonic setup window covers the exact keyboard introduction and a
-unique enabled text field. Only timely readiness can start the
+unique enabled text field with exactly one software keyboard. Only timely readiness can start the
 separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
 the prior empty-value normalization; the typed echo must still be a String
@@ -508,7 +510,7 @@ explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
 JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
 Before starting that input window, the autofocus setup rechecks the exact
-introduction owner after the field-readiness queries and optional evidence.
+introduction owner after the field/keyboard-readiness queries and optional evidence.
 An introduction that appeared during those queries uses the same guarded
 Continue action immediately when its complete observation is recognized, without
 waiting to resolve that owner a second time. A tap still returns control to the
@@ -526,7 +528,8 @@ they do not renew it. `waitForField` omits the field tap. The helper's explicit
 setup/input mode is used for AutofocusedNameEntry; Localization retains its
 existing shared ten-second `waitAndTapField` path and field tap. A late query or
 input cannot authorize Save; there is no generic Continue action, field-tap
-fallback, retyping or keyboard-visibility requirement. Generic item-editor
+fallback or retyping. Keyboard presence is a setup prerequisite, not proof that
+the intended field has focus: native input and its exact echo remain required. Generic item-editor
 fields still use their existing tap-based input.
 
 The autofocus adapter resolves the recognized owner and Continue button with
@@ -548,6 +551,16 @@ the separate ten-second input deadline. In hosted run `41941238836`, the unused
 coordinate hit query exceeded the 30-second setup window after the introduction
 was dismissed and the snapshot had established one enabled field; no input was
 attempted. Omitting that query does not establish a native performance guarantee.
+In hosted run `41952876149`, setup observed no introduction and one enabled
+field, but native input failed because neither that field nor a descendant had
+keyboard focus. The later failure screenshot and accessibility tree show an
+empty name field and no keyboard. Those later observations do not establish
+when focus was lost or why the original focus request failed. The default-focus
+region follows Apple's [sheet example](https://developer.apple.com/videos/play/wwdc2023/10162/).
+The setup prerequisite now prevents input while the keyboard is absent; missing,
+duplicate, late or throwing keyboard observations cannot start or renew input.
+Localization's tap-based path does not require an existing keyboard before its
+field tap. The complete hosted scenario must verify the lifecycle change.
 The keyboard owner still uses its separate query because an application snapshot
 can omit that sibling. These are sequential observations, not an atomic UI
 transaction. In attempt 2 of hosted run `41733453608`,

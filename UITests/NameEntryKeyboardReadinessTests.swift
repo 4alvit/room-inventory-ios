@@ -22,6 +22,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         var continueHittable = true
         var fieldEnabled = true
         var fieldHittable = true
+        var keyboardCount = 1
         var advanceAt: [String: Double] = [:]
         var events: [String] = []
         var afterEvidence: ((NameEntryKeyboardReadiness.EvidenceStage) -> Void)?
@@ -50,17 +51,20 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
                 entryNameCount: { self.stage("entry-count"); return self.entryNameCount },
                 fieldEnabled: { self.stage("field-enabled"); return self.fieldEnabled },
                 fieldHittable: { self.stage("field-hit"); return self.fieldHittable },
+                keyboardCount: { self.stage("keyboard-count"); return self.keyboardCount },
                 evidence: { self.recordEvidence($0) })
         }
         func tapField() throws { try subject.tapField { self.stage("field-tap") } }
         func wait(observe: (() throws -> NameEntryKeyboardReadiness.Observation)? = nil,
-                  tapContinue: (() throws -> Void)? = nil) throws {
+                  tapContinue: (() throws -> Void)? = nil,
+                  keyboardCount: (() throws -> Int)? = nil) throws {
             try subject.waitForField(observe: observe ?? { self.stage("observe"); return self.observation },
                 continueHittable: { self.stage("continue-hit"); return self.continueHittable },
                 tapContinue: tapContinue ?? { self.stage("continue-tap") },
                 entryNameCount: { self.stage("entry-count"); return self.entryNameCount },
                 fieldEnabled: { self.stage("field-enabled"); return self.fieldEnabled },
                 fieldHittable: { self.stage("field-hit"); return self.fieldHittable },
+                keyboardCount: keyboardCount ?? { self.stage("keyboard-count"); return self.keyboardCount },
                 evidence: { self.recordEvidence($0) })
         }
         func showIntroduction() {
@@ -631,7 +635,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             return .init()
         })
         XCTAssertEqual(h.events, ["observe", "continue-hit", "evidence-beforeContinue", "continue-tap",
-            "observe", "entry-count", "field-enabled", "evidence-dismissedAndFieldReady", "observe"])
+            "observe", "entry-count", "field-enabled", "keyboard-count", "evidence-dismissedAndFieldReady", "observe"])
         XCTAssertNil(h.subject.fieldHittable) // Unknown, never fabricated as true.
         XCTAssertEqual(h.subject.entryNameCount, 1)
         XCTAssertEqual(h.subject.fieldEnabled, true)
@@ -648,6 +652,105 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertFalse(try shared.poll())
         XCTAssertEqual(shared.events, ["observe", "entry-count", "field-enabled", "field-hit"])
         XCTAssertThrowsError(try shared.tapField())
+    }
+
+    func testAutofocusedInputWaitsForKeyboardWithinSetupWindow() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        var observations = 0
+        try h.wait(keyboardCount: {
+            h.stage("keyboard-count")
+            observations += 1
+            h.now += observations == 1 ? 4 : 8
+            XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+            XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Keyboard is not ready") })
+            return observations == 1 ? 0 : 1
+        })
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(h.subject.keyboardCount, 1)
+        XCTAssertEqual(h.subject.echoDiagnostic["keyboard_count"] as? Int, 1)
+        XCTAssertEqual(h.subject.echoDiagnostic["setup_elapsed_seconds"] as? Double, 12)
+        try h.subject.typeTextOnce { h.stage("type"); h.now += 3 }
+        XCTAssertEqual(try h.subject.waitForExactValue("Test Home") {
+            h.stage("echo"); h.now += 2; return "Test Home"
+        }, "Test Home")
+        XCTAssertEqual(h.subject.echoDiagnostic["input_elapsed_seconds"] as? Double, 5)
+        XCTAssertFalse(h.events.contains("field-tap"))
+        XCTAssertFalse(h.events.contains("field-hit"))
+    }
+
+    func testMissingOrDuplicateKeyboardCannotStartInputOrRenewSetup() {
+        for count in [0, 2] {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            h.keyboardCount = count
+            h.advanceAt["keyboard-count"] = 16
+            XCTAssertThrowsError(try h.wait()) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+            }
+            XCTAssertEqual(h.subject.echoDiagnostic["setup_completed"] as? Bool, false)
+            XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+            let events = h.events
+            h.now = 0
+            XCTAssertThrowsError(try h.wait())
+            XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("No unique keyboard") })
+            XCTAssertEqual(h.events, events)
+        }
+    }
+
+    func testKeyboardPresentationRechecksLateIntroductionBeforeInput() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        var keyboards = 0
+        try h.wait(tapContinue: {
+            h.stage("continue-tap")
+            h.observation = .init()
+        }, keyboardCount: {
+            h.stage("keyboard-count")
+            keyboards += 1
+            if keyboards == 1 { h.showIntroduction() }
+            return 1
+        })
+        XCTAssertEqual(keyboards, 2)
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        XCTAssertEqual(h.subject.diagnostic["keyboard_count"] as? Int, 1)
+        try h.subject.typeTextOnce { h.stage("type") }
+        XCTAssertEqual(h.events.filter { $0 == "type" }.count, 1)
+        XCTAssertFalse(h.events.contains("field-tap"))
+    }
+
+    func testKeyboardObservationPreservesNativeErrorAndCancellation() {
+        enum NativeFailure: Error { case keyboard }
+        for cancelled in [false, true] {
+            let h = Harness(timing: .keyboardSetupThenInput)
+            XCTAssertThrowsError(try h.wait(keyboardCount: {
+                h.stage("keyboard-count")
+                h.now = 31
+                if cancelled { throw CancellationError() }
+                throw NativeFailure.keyboard
+            })) {
+                if cancelled { XCTAssertTrue($0 is CancellationError) }
+                else { XCTAssertTrue($0 is NativeFailure) }
+            }
+            XCTAssertEqual(h.events, ["observe", "entry-count", "field-enabled", "keyboard-count"])
+            XCTAssertNil(h.subject.keyboardCount)
+            XCTAssertTrue(h.subject.echoDiagnostic["keyboard_count"] is NSNull)
+            XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
+            let events = h.events
+            h.now = 0
+            XCTAssertThrowsError(try h.wait())
+            XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Observation failed") })
+            XCTAssertEqual(h.events, events)
+        }
+    }
+
+    func testTapBasedEntryDoesNotRequireAnExistingSoftwareKeyboard() throws {
+        let h = Harness()
+        h.keyboardCount = 0
+        h.advanceAt["keyboard-count"] = 100
+        try h.wait()
+        try h.tapField()
+        XCTAssertNil(h.subject.keyboardCount)
+        XCTAssertFalse(h.events.contains("keyboard-count"))
+        XCTAssertEqual(h.events.suffix(2), ["field-hit", "field-tap"])
     }
 
     func testBothInputModesStillRejectMissingDuplicateAndDisabledFields() throws {
@@ -667,7 +770,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
 
     func testSplitSetupExactOrLateOperationsCannotActivateInputOrRestart() {
         for end in [30.0, 30.001] {
-            for stage in ["observe", "continue-hit", "continue-tap", "entry-count", "field-enabled"] {
+            for stage in ["observe", "continue-hit", "continue-tap", "entry-count", "field-enabled", "keyboard-count"] {
                 let h = Harness(timing: .keyboardSetupThenInput)
                 _ = h.subject // Start the immutable setup window at zero.
                 h.now = 29.99
@@ -805,7 +908,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             h.stage("observe")
             observations += 1
             if observations == 2 {
-                XCTAssertEqual(h.events.suffix(3), ["entry-count", "field-enabled", "observe"])
+                XCTAssertEqual(h.events.suffix(4), ["entry-count", "field-enabled", "keyboard-count", "observe"])
                 XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
                 XCTAssertTrue(h.subject.echoDiagnostic["input_elapsed_seconds"] is NSNull)
             }

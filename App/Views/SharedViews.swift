@@ -59,7 +59,7 @@ struct NameEntrySheet: View {
                 Button(UIL10n.text("Discard changes"), role: .destructive) { dismiss() }
                 Button(UIL10n.text("Keep editing"), role: .cancel) {}
             }
-            .task { focused = true }
+            .defaultFocus($focused, true)
         }
     }
     private func submit() {

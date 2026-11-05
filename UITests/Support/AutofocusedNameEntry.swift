@@ -80,7 +80,8 @@ enum AutofocusedNameEntry {
                 }
                 placeholder = snapshot.placeholder
                 return snapshot.enabled
-            }, fieldHittable: { fields.element.isHittable }, evidence: evidence)
+            }, fieldHittable: { fields.element.isHittable }, keyboardCount: { app.keyboards.count },
+            evidence: evidence)
             // Empty controls may expose nil. Preserve the original live-value
             // normalization only before input; nil is never a successful typed echo.
             stage = "initial_value"

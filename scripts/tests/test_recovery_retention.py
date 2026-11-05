@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import plistlib
 import shutil
@@ -188,6 +189,38 @@ class RecoveryRetentionTests(unittest.TestCase):
                 else:
                     self.runtime_commands[0]["args"] = ["xcrun", "simctl", "list", "--json"]
                 self.save_readiness()
+                with self.assertRaisesRegex(R.RetentionError, "runtime readiness"):
+                    R.validate_complete(self.work, self.context, R.Files(self.guard))
+
+    def set_fractional_readiness_window(self, deadline):
+        # Values retained from a hosted run whose UI and artifact checks passed.
+        start = 234.230182041
+        self.readiness.update(start=start, deadline=deadline)
+        self.runtime_commands[0]["timing"].update(
+            start=start, finish=start + 1, work_deadline=start + 11,
+            command_deadline=start + 15)
+        self.save_readiness()
+
+    def test_fractional_runtime_deadline_retains_complete_packet(self):
+        self.set_fractional_readiness_window(264.23018204100003)
+        self.assertGreater(self.readiness["deadline"] - self.readiness["start"], 30)
+        report = self.package()
+        self.assertTrue(report["complete"], report["failures"])
+
+    def test_runtime_deadline_one_float_beyond_bound_is_rejected(self):
+        self.set_fractional_readiness_window(math.nextafter(264.23018204100003, math.inf))
+        with self.assertRaisesRegex(R.RetentionError, "runtime readiness deadline"):
+            R.validate_complete(self.work, self.context, R.Files(self.guard))
+
+    def test_clipped_fractional_runtime_deadline_retains_complete_packet(self):
+        self.set_fractional_readiness_window(254.230182041)
+        report = self.package()
+        self.assertTrue(report["complete"], report["failures"])
+
+    def test_runtime_deadline_requires_finite_positive_window(self):
+        for deadline in (234.230182041, 234.0, math.inf, math.nan, True):
+            with self.subTest(deadline=deadline):
+                self.set_fractional_readiness_window(deadline)
                 with self.assertRaisesRegex(R.RetentionError, "runtime readiness"):
                     R.validate_complete(self.work, self.context, R.Files(self.guard))
 

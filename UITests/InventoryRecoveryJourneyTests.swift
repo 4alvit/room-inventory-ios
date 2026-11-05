@@ -569,25 +569,23 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // navigation state before querying the save action. The remote picker
         // can appear after a short, label-only existence wait has already ended.
         try enterFilesFolder(folder, create: createFolder, app: app)
-        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
-        let folders = pickers.otherElements.matching(identifier:
-            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: \(folder)")
-        let bars = folders.navigationBars.matching(identifier:
-            FilesNavigationReadiness.navigationBarIdentifier)
-        let saveButtons = bars.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND label == %@", "DOCPicker.actionButton", "Save"))
-        let dialog = FilesNavigationReadiness(timeout: 10)
-        let saveReady = try dialog.waitForTargetFolder(titleCount: {
-            for query in [pickers, folders, bars, saveButtons] {
-                let count = try dialog.perform { query.count }
-                guard count == 0 || count == 1 else {
-                    throw FilesNavigationReadiness.Failure.invalidSelectionCount
-                }
-                guard count == 1 else { return 0 }
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        func saveButton(_ observation: FilesNavigationReadiness.SelectionObservation,
+                        window: FilesNavigationReadiness) throws -> XCUIElement {
+            // Bind every native action to the exact owner seen in this probe.
+            // Its descriptive title need not equal the current folder title.
+            try window.perform {
+                pickers.otherElements.matching(identifier: observation.ownerIdentifier)
+                    .navigationBars.matching(identifier: FilesNavigationReadiness.navigationBarIdentifier)
+                    .buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@",
+                                                   "DOCPicker.actionButton", "Save")).element
             }
-            return 1
-        }, enabled: { try dialog.perform { saveButtons.element }.isEnabled },
-           hittable: { try dialog.perform { saveButtons.element }.isHittable })
+        }
+        let dialog = FilesNavigationReadiness(timeout: 10)
+        let saveReady = try dialog.waitForSelection(
+            observe: { try dialog.captureSelection(folder: folder, pickers: pickers) },
+            enabled: { try saveButton($0, window: dialog).isEnabled },
+            hittable: { try saveButton($0, window: dialog).isHittable })
         try ledger.require("Files save dialog presented", saveReady)
         let filename = pickers.textFields.matching(identifier: "DOCPicker.filenameTextField").element
         try tap(filename, app: app)
@@ -609,11 +607,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // Editing and capture can change the remote hierarchy. Resolve and
         // admit the exact Save action again, then tap once in that same window.
         let saving = FilesNavigationReadiness(timeout: 10)
-        try saving.waitAndTapFile(pickerCount: { pickers.count }, folderCount: { folders.count },
-            fileViewCount: { bars.count }, fileCount: { saveButtons.count },
-            enabled: { try saving.perform { saveButtons.element }.isEnabled },
-            hittable: { try saving.perform { saveButtons.element }.isHittable },
-            tap: { try saving.perform { saveButtons.element }.tap() })
+        try saving.waitAndTapSelection(
+            observe: { try saving.captureSelection(folder: folder, pickers: pickers) },
+            enabled: { try saveButton($0, window: saving).isEnabled },
+            hittable: { try saveButton($0, window: saving).isHittable },
+            tap: { try saveButton($0, window: saving).tap() })
         let returning = ExportReturnReadiness(homeName: homeName)
         var returnSucceeded = false
         do {
@@ -879,7 +877,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         var stage = "starting"
         defer {
             let record: [String: Any] = [
-                "schema_version": 1, "phase": "restore_backup", "journey_id": journeyID,
+                "schema_version": 2, "phase": "restore_backup", "journey_id": journeyID,
                 "folder": folder, "filename": filename, "allowance_seconds": 10,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                 "result": tapped ? "tapped" : "failed", "tap_admissions": tapAdmissions,
@@ -887,33 +885,33 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
-                print("ROOM_FILES_SELECTION_V1 \(text)")
+                print("ROOM_FILES_SELECTION_V2 \(text)")
             }
         }
-        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
-        let folders = pickers.otherElements.matching(identifier:
-            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: \(folder)")
-        let fileViews = folders.collectionViews.matching(identifier: "File View")
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
         // The identifier has a stable type suffix; the label also contains
         // presentation-dependent time and size. Every live lookup stays scoped
-        // to the exact run folder and filename. These are sequential checks,
-        // not an atomic hierarchy snapshot.
-        let files = fileViews.cells.matching(identifier: filename + ", roominventory")
-        let target = files.element(boundBy: 0)
-        func count(_ query: XCUIElementQuery, _ name: String) -> Int {
-            stage = name
-            let value = query.count
-            lastCounts[name] = value
-            return value
+        // to the owner observed with the exact current folder and filename.
+        // Snapshot classification and native readiness remain sequential.
+        func target(_ observation: FilesNavigationReadiness.SelectionObservation) throws -> XCUIElement {
+            try selection.perform {
+                pickers.otherElements.matching(identifier: observation.ownerIdentifier)
+                    .collectionViews.matching(identifier: "File View")
+                    .cells.matching(identifier: filename + ", roominventory").element
+            }
         }
-        try selection.waitAndTapFile(
-            pickerCount: { count(pickers, "picker") },
-            folderCount: { count(folders, "folder") },
-            fileViewCount: { count(fileViews, "file_view") },
-            fileCount: { count(files, "file") },
-            enabled: { stage = "enabled"; return target.isEnabled },
-            hittable: { stage = "hittable"; return target.isHittable },
-            tap: { stage = "tap"; tapAdmissions += 1; target.tap() })
+        try selection.waitAndTapSelection(
+            observe: {
+                stage = "snapshot"
+                lastCounts = [:]
+                let observed = try selection.captureSelection(folder: folder, target: .backup(filename: filename),
+                                                               pickers: pickers)
+                lastCounts["complete_snapshot_scope"] = observed == nil ? 0 : 1
+                return observed
+            },
+            enabled: { stage = "enabled"; return try target($0).isEnabled },
+            hittable: { stage = "hittable"; return try target($0).isHittable },
+            tap: { stage = "tap"; tapAdmissions += 1; try target($0).tap() })
         tapped = true
         stage = "completed"
     }

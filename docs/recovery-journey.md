@@ -590,6 +590,21 @@ ending editing does not trigger a focus retry. The existing single-input,
 no-field-tap UI regression remains the behavioral acceptance check. This
 ownership change needs a fresh hosted run; the prior recording is diagnostic
 evidence, not evidence that the new implementation passes.
+
+The seven `NameEntryTextFieldTests` cases use actual windows and text fields.
+Run `42087951355` passed all seven, but its original pending-teardown fixture
+called `viewDidAppear` directly and UIKit reported unsupported lifecycle use,
+followed by unbalanced-transition diagnostics. Those passing assertions did not
+establish natural appearance ordering. The fixture now presents a containing
+controller through UIKit, awaits presentation completion, and awaits dismissal
+before removing the test window. Apple's [presentation contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/present(_:animated:completion:))
+places completion after `viewDidAppear`; its [appearance transition contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/beginappearancetransition(_:animated:))
+prohibits calling lifecycle callbacks directly. The non-key-window and teardown
+cases retain their real responder and callback assertions. A fresh hosted run
+must verify the corrected fixture; the earlier pass does not prove that its
+lifecycle diagnostics are absent. Full Recovery remains the separate check of
+name entry inside the application's sheets.
+
 The setup prerequisite now prevents input while the keyboard is absent; missing,
 duplicate, late or throwing keyboard observations cannot start or renew input.
 Localization's tap-based path does not require an existing keyboard before its
@@ -771,6 +786,27 @@ wait before tapping the cell. The combined allowance replaces that wait plus
 subsequent unshared checks; it does not claim to cure native service latency.
 Current hosted execution must still verify all three exports and their bytes.
 
+Save readiness captures the uniquely resolved `Browse View (Picker)` once per
+probe and checks its bounded, immutable hierarchy. It requires one local-storage
+browsing owner, one Files navigation bar under that owner, one exact direct title
+for the requested folder, and one Save button under the same bar. The descriptive
+`Title:` suffix in `DOC.browsingRoot` is not the current-folder identity: in run
+`42087951355`, the second export's failure capture showed `Title: On My iPhone`
+while the bar displayed the exact run folder and the first ZIP was already there.
+The former run-folder owner predicate would reject that captured hierarchy. The
+capture was taken after the deadline and does not establish when that state arose.
+
+The unique picker resolver preserves native errors: a missing or ambiguous picker
+fails rather than becoming a pending observation. Within a resolved picker, each
+probe rejects ambiguous or wrongly nested owners and titles; omitted children
+remain pending. Live interaction resolves Save under the exact owner identifier
+returned by that probe and checks enabled/hittable state. After filename editing
+and evidence capture, the final Save phase takes a fresh scoped snapshot and taps
+once. Both phases retain their ten-second deadlines; late or throwing operations
+cannot authorize a tap. Replacing four serial scope-count queries does not promise
+that any native operation will finish in time. The complete new hosted journey
+must still verify all exported and restored bytes.
+
 After one real Save, return from the external Files service has a separate
 30-second monotonic allowance. Each serial probe classifies one immutable app
 snapshot. An observed Files action or alert blocks progress. A remaining share
@@ -824,19 +860,23 @@ therefore uses the stable app root's later `debugDescription`, which includes th
 remote picker. `hierarchy_observation` explicitly distinguishes these observations;
 they are diagnostic evidence and do not authorize an action or prove acceptance.
 
-Restore-file selection uses the exact typed hierarchy observed in the picker:
-one `Browse View (Picker)`, its run-bound local-storage `DOC.browsingRoot`, one
-`File View` collection and one cell whose identifier is the full backup filename
-followed by `, roominventory`. Each scope must be unique before querying its
-descendants. A single active ten-second window covers those live checks,
-enabled/hittable readiness and one direct tap. Missing or noninteractive targets
-remain pending; duplicate scopes, errors, late results and repeated selection
-fail. The generic scrolling/tap helper is not used for this restore selection.
+Restore-file selection uses the same bounded picker snapshot and current-folder
+title checks, then requires one `File View` collection under the matched
+local-storage owner and one cell whose identifier is the full backup filename
+followed by `, roominventory`. The container's descriptive title does not replace
+the exact current-folder title. A single active ten-second window covers the
+snapshot, live enabled/hittable readiness and one direct tap resolved under the
+matched owner. Missing or noninteractive targets remain pending; duplicate
+scopes, errors, late results and repeated selection fail. The generic
+scrolling/tap helper is not used for this restore selection.
 In run `41704117640`, that helper's repeated existence query ran outside its
 waiter after the file had already been found. The scoped path removes that
 unbounded query sequence; it does not establish the cause of native query latency.
-`ROOM_FILES_SELECTION_V1` records the exact folder/filename, elapsed time, last
-returned counts, current stage and tap admissions from existing operations only.
+`ROOM_FILES_SELECTION_V2` uses schema version 2 and records the exact folder and
+filename, elapsed time, current stage and tap admissions from existing operations
+only. `last_returned_counts` records `complete_snapshot_scope` as zero or one after
+a completed classifier result and stays empty when that capture fails. It does
+not reconstruct the former four live-query counts.
 A timely tap still requires the replacement alert and all subsequent restore,
 persistence and exported-byte checks; it is not itself proof of restoration.
 

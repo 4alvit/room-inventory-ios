@@ -32,6 +32,342 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    private func saveBar(title: TitleNode? = nil, actions: [TitleNode]? = nil) -> TitleNode {
+        .owner(children: [title ?? TitleNode(.button, "Run folder, Actions Menu")] +
+            (actions ?? [TitleNode(.button, "Save", identifier: "DOCPicker.actionButton")]))
+    }
+
+    @MainActor
+    private func saveOwner(_ children: [TitleNode], title: String = "On My iPhone") -> TitleNode {
+        TitleNode(.other, identifier: FilesNavigationReadiness.localStorageRootPrefix + title, children: children)
+    }
+
+    @MainActor
+    private func savePicker(_ children: [TitleNode]) -> TitleNode {
+        TitleNode(.other, identifier: FilesNavigationReadiness.pickerIdentifier, children: children)
+    }
+
+    @MainActor
+    private func captureSave(_ root: TitleNode, window: FilesNavigationReadiness) throws
+        -> FilesNavigationReadiness.SelectionObservation? {
+        try window.captureSelection(folder: "Run folder", uniqueSnapshot: { root },
+                                     children: { $0.children }, attributes: { $0.item })
+    }
+
+    @MainActor
+    func testSaveSnapshotUsesCurrentDirectTitleInsteadOfProviderEntryTitle() throws {
+        for title in [TitleNode(.text, "Run folder"),
+                      TitleNode(.button, "Run folder, Actions Menu", children: [TitleNode(.text, "Run folder")])] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            let tree = savePicker([saveOwner([saveBar(title: title)])])
+            var captures = 0
+            let result = try window.captureSelection(folder: "Run folder", uniqueSnapshot: {
+                captures += 1; return tree
+            }, children: { $0.children }, attributes: { $0.item })
+            XCTAssertEqual(result?.ownerIdentifier,
+                           FilesNavigationReadiness.localStorageRootPrefix + "On My iPhone")
+            XCTAssertEqual(captures, 1)
+        }
+    }
+
+    @MainActor
+    func testSaveSnapshotMissingOrWrongCurrentTitleNeverUsesOwnerTitleAsProof() throws {
+        let wrongTitles = [TitleNode(.text, "Other folder"),
+                           TitleNode(.button, "Run folder"),
+                           TitleNode(.other, "", children: [TitleNode(.text, "Run folder")])]
+        let trees = [savePicker([]), savePicker([saveOwner([])]),
+                     savePicker([saveOwner([saveBar(actions: [])])])] + wrongTitles.map {
+            savePicker([saveOwner([saveBar(title: $0)], title: "Run folder")])
+        }
+        for tree in trees {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertNil(try captureSave(tree, window: window))
+        }
+    }
+
+    @MainActor
+    func testSaveSnapshotRejectsWrongProviderRootTypeAndCrossBranchMatches() {
+        let action = TitleNode(.button, "Save", identifier: "DOCPicker.actionButton")
+        let trees = [
+            TitleNode(.application, identifier: FilesNavigationReadiness.pickerIdentifier,
+                      children: [saveOwner([saveBar()])]),
+            TitleNode(.other, identifier: "Other Picker", children: [saveOwner([saveBar()])]),
+            savePicker([TitleNode(.other, identifier: "DOC.browsingRoot Source: com.example.cloud, Title: Run folder",
+                                 children: [saveBar()])]),
+            savePicker([saveOwner([saveBar()], title: "")]),
+            savePicker([saveOwner([saveBar()], title: String(repeating: "x", count: 1_025))]),
+            savePicker([saveOwner([]), saveBar()]),
+            savePicker([saveOwner([saveBar(actions: [])]), action]),
+            savePicker([saveOwner([saveBar(actions: [TitleNode(.button, "Open", identifier: "DOCPicker.actionButton")])])])
+        ]
+        for tree in trees {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertThrowsError(try captureSave(tree, window: window)) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionSnapshot)
+            }
+            XCTAssertThrowsError(try window.perform { XCTFail("Invalid snapshot admitted later work") })
+        }
+    }
+
+    @MainActor
+    func testSaveSnapshotRejectsEveryDuplicateTypedScope() {
+        let action = TitleNode(.button, "Save", identifier: "DOCPicker.actionButton")
+        let bar = saveBar()
+        let owner = saveOwner([bar])
+        let trees = [savePicker([owner, savePicker([])]),
+                     savePicker([owner, owner]), savePicker([saveOwner([bar, bar])]),
+                     savePicker([saveOwner([.owner(children: [TitleNode(.text, "Run folder"),
+                         TitleNode(.button, "Run folder, Actions Menu"), action])])]),
+                     savePicker([saveOwner([saveBar(actions: [action, action])])])]
+        for tree in trees {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertThrowsError(try captureSave(tree, window: window)) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionCount)
+            }
+        }
+    }
+
+    @MainActor
+    func testSaveSnapshotEnforcesTotalNodeBoundAndRejectsLateCaptureOrTraversal() throws {
+        let valid = saveOwner([saveBar()]) // Owner, bar, title and action: four nodes.
+        let extras = Array(repeating: TitleNode(.unrelated), count: 4_091)
+        let allowed = savePicker([valid] + extras)
+        XCTAssertNotNil(try captureSave(allowed, window: FilesNavigationReadiness(timeout: 10, clock: { 0 })))
+        let oversized = savePicker([valid] + extras + [TitleNode(.unrelated)])
+        XCTAssertThrowsError(try captureSave(oversized, window: FilesNavigationReadiness(timeout: 10, clock: { 0 }))) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionSnapshot)
+        }
+        for lateStage in 0...2 {
+            var now = 0.0
+            var calls: [Int] = []
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            XCTAssertThrowsError(try window.captureSelection(folder: "Run folder", uniqueSnapshot: {
+                calls.append(0); if lateStage == 0 { now = 10 }; return allowed
+            }, children: {
+                calls.append(2); if lateStage == 2 { now = 10 }; return $0.children
+            }, attributes: {
+                calls.append(1); if lateStage == 1 { now = 10 }; return $0.item
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+            XCTAssertEqual(calls, Array(0...lateStage))
+        }
+    }
+
+    @MainActor
+    func testSaveReadinessRefreshesSnapshotAndBindsLiveChecksToLatestExactOwner() throws {
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        var captures = 0
+        var owners: [String] = []
+        XCTAssertTrue(try window.waitForSelection(observe: {
+            captures += 1
+            if captures == 1 { return nil }
+            return try self.captureSave(self.savePicker([self.saveOwner([self.saveBar()],
+                title: captures == 2 ? "On My iPhone" : "Run folder")]), window: window)
+        }, enabled: {
+            owners.append($0.ownerIdentifier); return captures == 3
+        }, hittable: {
+            owners.append($0.ownerIdentifier); return true
+        }))
+        XCTAssertEqual(captures, 3)
+        XCTAssertEqual(owners, ["On My iPhone", "Run folder", "Run folder"].map {
+            FilesNavigationReadiness.localStorageRootPrefix + $0
+        })
+    }
+
+    @MainActor
+    func testSaveTapTakesFreshSnapshotAndConsumesOnlyOneAction() throws {
+        var captures = 0
+        var calls: [String] = []
+        let tree = savePicker([saveOwner([saveBar()])])
+        func observe(_ window: FilesNavigationReadiness) throws -> FilesNavigationReadiness.SelectionObservation? {
+            captures += 1; calls.append("snapshot")
+            return try captureSave(tree, window: window)
+        }
+        let dialog = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        XCTAssertTrue(try dialog.waitForSelection(observe: { try observe(dialog) },
+            enabled: { _ in calls.append("enabled"); return true },
+            hittable: { _ in calls.append("hittable"); return true }))
+        let saving = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        func save() throws {
+            try saving.waitAndTapSelection(observe: { try observe(saving) },
+                enabled: { _ in calls.append("enabled"); return true },
+                hittable: { _ in calls.append("hittable"); return true },
+                tap: { _ in calls.append("tap") })
+        }
+        try save()
+        XCTAssertThrowsError(try save()) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+        }
+        XCTAssertEqual(captures, 2)
+        XCTAssertEqual(calls, ["snapshot", "enabled", "hittable", "snapshot", "enabled", "hittable", "tap"])
+    }
+
+    @MainActor
+    func testEverySaveOperationRejectsExactAndLateReturnWithoutFurtherWork() {
+        for lateStage in 0...3 {
+            for lateTime in [10.0, 10.001] {
+                var now = 0.0
+                var calls: [Int] = []
+                let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+                func operation(_ stage: Int) { calls.append(stage); if stage == lateStage { now = lateTime } }
+                XCTAssertThrowsError(try window.waitAndTapSelection(observe: {
+                    operation(0); return .init(ownerIdentifier: "exact owner")
+                }, enabled: { _ in operation(1); return true },
+                   hittable: { _ in operation(2); return true }, tap: { _ in operation(3) })) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+                }
+                XCTAssertThrowsError(try window.perform { calls.append(4) })
+                XCTAssertEqual(calls, Array(0...lateStage))
+            }
+        }
+    }
+
+    @MainActor
+    func testEverySaveOperationPreservesNativeFailureAndDoesNotRetryTap() {
+        final class NativeFailure: Error {}
+        for failedStage in 0...3 {
+            var now = 0.0
+            var calls: [Int] = []
+            let expected = NativeFailure()
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            func operation(_ stage: Int) throws {
+                calls.append(stage); if stage == failedStage { now = 11; throw expected }
+            }
+            XCTAssertThrowsError(try window.waitAndTapSelection(observe: {
+                try operation(0); return .init(ownerIdentifier: "exact owner")
+            }, enabled: { _ in try operation(1); return true },
+               hittable: { _ in try operation(2); return true }, tap: { _ in try operation(3) })) {
+                XCTAssertTrue(($0 as? NativeFailure) === expected)
+            }
+            XCTAssertThrowsError(try window.perform { calls.append(4) })
+            XCTAssertEqual(calls, Array(0...failedStage))
+        }
+    }
+
+    @MainActor
+    func testSelectionSnapshotPreservesUnresolvablePickerErrorBeforeTraversalOrAction() {
+        final class ResolutionFailure: Error {
+            let reason: String
+            init(_ reason: String) { self.reason = reason }
+        }
+        for reason in ["missing picker", "ambiguous picker"] {
+            var now = 0.0
+            var resolutions = 0
+            let expected = ResolutionFailure(reason)
+            let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+            XCTAssertThrowsError(try window.waitAndTapSelection(observe: {
+                try window.captureSelection(folder: "Run folder", uniqueSnapshot: { () throws -> TitleNode in
+                    resolutions += 1
+                    now = 11 // The native error remains primary even on a late return.
+                    throw expected
+                }, children: { _ in XCTFail("Unresolved picker was traversed"); return [] },
+                   attributes: { _ in XCTFail("Unresolved picker attributes read"); return .init(kind: .other, label: "") })
+            }, enabled: { _ in XCTFail("Unresolved picker admitted a live query"); return true },
+               hittable: { _ in XCTFail("Unresolved picker admitted a live query"); return true },
+               tap: { _ in XCTFail("Unresolved picker admitted a tap") })) {
+                XCTAssertTrue(($0 as? ResolutionFailure) === expected)
+            }
+            XCTAssertThrowsError(try window.perform { XCTFail("Resolution failure was not terminal") }) {
+                XCTAssertTrue(($0 as? ResolutionFailure) === expected)
+            }
+            XCTAssertEqual(resolutions, 1)
+        }
+    }
+
+    @MainActor
+    func testSaveCancellationAndReentryPreventLaterChecksOrAnotherTap() {
+        for reenter in [false, true] {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            var captures = 0
+            var taps = 0
+            func save() throws {
+                try window.waitAndTapSelection(observe: {
+                    captures += 1
+                    if reenter {
+                        XCTAssertThrowsError(try save())
+                    } else { window.cancel() }
+                    return .init(ownerIdentifier: "exact owner")
+                }, enabled: { _ in XCTFail("After cancellation/reentry"); return true },
+                   hittable: { _ in XCTFail("After cancellation/reentry"); return true }, tap: { _ in taps += 1 })
+            }
+            XCTAssertThrowsError(try save()) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure,
+                               reenter ? .selectionAlreadyStarted : .cancelled)
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(captures, 1)
+            XCTAssertEqual(taps, 0)
+        }
+    }
+
+    @MainActor
+    func testSaveTapRemainsInsideOriginalOuterWaiter() {
+        let window = FilesNavigationReadiness(timeout: 0.25)
+        var taps = 0
+        var nested: XCTWaiter.Result?
+        XCTAssertThrowsError(try window.waitAndTapSelection(
+            observe: { .init(ownerIdentifier: "exact owner") }, enabled: { _ in true }, hittable: { _ in true },
+            tap: { _ in
+                taps += 1
+                nested = XCTWaiter.wait(for: [XCTestExpectation(description: "native save")], timeout: 2)
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+        XCTAssertEqual(nested, .interrupted)
+        XCTAssertEqual(taps, 1)
+    }
+
+    @MainActor
+    func testBackupSnapshotUsesSameCurrentFolderProofAndExactFileIdentity() throws {
+        let filename = "backup-journey.roominventory"
+        let file = TitleNode(.cell, "A display label with time and size",
+                             identifier: filename + ", roominventory")
+        let view = TitleNode(.collectionView, identifier: "File View", children: [file])
+        let tree = savePicker([saveOwner([saveBar(actions: []), view])])
+        let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+        let observation = try window.captureSelection(folder: "Run folder", target: .backup(filename: filename),
+            uniqueSnapshot: { tree }, children: { $0.children }, attributes: { $0.item })
+        XCTAssertEqual(observation?.ownerIdentifier,
+                       FilesNavigationReadiness.localStorageRootPrefix + "On My iPhone")
+    }
+
+    @MainActor
+    func testBackupSnapshotNeverFallsBackToPartialFilenameLabelOrWrongType() throws {
+        let filename = "backup-journey.roominventory"
+        let exact = filename + ", roominventory"
+        let files = [TitleNode(.cell, exact, identifier: filename),
+                     TitleNode(.cell, exact, identifier: "backup-other.roominventory, roominventory"),
+                     TitleNode(.text, exact, identifier: exact),
+                     TitleNode(.cell, exact, identifier: exact + ".zip")]
+        for file in files {
+            let view = TitleNode(.collectionView, identifier: "File View", children: [file])
+            let tree = savePicker([saveOwner([saveBar(actions: []), view])])
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertNil(try window.captureSelection(folder: "Run folder", target: .backup(filename: filename),
+                uniqueSnapshot: { tree }, children: { $0.children }, attributes: { $0.item }))
+        }
+    }
+
+    @MainActor
+    func testBackupSnapshotRejectsDuplicateViewsCellsAndCrossBranchMatches() {
+        let filename = "backup-journey.roominventory"
+        let file = TitleNode(.cell, identifier: filename + ", roominventory")
+        let view = TitleNode(.collectionView, identifier: "File View", children: [file])
+        let emptyView = TitleNode(.collectionView, identifier: "File View")
+        let trees: [(TitleNode, FilesNavigationReadiness.Failure)] = [
+            (savePicker([saveOwner([saveBar(), view, view])]), .invalidSelectionCount),
+            (savePicker([saveOwner([saveBar(), TitleNode(.collectionView, identifier: "File View",
+                                                       children: [file, file])])]), .invalidSelectionCount),
+            (savePicker([saveOwner([saveBar()]), view]), .invalidSelectionSnapshot),
+            (savePicker([saveOwner([saveBar(), emptyView, file])]), .invalidSelectionSnapshot)
+        ]
+        for (tree, failure) in trees {
+            let window = FilesNavigationReadiness(timeout: 10, clock: { 0 })
+            XCTAssertThrowsError(try window.captureSelection(folder: "Run folder", target: .backup(filename: filename),
+                uniqueSnapshot: { tree }, children: { $0.children }, attributes: { $0.item })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, failure)
+            }
+        }
+    }
+
+    @MainActor
     func testFirstProbeIsImmediateAndOnMainRunLoop() throws {
         var now = 0.0
         let window = FilesNavigationReadiness(clock: { now })

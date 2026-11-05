@@ -82,7 +82,7 @@ def validate_host(env, profile, root, *, machine=None, system=None):
             "Missing or invalid runner image version", Failure)
     for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "RECOVERY_TESTED_COMMIT", "RECOVERY_TESTED_TREE"):
         require(re.fullmatch(r"[0-9a-f]{40}", env.get(key, "")), "Missing source identity: " + key, Failure)
-    require(env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"], "iOS job tested a different commit", Failure)
+    require(env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"], "Source identity prerequisite recorded a different commit", Failure)
     for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         require(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")), "Invalid run identity", Failure)
     require(env.get("GITHUB_EVENT_NAME") in profile["allowed_events"], "Unsupported event", Failure)

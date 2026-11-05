@@ -4,14 +4,58 @@ on:
 permissions:
   contents: read
 jobs:
+  source-identity:
+    name: Source identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      tree: ${{ steps.identity.outputs.tree }}
+    steps:
+      - name: Checkout exact event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Record immutable source identity
+        id: identity
+        run: |
+          python3 - <<'PY_IDENTITY'
+          import os, re, subprocess
+          expected = os.environ["GITHUB_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", expected):
+              raise SystemExit("Invalid event commit")
+          values = subprocess.check_output(
+              ["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"], text=True).splitlines()
+          if len(values) != 2 or any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in values):
+              raise SystemExit("Invalid source identity")
+          commit, tree = values
+          if commit != expected:
+              raise SystemExit("Checkout differs from event commit")
+          if subprocess.check_output(
+                  ["git", "status", "--porcelain", "--untracked-files=all"], text=True).strip():
+              raise SystemExit("Source identity requires a clean checkout")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"commit={commit}\ntree={tree}\n")
+          PY_IDENTITY
+
   ios:
     name: Core and iOS tests
+    needs: source-identity
     runs-on: macos-26
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
       SIMULATOR_RUNTIME_VERSION: '26.2'
       SIMULATOR_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-16e
+      EXPECTED_SOURCE_COMMIT: ${{ needs.source-identity.outputs.commit }}
+      EXPECTED_SOURCE_TREE: ${{ needs.source-identity.outputs.tree }}
     outputs:
       version: ${{ steps.preview-version.outputs.version }}
       tested-commit: ${{ steps.preview-version.outputs.commit }}
@@ -21,10 +65,26 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      - name: Verify shared source identity before tests
+        run: |
+          python3 - <<'PY_SOURCE'
+          import os, re, subprocess
+          expected = [os.environ["EXPECTED_SOURCE_COMMIT"], os.environ["EXPECTED_SOURCE_TREE"]]
+          if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in expected):
+              raise SystemExit("Invalid shared source identity")
+          actual = subprocess.check_output(
+              ["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"], text=True).splitlines()
+          if actual != expected or expected[0] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("Core checkout differs from shared source identity")
+          if subprocess.check_output(
+                  ["git", "status", "--porcelain", "--untracked-files=all"], text=True).strip():
+              raise SystemExit("Core tests require a clean checkout")
+          PY_SOURCE
       - name: Install locked workflow validation dependency
         run: |
           python3 -m pip install --require-hashes --only-binary=:all: -r .github/requirements-workflow-contracts.txt
@@ -67,13 +127,15 @@ jobs:
           version = pathlib.Path("VERSION").read_text().strip()
           if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
               raise SystemExit("Invalid committed preview version")
+          expected = [os.environ["EXPECTED_SOURCE_COMMIT"], os.environ["EXPECTED_SOURCE_TREE"]]
+          if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in expected):
+              raise SystemExit("Invalid shared source identity")
+          actual = subprocess.check_output(
+              ["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"], text=True).splitlines()
+          if actual != expected or expected[0] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("Validated source differs from shared source identity")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"version={version}\n")
-              for name, ref in (("commit", "HEAD"), ("tree", "HEAD^{tree}")):
-                  value = subprocess.check_output(["git", "rev-parse", ref], text=True).strip()
-                  if not re.fullmatch(r"[0-9a-f]{40}", value):
-                      raise SystemExit("Invalid tested Git identity")
-                  output.write(f"{name}={value}\n")
+              output.write(f"version={version}\ncommit={actual[0]}\ntree={actual[1]}\n")
           PY_VERSION
       - name: Preserve Simulator test results
         if: always()
@@ -87,15 +149,15 @@ jobs:
 
   recovery:
     name: Recovery journey
-    needs: ios
+    needs: source-identity
     runs-on: xcode-27
     timeout-minutes: 45
     permissions:
       contents: read
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      RECOVERY_TESTED_COMMIT: ${{ needs.ios.outputs.tested-commit }}
-      RECOVERY_TESTED_TREE: ${{ needs.ios.outputs.tested-tree }}
+      RECOVERY_TESTED_COMMIT: ${{ needs.source-identity.outputs.commit }}
+      RECOVERY_TESTED_TREE: ${{ needs.source-identity.outputs.tree }}
     steps:
       - name: Checkout validated event revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

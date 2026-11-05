@@ -3,6 +3,10 @@ from pathlib import Path
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
+import os
+import subprocess
+import tempfile
 
 import yaml
 
@@ -23,7 +27,8 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.ci["on"], {"workflow_call": ""})
         self.assertEqual(self.gate["jobs"]["check-0"]["uses"], "./.github/workflows/ci.yml")
         self.assertIn("check-0", self.gate["jobs"]["gate"]["needs"])
-        self.assertEqual(self.job["needs"], "ios")
+        self.assertEqual(self.job["needs"], "source-identity")
+        self.assertEqual(self.ci["jobs"]["ios"]["needs"], "source-identity")
         self.assertEqual(self.ci["jobs"]["preview"]["needs"], ["ios", "recovery"])
         self.assertNotIn("if", self.job)
         self.assertNotIn("continue-on-error", self.job)
@@ -35,11 +40,121 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(checkout["with"], {"persist-credentials": "false", "ref": "${{ github.sha }}"})
         self.assertEqual(self.job["env"], {
             "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
-            "RECOVERY_TESTED_COMMIT": "${{ needs.ios.outputs.tested-commit }}",
-            "RECOVERY_TESTED_TREE": "${{ needs.ios.outputs.tested-tree }}",
+            "RECOVERY_TESTED_COMMIT": "${{ needs.source-identity.outputs.commit }}",
+            "RECOVERY_TESTED_TREE": "${{ needs.source-identity.outputs.tree }}",
         })
         self.assertEqual(self.job["permissions"], {"contents": "read"})
         self.assertNotIn("secrets", self.job)
+
+    def inline_script(self, name):
+        steps = [step for job in self.ci["jobs"].values() for step in job.get("steps", [])]
+        source = next(step["run"] for step in steps if step.get("name") == name)
+        lines = source.splitlines()
+        self.assertTrue(lines[0].startswith("python3 - <<'"))
+        self.assertEqual(lines[-1], lines[0].split("'")[1])
+        return "\n".join(lines[1:-1])
+
+    def run_identity_script(self, name, *, commit="a" * 40, tree="b" * 40,
+                            event="a" * 40, expected_commit="a" * 40,
+                            expected_tree="b" * 40, status="", version="1.2.3"):
+        script = self.inline_script(name)
+        calls = []
+
+        def git(args, **kwargs):
+            self.assertEqual(args[0], "git")
+            self.assertTrue(kwargs.get("text"))
+            calls.append(args)
+            if args[1:] == ["--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"]:
+                return commit + "\n" + tree + "\n"
+            if args[1:] == ["status", "--porcelain", "--untracked-files=all"]:
+                return status
+            self.fail("Unexpected Git operation: " + repr(args))
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "outputs"
+            env = {"GITHUB_SHA": event, "GITHUB_OUTPUT": str(output),
+                   "EXPECTED_SOURCE_COMMIT": expected_commit, "EXPECTED_SOURCE_TREE": expected_tree}
+            failure = None
+            with patch.dict(os.environ, env), patch.object(subprocess, "check_output", side_effect=git), \
+                    patch.object(Path, "read_text", return_value=version):
+                try:
+                    exec(compile(script, "<workflow-identity>", "exec"), {})
+                except SystemExit as error:
+                    failure = str(error)
+            content = output.read_text() if output.exists() else ""
+        return failure, content, calls
+
+    def test_source_prerequisite_is_bounded_read_only_and_both_jobs_require_success(self):
+        source = self.ci["jobs"]["source-identity"]
+        self.assertEqual(source["runs-on"], "ubuntu-latest")
+        self.assertEqual(source["timeout-minutes"], "5")
+        self.assertEqual(source["permissions"], {"contents": "read"})
+        self.assertNotIn("needs", source)
+        self.assertEqual(source["outputs"], {"commit": "${{ steps.identity.outputs.commit }}",
+                                             "tree": "${{ steps.identity.outputs.tree }}"})
+        for job in (source, self.ci["jobs"]["ios"], self.job):
+            self.assertNotIn("if", job)
+            self.assertNotIn("continue-on-error", job)
+            self.assertNotIn("secrets", job)
+            for step in job["steps"]:
+                self.assertNotIn("continue-on-error", step)
+        for job in (source, self.ci["jobs"]["ios"]):
+            checkout = job["steps"][0]
+            self.assertEqual(checkout["with"], {"persist-credentials": "false", "ref": "${{ github.sha }}"})
+            self.assertEqual(checkout["uses"], self.job["steps"][0]["uses"])
+        self.assertEqual(self.ci["permissions"], {"contents": "read"})
+
+    def test_shared_source_produces_only_valid_clean_event_identity(self):
+        name = "Record immutable source identity"
+        error, output, _ = self.run_identity_script(name)
+        self.assertIsNone(error)
+        self.assertEqual(output, "commit=" + "a" * 40 + "\ntree=" + "b" * 40 + "\n")
+        for change in ({"commit": "c" * 40}, {"tree": ""}, {"tree": "b" * 40 + "\nextra"},
+                       {"event": ""}, {"event": "a" * 40 + "\n"}, {"status": "?? untracked\n"},
+                       {"status": " M tracked\n"}):
+            with self.subTest(change=change):
+                error, output, _ = self.run_identity_script(name, **change)
+                self.assertIsNotNone(error)
+                self.assertEqual(output, "")
+
+    def test_core_checks_shared_identity_before_any_test_or_native_command(self):
+        ios = self.ci["jobs"]["ios"]
+        self.assertEqual(ios["env"]["EXPECTED_SOURCE_COMMIT"], "${{ needs.source-identity.outputs.commit }}")
+        self.assertEqual(ios["env"]["EXPECTED_SOURCE_TREE"], "${{ needs.source-identity.outputs.tree }}")
+        names = [step.get("name") for step in ios["steps"]]
+        verify = names.index("Verify shared source identity before tests")
+        self.assertLess(verify, names.index("Test bounded release CLI download retries"))
+        self.assertLess(verify, names.index("Verify installed ARM toolchain"))
+        self.assertLess(verify, names.index("Run source contracts, Core tests, Simulator build and app tests"))
+        self.assertNotIn("if", ios["steps"][verify])
+        self.assertIsNone(self.run_identity_script(names[verify])[0])
+
+    def test_core_preflight_and_posttest_reject_missing_wrong_dirty_identity_without_outputs(self):
+        for name in ("Verify shared source identity before tests", "Record validated source and preview version"):
+            for change in ({"commit": "c" * 40}, {"tree": "c" * 40}, {"expected_commit": ""},
+                           {"expected_tree": ""}, {"expected_tree": "c" * 40}, {"event": "c" * 40},
+                           {"commit": "a" * 40 + "\nextra"}, {"status": " M tracked\n"},
+                           {"status": "?? untracked\n"}):
+                with self.subTest(name=name, change=change):
+                    error, output, _ = self.run_identity_script(name, **change)
+                    self.assertIsNotNone(error)
+                    self.assertEqual(output, "")
+
+    def test_preview_requires_both_successes_and_core_posttest_outputs(self):
+        preview = self.ci["jobs"]["preview"]
+        self.assertEqual(preview["needs"], ["ios", "recovery"])
+        self.assertNotIn("continue-on-error", preview)
+        self.assertEqual(preview["if"], "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}")
+        self.assertEqual(preview["with"]["tested-commit"], "${{ needs.ios.outputs.tested-commit }}")
+        self.assertEqual(preview["with"]["tested-tree"], "${{ needs.ios.outputs.tested-tree }}")
+        self.assertEqual(preview["with"]["version"], "${{ needs.ios.outputs.version }}")
+        error, output, _ = self.run_identity_script("Record validated source and preview version")
+        self.assertIsNone(error)
+        self.assertEqual(output, "version=1.2.3\ncommit=" + "a" * 40 + "\ntree=" + "b" * 40 + "\n")
+        for version in ("", "01.2.3", "1.2.3\ncommit=bad"):
+            error, output, _ = self.run_identity_script("Record validated source and preview version", version=version)
+            self.assertIsNotNone(error)
+            self.assertEqual(output, "")
 
     def test_single_adapter_invocation_is_bound_to_exact_profile_bytes(self):
         runs = [step for step in self.job["steps"] if "run" in step]

@@ -257,13 +257,15 @@ class Run:
         self.owned_device=None; self.device_cleanup=None
     def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False):
         if cleanup and self.cleanup_end is None:self.cleanup_end=time.monotonic()+90
-        remaining=(self.cleanup_end if cleanup else self.end)-time.monotonic()
+        parent_end=self.cleanup_end if cleanup else self.end
+        remaining=parent_end-time.monotonic()
         require(remaining>4 and cap>0,'Overall acceptance deadline')
         record={}; stem=self.out/'operations'/f'{len(self.commands)+1:03d}-{name}'
         try:
             return bounded_capture([str(x) for x in argv],cwd=self.root,env=os.environ.copy(),
                 timeout=min(cap,remaining-4),limit=limit,receipt=record,
-                stdout_path=stem.with_suffix('.stdout'),stderr_path=stem.with_suffix('.stderr'))
+                stdout_path=stem.with_suffix('.stdout'),stderr_path=stem.with_suffix('.stderr'),
+                cleanup_parent_deadline=parent_end)
         finally:
             self.commands.append(record); save(stem.with_suffix('.json'),record)
     def sim(self,*args,cap=30,cleanup=False):

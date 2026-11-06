@@ -559,6 +559,24 @@ the stage, timely observation count and last mismatching synthetic name (or
 explicit nil), capped at 256 UTF-8 bytes with a truncation flag; the complete
 JSON is bounded to 4096 bytes and performs no additional UI or clock queries.
 
+The autofocus introduction observer enumerates all accessibility-bound elements
+whose identifier is exactly `UIContinuousPathIntroductionView`, then snapshots
+the sole result. It does not repeat the owner lookup through `firstMatch` or use
+an application snapshot that can omit the keyboard sibling. The same bound owner
+scopes the uniquely resolved Continue button and its live hittability check.
+Exact marker/button recognition, the 256-node limit, post-value introduction
+check, fresh echo after dismissal, one input and one Continue remain required.
+Query and snapshot are separate native calls within the unchanged deadlines;
+this does not guarantee their latency or atomicity. Failure diagnostics separately
+record the latest capture stage, returned owner count and query/snapshot durations,
+so an interrupted capture cannot be mistaken for a completed absence observation.
+In [issue #25](https://github.com/4alvit/room-inventory-ios/issues/25), run
+`42183451138` returned the full name before the deadline, then interrupted the
+introduction snapshot. This supports correcting repeated owner resolution, not
+retyping the already retained name or claiming a universal timing fix.
+Localization reuses this bound-owner capture while retaining its separate shared
+ten-second `waitAndTapField` path, field tap, input and evidence handling.
+
 Before starting that input window, the autofocus setup rechecks the exact
 introduction owner after the field/keyboard-readiness queries and optional evidence.
 An introduction that appeared during those queries uses the same guarded
@@ -705,6 +723,15 @@ introduction handler during that loop preserves the deadline, single-input
 rule and untapped autofocus coverage. It does not establish that the
 introduction caused the earlier mismatches or that all hosted delays are
 resolved; the complete scenario still requires a fresh successful run.
+
+The shared `RecoveryOCRReadinessWindow` wakes its active waiter when a scheduled
+probe observes an expired deadline, before another query or after a query returns.
+This terminal wake reports `.timedOut`, never readiness. Actual waiter interruptions
+and captured native errors retain their existing precedence; the serial probe
+cadence and each caller's ten- or thirty-second allowance stay unchanged. In a
+local macOS run with an advanced injected clock, the unchanged keyboard
+error/cancellation test fell from 60.018 seconds to 0.000 seconds as reported by
+XCTest. This measures host test overhead, not total hosted CI or UI-query latency.
 
 ### Dismissal observations
 

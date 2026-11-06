@@ -95,6 +95,10 @@ final class NameEntryKeyboardReadiness {
     private var echoIntroductionObservationCount = 0
     private var echoSawIntroduction = false
     private var echoContinueAttempted = false
+    private var introductionCaptureStage = "not_started"
+    private var introductionQueryCount: Int?
+    private var introductionQuerySeconds: TimeInterval?
+    private var introductionSnapshotSeconds: TimeInterval?
 
     init(allowance: ContinueAllowance, timing: Timing = .sharedTenSeconds,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
@@ -137,6 +141,75 @@ final class NameEntryKeyboardReadiness {
             pending.append(contentsOf: descendants)
         }
         return result
+    }
+
+    /// Resolve once, then capture the sole accessibility-bound owner. Completed
+    /// recognition and the latest attempted capture have separate diagnostics.
+    func captureIntroduction<Element, Node>(matchingElements: () throws -> [Element],
+                                            snapshot: (Element) throws -> Node,
+                                            matchesOwner: (Node) -> Bool,
+                                            children: (Node) -> [Node],
+                                            item: (Node) -> Item) throws -> Observation {
+        let elements: [Element]
+        do {
+            var started: TimeInterval?
+            defer {
+                if let started { introductionQuerySeconds = captureDuration(since: started) }
+            }
+            elements = try perform {
+                introductionCaptureStage = "query"
+                introductionQueryCount = nil
+                introductionQuerySeconds = nil
+                introductionSnapshotSeconds = nil
+                started = clock.latest
+                let elements = try matchingElements()
+                introductionQueryCount = elements.count
+                return elements
+            }
+        }
+        let unresolved = Observation(introductionCount: elements.count)
+        guard elements.count == 1, let owner = elements.first else {
+            introductionCaptureStage = elements.isEmpty ? "absent" : "ambiguous"
+            return unresolved
+        }
+        let root: Node
+        do {
+            var started: TimeInterval?
+            defer {
+                if let started { introductionSnapshotSeconds = captureDuration(since: started) }
+            }
+            root = try perform {
+                introductionCaptureStage = "snapshot"
+                started = clock.latest
+                return try snapshot(owner)
+            }
+        }
+        introductionCaptureStage = "recognition"
+        guard try perform({ matchesOwner(root) }) else {
+            introductionCaptureStage = "wrong_owner"
+            return unresolved
+        }
+        var pending = [root]
+        var items: [Item] = []
+        while let node = pending.popLast() {
+            items.append(try perform { item(node) })
+            let descendants = try perform { children(node) }
+            try perform {
+                guard descendants.count <= 256 - items.count - pending.count else {
+                    throw Failure.notReady
+                }
+            }
+            pending.append(contentsOf: descendants)
+        }
+        let result = try perform { Self.recognize(introductionCount: 1, items: items) }
+        introductionCaptureStage = "observed"
+        return result
+    }
+
+    private func captureDuration(since start: TimeInterval) -> TimeInterval? {
+        // perform's postcheck (or retained native failure) already sampled finish.
+        let elapsed = clock.latest - start
+        return elapsed.isFinite && elapsed >= 0 ? elapsed : nil
     }
 
     private func retainFailure(_ error: Error) {
@@ -412,7 +485,11 @@ final class NameEntryKeyboardReadiness {
          "echo_continue_enabled": echoIntroductionObservation.map { $0.continueEnabled as Any } ?? NSNull(),
          "echo_saw_introduction": echoSawIntroduction,
          "echo_continue_attempted_once": echoContinueAttempted,
-         "test_case_continue_consumed": allowance.attempted]
+          "test_case_continue_consumed": allowance.attempted,
+          "introduction_capture_stage": introductionCaptureStage,
+          "introduction_query_count": introductionQueryCount.map { $0 as Any } ?? NSNull(),
+          "introduction_query_seconds": introductionQuerySeconds.map { $0 as Any } ?? NSNull(),
+          "introduction_snapshot_seconds": introductionSnapshotSeconds.map { $0 as Any } ?? NSNull()]
         return timingDiagnostic.merging(record) { _, value in value }
     }
 

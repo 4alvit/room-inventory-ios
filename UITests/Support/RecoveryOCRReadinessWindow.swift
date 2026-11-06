@@ -40,7 +40,10 @@ struct RecoveryOCRReadinessWindow {
         RunLoop.main.perform(inModes: [.default]) {
             MainActor.assumeIsolated { pending.poll() }
         }
-        return XCTWaiter.wait(for: [pending.ready], timeout: try remaining())
+        let result = XCTWaiter.wait(for: [pending.ready], timeout: try remaining())
+        // Expiration wakes the waiter without turning a late probe into readiness.
+        // Return a result so callers can still prioritize a captured native error.
+        return result == .completed && pending.expired ? .timedOut : result
     }
 
     @MainActor
@@ -50,6 +53,7 @@ struct RecoveryOCRReadinessWindow {
         private let probe: @MainActor () -> Bool
         private var active = true
         private var timer: Timer?
+        private(set) var expired = false
 
         init(window: RecoveryOCRReadinessWindow, probe: @escaping @MainActor () -> Bool) {
             self.window = window
@@ -57,9 +61,11 @@ struct RecoveryOCRReadinessWindow {
         }
 
         func poll() {
-            guard active, (try? window.remaining()) != nil else { return }
+            guard active else { return }
+            guard (try? window.remaining()) != nil else { finishExpired(); return }
             let finished = probe()
-            guard active, (try? window.remaining()) != nil else { return }
+            guard active else { return }
+            guard (try? window.remaining()) != nil else { finishExpired(); return }
             if finished {
                 active = false
                 ready.fulfill()
@@ -72,6 +78,12 @@ struct RecoveryOCRReadinessWindow {
                 timer = next
                 RunLoop.main.add(next, forMode: .default)
             }
+        }
+        private func finishExpired() {
+            guard active else { return }
+            expired = true
+            stop()
+            ready.fulfill()
         }
         func stop() {
             active = false

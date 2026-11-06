@@ -1,6 +1,44 @@
 import XCTest
 
 final class RecoveryOCRReadinessWindowTests: XCTestCase {
+    func testColdKeyboardSetupHasFixedNinetySecondsWithoutChangingGenericLimits() throws {
+        var now = 0.0
+        let setup = RecoveryOCRReadinessWindow.coldKeyboardSetup(clock: { now })
+        let ordinary = RecoveryOCRReadinessWindow(clock: { now })
+        let external = RecoveryOCRReadinessWindow(timeout: 30, clock: { now })
+        now = 30
+        XCTAssertThrowsError(try ordinary.remaining())
+        XCTAssertThrowsError(try external.remaining())
+        XCTAssertEqual(try setup.remaining(), 60)
+        try setup.perform { now = 89 }
+        XCTAssertEqual(try setup.remaining(), 1)
+        for elapsed in [90.0, 91.0] {
+            now = elapsed
+            XCTAssertThrowsError(try setup.perform { XCTFail("Expired setup cannot admit work") }) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+            }
+        }
+    }
+
+    @MainActor
+    func testColdKeyboardSetupExpiryWakesWithoutReadinessOrAnotherProbe() throws {
+        for ready in [false, true] {
+            for elapsed in [90.0, 91.0] {
+                var now = 0.0
+                let setup = RecoveryOCRReadinessWindow.coldKeyboardSetup(clock: { now })
+                var calls = 0
+                let started = ProcessInfo.processInfo.systemUptime
+                XCTAssertEqual(try setup.waitForProbe {
+                    calls += 1
+                    now = elapsed
+                    return ready
+                }, .timedOut)
+                XCTAssertEqual(calls, 1)
+                XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+            }
+        }
+    }
+
     @MainActor
     func testPostProbeExpiryWakesWithoutReadinessOrAnotherProbe() throws {
         for result in [false, true] {
@@ -95,7 +133,7 @@ final class RecoveryOCRReadinessWindowTests: XCTestCase {
     }
 
     func testInvalidExternalAllowanceFailsBeforeOperation() {
-        for timeout in [-1.0, 0, 30.001, .infinity, .nan] {
+        for timeout in [-1.0, 0, 30.001, 90, .infinity, .nan] {
             let window = RecoveryOCRReadinessWindow(timeout: timeout, clock: { 0 })
             var called = false
             XCTAssertThrowsError(try window.perform { called = true }) {

@@ -540,7 +540,7 @@ presentation, including if SwiftUI recreates the observer. The observer requires
 an attached window, rejects dismissal, and clears its callback on dismantle.
 It does not schedule delayed requests or repeat focus when an alert returns.
 Recovery uses `AutofocusedNameEntry` without a second field tap. One
-30-second monotonic setup window covers the exact keyboard introduction and a
+90-second monotonic cold-setup window covers the exact keyboard introduction and a
 unique enabled text field with exactly one software keyboard. Only timely readiness can start the
 separate ten-second input window, covering an empty or placeholder value, one
 native `typeText`, and the exact typed value afterward. Initial live `nil` values use
@@ -566,7 +566,7 @@ an application snapshot that can omit the keyboard sibling. The same bound owner
 scopes the uniquely resolved Continue button and its live hittability check.
 Exact marker/button recognition, the 256-node limit, post-value introduction
 check, fresh echo after dismissal, one input and one Continue remain required.
-Query and snapshot are separate native calls within the unchanged deadlines;
+Query and snapshot are separate native calls within their phase deadline;
 this does not guarantee their latency or atomicity. Failure diagnostics separately
 record the latest capture stage, returned owner count and query/snapshot durations,
 so an interrupted capture cannot be mistaken for a completed absence observation.
@@ -576,6 +576,17 @@ introduction snapshot. This supports correcting repeated owner resolution, not
 retyping the already retained name or claiming a universal timing fix.
 Localization reuses this bound-owner capture while retaining its separate shared
 ten-second `waitAndTapField` path, field tap, input and evidence handling.
+
+In actual-main run `42193424143`, the complete introduction was visible about
+26 seconds before the former 30-second setup deadline. The exact owner query
+took 7.154 seconds, then its bound snapshot was interrupted after 15.227 seconds;
+neither Continue nor input had run. Cold setup now uses the explicitly named
+90-second allowance to give those native observations and the guarded dismissal
+more time. The ordinary readiness initializer still rejects allowances above
+30 seconds; input remains ten seconds, Localization remains ten seconds, and the
+complete Recovery case remains capped at 720 seconds. No phase renews its timer.
+This accommodates slow accessibility observation; it does not establish the
+underlying OS cause or guarantee that any native call will finish in time.
 
 Before starting that input window, the autofocus setup rechecks the exact
 introduction owner after the field/keyboard-readiness queries and optional evidence.
@@ -600,8 +611,8 @@ fallback or retyping. Keyboard presence is a setup prerequisite, not proof that
 the intended field has focus: native input and its exact echo remain required. Generic item-editor
 fields still use their existing tap-based input.
 
-The autofocus adapter resolves the recognized owner and Continue button with
-`firstMatch` only after the same owner-count and snapshot-recognition guards.
+The autofocus adapter retains the recognized bound owner and resolves its
+unique Continue button only after the owner-count and snapshot-recognition guards.
 The snapshot still requires the exact owner identifier, exact marker and exactly
 one enabled Continue button; native hittability and the single tap remain gated
 by the setup deadline. The adapter inventories exact `entry.name` text fields
@@ -681,8 +692,8 @@ In beta run `41791887890`, the post-Continue field query took 5.144 seconds to
 resolve, while fetching its snapshot took 0.012 seconds. Setup expired before
 input. A recognized late introduction had also waited one polling interval and
 been resolved again before Continue. The direct field snapshot and immediate
-guarded action remove those redundant operations without increasing the
-30-second setup or ten-second input allowance. They do not guarantee completion
+guarded action removed those redundant operations without increasing the then
+30-second setup or ten-second input allowance. They did not guarantee completion
 under arbitrary service delays; the complete hosted journey must still pass.
 
 In main run `41772302929`, native input's indexed name-field resolution took
@@ -700,8 +711,8 @@ session records the watchdog interruption and cancelled query; the failure
 screenshot and accessibility tree show the real introduction and an empty,
 focused Home field. No Continue or input action had occurred. The setup/input
 split gives cold keyboard initialization its own finite allowance without
-loosening exact-value checks. Thirty seconds is a bounded policy allowance,
-not a measured guarantee of hosted latency. Neither phase may renew its
+loosening exact-value checks. The original thirty-second setup was a bounded
+policy allowance, not a measured guarantee of hosted latency. Neither phase may renew its
 deadline, and a failed or late setup cannot start input.
 
 The native `NameEntryAutofocusUITests` regression creates a home, room and item

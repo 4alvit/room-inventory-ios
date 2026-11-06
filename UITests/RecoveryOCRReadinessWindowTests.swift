@@ -1,6 +1,82 @@
 import XCTest
 
 final class RecoveryOCRReadinessWindowTests: XCTestCase {
+    @MainActor
+    func testPostProbeExpiryWakesWithoutReadinessOrAnotherProbe() throws {
+        for result in [false, true] {
+            for expiredAt in [30.0, 30.001] {
+                var now = 0.0
+                let window = RecoveryOCRReadinessWindow(timeout: 30, clock: { now })
+                var calls = 0
+                let started = ProcessInfo.processInfo.systemUptime
+                let observed = try window.waitForProbe {
+                    calls += 1
+                    now = expiredAt
+                    return result
+                }
+                XCTAssertEqual(observed, .timedOut)
+                XCTAssertEqual(calls, 1)
+                XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+                XCTAssertThrowsError(try window.remaining())
+            }
+        }
+    }
+
+    @MainActor
+    func testQueuedProbeExpiryWakesWithoutCallingProbe() throws {
+        var clockReads = 0
+        let window = RecoveryOCRReadinessWindow(timeout: 30, clock: {
+            clockReads += 1
+            // Initialization, scheduling and waiter admission are timely.
+            return clockReads <= 3 ? 0 : 30
+        })
+        var calls = 0
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertEqual(try window.waitForProbe { calls += 1; return true }, .timedOut)
+        XCTAssertEqual(calls, 0)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+    }
+
+    @MainActor
+    func testExpiryBeforeNextPollWakesWithoutRepeatingProbe() throws {
+        @MainActor final class Clock { var now = 0.0 }
+        let clock = Clock()
+        let window = RecoveryOCRReadinessWindow(timeout: 30, clock: { clock.now })
+        var calls = 0
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try window.waitForProbe {
+            calls += 1
+            RunLoop.main.perform(inModes: [.default]) {
+                MainActor.assumeIsolated { clock.now = 30 }
+            }
+            return false
+        }
+        XCTAssertEqual(result, .timedOut)
+        XCTAssertEqual(calls, 1)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+    }
+
+    @MainActor
+    func testExpiredNativeErrorRemainsAvailableAfterPromptWake() throws {
+        enum NativeFailure: Error { case unavailable }
+        var now = 0.0
+        let window = RecoveryOCRReadinessWindow(timeout: 30, clock: { now })
+        var capturedError: Error?
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try window.waitForProbe {
+            do {
+                try window.perform { now = 31; throw NativeFailure.unavailable }
+                return false
+            } catch {
+                capturedError = error
+                return true
+            }
+        }
+        XCTAssertEqual(result, .timedOut)
+        XCTAssertTrue(capturedError is NativeFailure)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+    }
+
     func testExplicitExternalAllowanceDoesNotChangeOCRDefault() throws {
         var now = 0.0
         let ocr = RecoveryOCRReadinessWindow(clock: { now })

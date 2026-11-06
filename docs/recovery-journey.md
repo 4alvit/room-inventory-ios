@@ -724,6 +724,15 @@ rule and untapped autofocus coverage. It does not establish that the
 introduction caused the earlier mismatches or that all hosted delays are
 resolved; the complete scenario still requires a fresh successful run.
 
+The shared `RecoveryOCRReadinessWindow` wakes its active waiter when a scheduled
+probe observes an expired deadline, before another query or after a query returns.
+This terminal wake reports `.timedOut`, never readiness. Actual waiter interruptions
+and captured native errors retain their existing precedence; the serial probe
+cadence and each caller's ten- or thirty-second allowance stay unchanged. In a
+local macOS run with an advanced injected clock, the unchanged keyboard
+error/cancellation test fell from 60.018 seconds to 0.000 seconds as reported by
+XCTest. This measures host test overhead, not total hosted CI or UI-query latency.
+
 ### Dismissal observations
 
 `ElementDismissalReadiness` observes the count of the original, typed UI query

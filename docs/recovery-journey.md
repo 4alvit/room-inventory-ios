@@ -574,8 +574,20 @@ In [issue #25](https://github.com/4alvit/room-inventory-ios/issues/25), run
 `42183451138` returned the full name before the deadline, then interrupted the
 introduction snapshot. This supports correcting repeated owner resolution, not
 retyping the already retained name or claiming a universal timing fix.
-Localization reuses this bound-owner capture while retaining its separate shared
-ten-second `waitAndTapField` path, field tap, input and evidence handling.
+Localization reuses this bound-owner capture with an explicit shared thirty-second
+`waitAndTapField` window for introduction handling, field readiness and its one
+field tap. Its subsequent direct `typeText`, Save and dismissal flow is unchanged;
+those calls do not use the helper's input/echo window.
+
+In run `42212115025`, Localization admitted the field tap about 8.25 seconds into
+the former ten-second window, but native event synthesis and idle waiting returned
+at 12.82 seconds. The post-action deadline check correctly rejected that late
+return before any text input. The named Localization mode allows thirty seconds
+from the original start, including optional evidence and the tap; it does not renew
+the timer or retry an action. The default shared mode remains ten seconds, and
+autofocus retains its separate 90/30-second windows. This accommodates the observed
+native delay without claiming to fix its cause or preempt a synchronous native call
+([issue #32](https://github.com/4alvit/room-inventory-ios/issues/32)).
 
 In actual-main run `42193424143`, the complete introduction was visible about
 26 seconds before the former 30-second setup deadline. The exact owner query
@@ -583,7 +595,7 @@ took 7.154 seconds, then its bound snapshot was interrupted after 15.227 seconds
 neither Continue nor input had run. Cold setup now uses the explicitly named
 90-second allowance to give those native observations and the guarded dismissal
 more time. The ordinary readiness initializer still rejects allowances above
-30 seconds; autofocus input uses thirty seconds, Localization keeps ten seconds, and the
+30 seconds; autofocus input and Localization's readiness/tap window use thirty seconds, and the
 complete Recovery case remains capped at 900 seconds. No phase renews its timer.
 This accommodates slow accessibility observation; it does not establish the
 underlying OS cause or guarantee that any native call will finish in time.
@@ -593,7 +605,7 @@ complete name plus keyboard introduction appeared before the former ten-second
 echo deadline. The final native introduction query was nevertheless interrupted.
 Autofocus now has one thirty-second input/echo window, including any guarded
 Continue and a fresh exact value after dismissal. Both diagnostic allowance
-fields report that bound; Localization retains its shared ten seconds. No input
+fields report that bound; the default shared mode remains ten seconds. No input
 is repeated, no phase is renewed, and the change does not claim to repair OS
 accessibility latency ([issue #25](https://github.com/4alvit/room-inventory-ios/issues/25)).
 
@@ -613,8 +625,8 @@ Localization's exact recognizer and a per-test Continue allowance shared across
 all three sheets. It requires the introduction to disappear and the field to
 be ready afterward. Optional before/after screenshots consume the setup window;
 they do not renew it. `waitForField` omits the field tap. The helper's explicit
-setup/input mode is used for AutofocusedNameEntry; Localization retains its
-existing shared ten-second `waitAndTapField` path and field tap. A late query or
+setup/input mode is used for AutofocusedNameEntry; Localization uses its explicit
+shared thirty-second `waitAndTapField` path and field tap. For autofocus, a late query or
 input cannot authorize Save; there is no generic Continue action, field-tap
 fallback or retyping. Keyboard presence is a setup prerequisite, not proof that
 the intended field has focus: native input and its exact echo remain required. Generic item-editor

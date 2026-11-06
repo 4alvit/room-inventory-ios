@@ -27,6 +27,16 @@ final class FilesNavigationReadiness {
     struct SelectionObservation {
         let ownerIdentifier: String
     }
+    struct NavigationCaptureDiagnostics {
+        var attempts = 0
+        var completed = 0
+        var lastDuration: TimeInterval?
+        var lastRemainingAtStart: TimeInterval?
+        var lastPickerCount: Int?
+        var lastNodeCount = 0
+        var stage = "not_started"
+    }
+    private(set) var navigationCaptureDiagnostics = NavigationCaptureDiagnostics()
     enum SelectionTarget { case save; case backup(filename: String) }
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
@@ -102,6 +112,76 @@ final class FilesNavigationReadiness {
 
     func waitForState(probe: @escaping () throws -> State?) throws -> State {
         try waitForResult(probe: probe)
+    }
+
+    /// Capture the owned application once, then discover every matching picker
+    /// locally. This avoids a live count followed by another live resolution.
+    /// The node limit bounds our traversal, not the native snapshot operation.
+    func captureApplicationNavigationState<Node>(folder: String, localTitle: String,
+                                                   uniqueSnapshot: () throws -> Node,
+                                                   children: (Node) -> [Node],
+                                                   attributes: (Node) -> TitleItem) throws -> State? {
+        let root = try perform {
+            navigationCaptureDiagnostics.attempts += 1
+            navigationCaptureDiagnostics.stage = "snapshot"
+            navigationCaptureDiagnostics.lastPickerCount = nil
+            navigationCaptureDiagnostics.lastNodeCount = 0
+            navigationCaptureDiagnostics.lastDuration = nil
+            let started = lastTime
+            navigationCaptureDiagnostics.lastRemainingAtStart = end - started
+            defer {
+                let finished = clock()
+                let elapsed = finished - started
+                if finished.isFinite, elapsed.isFinite, elapsed >= 0 {
+                    navigationCaptureDiagnostics.lastDuration = elapsed
+                }
+            }
+            let snapshot = try uniqueSnapshot()
+            navigationCaptureDiagnostics.completed += 1
+            return snapshot
+        }
+        navigationCaptureDiagnostics.stage = "discovery"
+        let rootItem = try perform { attributes(root) }
+        try perform {
+            guard rootItem.kind == .application else { throw Failure.invalidNavigationSnapshot }
+        }
+        var pending = [root]
+        var picker: Node?
+        var pickerCount = 0
+        var visited = 0
+        while let node = pending.popLast() {
+            let item = try perform { attributes(node) }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard visited + pending.count + descendants.count < Self.titleSnapshotNodeLimit else {
+                    throw Failure.invalidNavigationSnapshot
+                }
+            }
+            visited += 1
+            navigationCaptureDiagnostics.lastNodeCount = visited
+            if item.kind == .other, item.identifier == Self.pickerIdentifier {
+                pickerCount += 1
+                navigationCaptureDiagnostics.lastPickerCount = pickerCount
+                try perform {
+                    guard pickerCount == 1 else { throw Failure.invalidNavigationCount }
+                }
+                picker = node
+            }
+            pending.append(contentsOf: descendants.reversed())
+        }
+        navigationCaptureDiagnostics.lastPickerCount = pickerCount
+        guard let picker else {
+            navigationCaptureDiagnostics.stage = "missing"
+            return nil
+        }
+        navigationCaptureDiagnostics.stage = "classification"
+        // Both closures use the same immutable capture. Neither resolves a live
+        // XCUIElement; retain the existing exact picker classification below.
+        let state = try captureNavigationState(folder: folder, localTitle: localTitle,
+            pickerCount: { pickerCount }, uniqueSnapshot: { picker },
+            children: children, attributes: attributes)
+        navigationCaptureDiagnostics.stage = state == nil ? "pending" : "ready"
+        return state
     }
 
     /// One immutable picker tree decides the navigation state. Missing owners
@@ -208,13 +288,13 @@ final class FilesNavigationReadiness {
     }
 
     func captureNavigationState(folder: String, localTitle: String,
-                                 pickers: XCUIElementQuery) throws -> State? {
-        try captureNavigationState(folder: folder, localTitle: localTitle,
-            pickerCount: { pickers.count },
-            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try pickers.element.snapshot() },
+                                 app: XCUIApplication) throws -> State? {
+        try captureApplicationNavigationState(folder: folder, localTitle: localTitle,
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try app.snapshot() },
             children: { $0.children }, attributes: { node in
                 let kind: TitleKind
                 switch node.elementType {
+                case .application: kind = .application
                 case .other: kind = .other
                 case .navigationBar: kind = .navigationBar
                 case .staticText: kind = .text

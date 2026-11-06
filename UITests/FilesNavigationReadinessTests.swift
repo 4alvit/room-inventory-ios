@@ -64,6 +64,196 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    private func applicationNavigation(_ root: TitleNode, window: FilesNavigationReadiness) throws
+        -> FilesNavigationReadiness.State? {
+        try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { root }, children: { (node: TitleNode) in node.children },
+            attributes: { (node: TitleNode) in node.item })
+    }
+
+    @MainActor
+    func testApplicationNavigationCapturesOnceAndFindsNestedPicker() throws {
+        let window = FilesNavigationReadiness(clock: { 0 })
+        let root = TitleNode(.application, children: [TitleNode(.other),
+            TitleNode(.other, children: [savePicker([saveOwner([saveBar()])])])])
+        var captures = 0
+        let state = try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { () -> TitleNode in captures += 1; return root },
+            children: { (node: TitleNode) in node.children }, attributes: { (node: TitleNode) in node.item })
+        XCTAssertEqual(state, .targetFolder)
+        XCTAssertEqual(captures, 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastPickerCount, 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.stage, "ready")
+    }
+
+    @MainActor
+    func testApplicationNavigationDoesNotStopAtFirstPicker() {
+        let root = TitleNode(.application, children: [
+            savePicker([saveOwner([saveBar()])]),
+            TitleNode(.other, children: [savePicker([])])])
+        let window = FilesNavigationReadiness(clock: { 0 })
+        XCTAssertThrowsError(try applicationNavigation(root, window: window)) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidNavigationCount)
+        }
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastPickerCount, 2)
+    }
+
+    @MainActor
+    func testApplicationNavigationRejectsNestedDuplicatePicker() {
+        let root = TitleNode(.application, children: [savePicker([savePicker([])])])
+        XCTAssertThrowsError(try applicationNavigation(root, window: FilesNavigationReadiness(clock: { 0 }))) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidNavigationCount)
+        }
+    }
+
+    @MainActor
+    func testApplicationNavigationMissingExactTypedPickerRemainsPending() throws {
+        let root = TitleNode(.application, children: [
+            TitleNode(.other, FilesNavigationReadiness.pickerIdentifier),
+            TitleNode(.button, identifier: FilesNavigationReadiness.pickerIdentifier),
+            TitleNode(.button, "Browse")])
+        let window = FilesNavigationReadiness(clock: { 0 })
+        XCTAssertNil(try applicationNavigation(root, window: window))
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastPickerCount, 0)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.stage, "missing")
+    }
+
+    @MainActor
+    func testApplicationNavigationRejectsNonApplicationRoot() {
+        let root = TitleNode(.other, children: [savePicker([saveOwner([saveBar()])])])
+        XCTAssertThrowsError(try applicationNavigation(root, window: FilesNavigationReadiness(clock: { 0 }))) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidNavigationSnapshot)
+        }
+    }
+
+    @MainActor
+    func testApplicationNavigationPreservesAllFiveStateChoices() throws {
+        let cases: [(TitleNode, FilesNavigationReadiness.State)] = [
+            (savePicker([saveOwner([saveBar()]), TitleNode(.button, "Browse")]), .targetFolder),
+            (savePicker([saveOwner([saveBar(title: TitleNode(.text, "On My iPhone"))])]), .localRoot),
+            (savePicker([TitleNode(.cell, "On My iPhone, 2 items")]), .localEntry),
+            (savePicker([TitleNode(.button, "Browse")]), .browse),
+            (savePicker([.owner(children: [TitleNode(.button, "Back", identifier: "BackButton")])]), .back)
+        ]
+        for (picker, expected) in cases {
+            XCTAssertEqual(try applicationNavigation(TitleNode(.application, children: [picker]),
+                window: FilesNavigationReadiness(clock: { 0 })), expected)
+        }
+    }
+
+    @MainActor
+    func testApplicationNavigationCannotBorrowForeignTitleOrAction() throws {
+        let remoteOwner = TitleNode(.other, identifier: "DOC.browsingRoot Source: remote, Title: Run folder",
+                                    children: [saveBar()])
+        let pickers = [savePicker([remoteOwner]), savePicker([saveOwner([]), saveBar()]),
+            savePicker([saveOwner([saveBar(title: TitleNode(.text, "Run folder", enabled: false))])])]
+        for picker in pickers {
+            let root = TitleNode(.application, children: [picker, TitleNode(.button, "Browse"),
+                TitleNode(.cell, "On My iPhone"), saveBar()])
+            XCTAssertNil(try applicationNavigation(root, window: FilesNavigationReadiness(clock: { 0 })))
+        }
+    }
+
+    @MainActor
+    func testApplicationNavigationBoundsEntireAncestorAfterFindingPicker() {
+        let root = TitleNode(.application, children: [savePicker([saveOwner([saveBar()])]),
+            TitleNode(.other, children: Array(repeating: TitleNode(.other),
+                count: FilesNavigationReadiness.titleSnapshotNodeLimit))])
+        XCTAssertThrowsError(try applicationNavigation(root, window: FilesNavigationReadiness(clock: { 0 }))) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidNavigationSnapshot)
+        }
+    }
+
+    @MainActor
+    func testApplicationNavigationLateCaptureCannotReadOrAdmitState() {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        var reads = 0
+        XCTAssertThrowsError(try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { () -> TitleNode in now = 10; return TitleNode(.application) },
+            children: { (node: TitleNode) in reads += 1; return node.children },
+            attributes: { (node: TitleNode) in reads += 1; return node.item })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+        }
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastDuration, 10)
+    }
+
+    @MainActor
+    func testApplicationNavigationLateDiscoveryCannotAdmitEarlierPicker() {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        let root = TitleNode(.application, children: [savePicker([saveOwner([saveBar()])]),
+            TitleNode(.other, identifier: "last-application-branch")])
+        XCTAssertThrowsError(try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { root }, children: { (node: TitleNode) in node.children },
+            attributes: { (node: TitleNode) in
+                if node.identifier == "last-application-branch" { now = 10 }
+                return node.item
+            })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+        }
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastPickerCount, 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.stage, "discovery")
+    }
+
+    @MainActor
+    func testApplicationNavigationPreservesLateNativeErrorAndDoesNotRetry() {
+        enum NativeFailure: Error { case interrupted }
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        var captures = 0
+        XCTAssertThrowsError(try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { () throws -> TitleNode in captures += 1; now = 11; throw NativeFailure.interrupted },
+            children: { (node: TitleNode) in node.children }, attributes: { (node: TitleNode) in node.item })) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        XCTAssertThrowsError(try applicationNavigation(TitleNode(.application), window: window)) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        XCTAssertEqual(captures, 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.attempts, 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.completed, 0)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastDuration, 11)
+    }
+
+    @MainActor
+    func testApplicationNavigationCancellationBeforeCaptureDoesNotQuery() {
+        let window = FilesNavigationReadiness(clock: { 0 })
+        window.cancel()
+        var captures = 0
+        XCTAssertThrowsError(try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+            uniqueSnapshot: { () -> TitleNode in captures += 1; return TitleNode(.application) },
+            children: { (node: TitleNode) in node.children }, attributes: { (node: TitleNode) in node.item })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .cancelled)
+        }
+        XCTAssertEqual(captures, 0)
+    }
+
+    @MainActor
+    func testApplicationNavigationLaterCaptureUsesOriginalDeadline() throws {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: 10, clock: { now })
+        var captures = 0
+        let state = try window.waitForState {
+            try window.captureApplicationNavigationState(folder: "Run folder", localTitle: "On My iPhone",
+                uniqueSnapshot: { () -> TitleNode in
+                    captures += 1
+                    if captures == 1 { now = 8; return TitleNode(.application) }
+                    now = 9
+                    return TitleNode(.application, children: [self.savePicker([self.saveOwner([self.saveBar()])])])
+                }, children: { (node: TitleNode) in node.children }, attributes: { (node: TitleNode) in node.item })
+        }
+        XCTAssertEqual(state, .targetFolder)
+        XCTAssertEqual(captures, 2)
+        XCTAssertEqual(try window.remaining(), 1)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastRemainingAtStart, 2)
+        XCTAssertEqual(window.navigationCaptureDiagnostics.lastDuration, 1)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(captures, 2)
+    }
+
+    @MainActor
     func testNavigationSnapshotMissingPickerDoesNotResolveOrReadAttributes() throws {
         let window = FilesNavigationReadiness(clock: { 0 })
         var reads = 0

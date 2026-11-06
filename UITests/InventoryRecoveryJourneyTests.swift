@@ -845,23 +845,28 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let began = ProcessInfo.processInfo.systemUptime
         var selected: FilesNavigationReadiness.State?
         defer {
+            let capture = readiness.navigationCaptureDiagnostics
             let record: [String: Any] = [
                 "schema_version": 1, "phase": initial ? "presentation" : "navigation",
                 "allowance_seconds": allowance,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                 "result": selected == nil ? "failed" : "ready",
-                "state": selected.map { String(describing: $0) } as Any? ?? NSNull()
+                "state": selected.map { String(describing: $0) } as Any? ?? NSNull(),
+                "capture_attempts": capture.attempts, "captures_completed": capture.completed,
+                "last_capture_seconds": capture.lastDuration as Any? ?? NSNull(),
+                "last_capture_remaining_seconds": capture.lastRemainingAtStart as Any? ?? NSNull(),
+                "last_picker_count": capture.lastPickerCount as Any? ?? NSNull(),
+                "last_node_count": capture.lastNodeCount, "last_stage": capture.stage
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
                 print("ROOM_FILES_NAVIGATION_V1 \(text)")
             }
         }
-        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
         let state = try readiness.waitForState {
-            // Classify one immutable remote picker tree. Separate exists and
-            // property queries can target different presentation states.
-            try readiness.captureNavigationState(folder: folder, localTitle: localTitle, pickers: pickers)
+            // Discover the unique remote picker and classify its state within
+            // one immutable capture of this owned application.
+            try readiness.captureNavigationState(folder: folder, localTitle: localTitle, app: app)
         }
         selected = state
         return state

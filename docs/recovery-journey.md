@@ -1590,9 +1590,19 @@ missing-element failure before the next readiness probe. The later failure tree
 and screenshot show the intended run folder and Save, with the default
 Inventory-package filename. They do not prove when the earlier transition occurred.
 
-Navigation now resolves at most one `Browse View (Picker)` and classifies its
-captured attributes and descendants together. A missing picker or incomplete
-captured state remains pending; ambiguous owners, bars or exact titles fail.
+In RC run `42162115958`, Files was visible about 14 seconds before the
+presentation deadline. Three live picker-count queries took about 7.14, 14.90
+and 6.83 seconds. The separate unique-picker snapshot then began about one
+second before the deadline and was interrupted by the enclosing waiter.
+Visible controls did not establish timely accessibility-query completion.
+This regression is tracked in [issue #22](https://github.com/4alvit/room-inventory-ios/issues/22).
+
+Navigation now captures the owned `XCUIApplication` once per probe and counts
+every exact, typed `Browse View (Picker)` in that immutable application tree.
+The complete bounded discovery must find exactly one picker before its existing
+attributes and descendants are classified. There is no first-match or first-window
+fallback. A missing picker or incomplete captured state remains pending;
+ambiguous pickers, owners, bars or exact titles fail.
 The local provider's remembered title is not the current folder: current local
 location comes from the uniquely owned bar's direct exact title. Target folder,
 local root, local entry, Browse and Back preserve that priority. Only typed,
@@ -1602,13 +1612,23 @@ still applies before every navigation action. Folder observation itself needs
 no tap or live property query on its title.
 
 The original 30-second presentation and 10-second subsequent-navigation windows
-are unchanged and cover count, capture, bounded 4,096-node classification and
-waiter return. A capture error propagates, including a picker that disappears
-after its count query. Late results cannot admit a state, and a missing state
+are unchanged. Both application discovery and picker classification are limited
+to 4,096 nodes; capture, local traversal and waiter return share the same original
+deadline. The next probe is scheduled 0.1 seconds after the previous probe returns,
+so native queries do not overlap. Capture errors still propagate, including errors
+returned after the deadline. Late results cannot admit a state, and a missing state
 never implies Back. No extra sleep, timeout increase or host accounting change
-is included. Synthetic tests cover the hierarchy, state ordering, ambiguity,
-missing/disabled controls, native capture errors, cancellation and deadlines;
-the actual remote-picker behavior still requires the new hosted run.
+is included. The existing bounded navigation diagnostic also records capture
+attempt/completion counts, the last capture duration and remaining allowance,
+the last local picker/node counts and stage, without additional AX queries.
+
+The traversal limits do not bound native capture time, transferred hierarchy size
+or framework memory. An application snapshot may be larger than a picker snapshot,
+and remote subtree inclusion and timely completion still require hosted validation.
+This removes the separate count/resolution pair; it does not claim to repair the
+system Files service or eliminate all timing failures. Synthetic tests preserve
+state ordering, exact hierarchy, disabled controls, duplicate rejection, native
+errors and deadlines, including duplicates outside the first picker subtree.
 
 Apple documents [snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
 as returning the element attributes and descendant hierarchy. This is the

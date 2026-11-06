@@ -230,35 +230,31 @@ final class LocalizationUITests: XCTestCase {
 
     private func enterName(_ value: String, app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.textFields["entry.name"]
-        let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
-        let continueButton = introductions.element(boundBy: 0).buttons
-            .matching(NSPredicate(format: "label == %@", "Continue")).element(boundBy: 0)
+        let introductions = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", NameEntryKeyboardReadiness.introductionID))
+        var boundIntroduction: XCUIElement?
+        let continueButton: () throws -> XCUIElement = {
+            guard let owner = boundIntroduction else { throw NameEntryKeyboardReadiness.Failure.notReady }
+            return owner.buttons.matching(NSPredicate(format: "label == %@", "Continue")).element
+        }
         let readiness = NameEntryKeyboardReadiness(allowance: keyboardIntroductionAllowance)
         do {
             try readiness.waitAndTapField(observe: {
-                var state = NameEntryKeyboardReadiness.Observation()
-                state.introductionCount = try readiness.perform { introductions.count }
-                guard state.introductionCount == 1 else { return state }
-                // The tutorial is a sibling of the keyboard. A root app
-                // snapshot can omit it, so query its exact observed owner.
-                let root = try readiness.perform { try introductions.element(boundBy: 0).snapshot() }
-                guard root.elementType == .other,
-                      root.identifier == NameEntryKeyboardReadiness.introductionID else { return state }
-                var pending: [any XCUIElementSnapshot] = [root]
-                var nodes: [any XCUIElementSnapshot] = []
-                while let node = pending.popLast() {
-                    _ = try readiness.perform { () }
-                    guard nodes.count < 256 else { throw NameEntryKeyboardReadiness.Failure.notReady }
-                    nodes.append(node)
-                    pending.append(contentsOf: node.children)
-                }
-                return NameEntryKeyboardReadiness.recognize(introductionCount: state.introductionCount,
-                    items: nodes.map { node in
+                boundIntroduction = nil
+                return try readiness.captureIntroduction(
+                    matchingElements: { introductions.allElementsBoundByAccessibilityElement },
+                    snapshot: { (owner: XCUIElement) throws -> any XCUIElementSnapshot in
+                        boundIntroduction = owner
+                        return try owner.snapshot()
+                    }, matchesOwner: { (node: any XCUIElementSnapshot) in
+                        node.elementType == .other && node.identifier == NameEntryKeyboardReadiness.introductionID
+                    }, children: { (node: any XCUIElementSnapshot) in node.children },
+                    item: { (node: any XCUIElementSnapshot) in
                         let kind: NameEntryKeyboardReadiness.Item.Kind = node.elementType == .button ? .button
                             : node.elementType == .staticText ? .text : .other
                         return .init(kind: kind, label: node.label, enabled: node.isEnabled)
                     })
-            }, continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
+            }, continueHittable: { try continueButton().isHittable }, tapContinue: { try continueButton().tap() },
             entryNameCount: { app.textFields.matching(identifier: "entry.name").count },
             fieldEnabled: { field.isEnabled }, fieldHittable: { field.isHittable }, tapField: { field.tap() },
             evidence: { stage in

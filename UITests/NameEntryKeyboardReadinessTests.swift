@@ -2,6 +2,27 @@ import XCTest
 
 @MainActor
 final class NameEntryKeyboardReadinessTests: XCTestCase {
+    private struct IntroductionNode {
+        var isOwner = false
+        var item = NameEntryKeyboardReadiness.Item(kind: .other, label: "", enabled: true)
+        var children: [IntroductionNode] = []
+    }
+
+    private func introductionTree() -> IntroductionNode {
+        IntroductionNode(isOwner: true, children: [
+            .init(item: .init(kind: .text, label: NameEntryKeyboardReadiness.introductionText, enabled: true)),
+            .init(item: .init(kind: .button, label: "Continue", enabled: true))
+        ])
+    }
+
+    private func captureIntroduction(_ h: Harness, owners: () throws -> [Int] = { [7] },
+                                     snapshot: (Int) throws -> IntroductionNode) throws -> NameEntryKeyboardReadiness.Observation {
+        try h.subject.captureIntroduction(matchingElements: owners, snapshot: snapshot,
+            matchesOwner: { (node: IntroductionNode) in node.isOwner },
+            children: { (node: IntroductionNode) in node.children },
+            item: { (node: IntroductionNode) in node.item })
+    }
+
     private struct SnapshotNode {
         var item: NameEntryKeyboardReadiness.FieldItem
         var children: [SnapshotNode] = []
@@ -71,6 +92,137 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             observation = .init(introductionCount: 1,
                 exactMarkerCount: 1, continueButtonCount: 1, continueEnabled: true)
         }
+    }
+
+    func testBoundIntroductionCapturesOriginalOwnerWithoutRequery() throws {
+        let h = Harness()
+        var owners = [7]
+        var events: [String] = []
+        let state = try captureIntroduction(h, owners: {
+            events.append("query")
+            let bound = owners
+            owners = [99]
+            return bound
+        }, snapshot: { (owner: Int) in
+            events.append("snapshot")
+            XCTAssertEqual(owner, 7)
+            return self.introductionTree()
+        })
+        XCTAssertEqual(events, ["query", "snapshot"])
+        XCTAssertEqual(state.introductionCount, 1)
+        XCTAssertEqual(state.exactMarkerCount, 1)
+        XCTAssertEqual(state.continueButtonCount, 1)
+        XCTAssertTrue(state.continueEnabled)
+    }
+
+    func testBoundIntroductionMissingOrDuplicateOwnersNeverSnapshot() throws {
+        for owners in [[], [7, 8]] {
+            let h = Harness()
+            let state = try captureIntroduction(h, owners: { owners }, snapshot: { (_: Int) in
+                XCTFail("Only a sole owner may be captured")
+                return self.introductionTree()
+            })
+            XCTAssertEqual(state.introductionCount, owners.count)
+            XCTAssertEqual(state.exactMarkerCount, 0)
+            XCTAssertFalse(state.continueEnabled)
+        }
+    }
+
+    func testBoundIntroductionRejectsWrongOwnerAndPreservesControlCardinality() throws {
+        let h = Harness()
+        var root = introductionTree()
+        root.isOwner = false
+        let wrong = try captureIntroduction(h, snapshot: { (_: Int) in root })
+        XCTAssertEqual(wrong.introductionCount, 1)
+        XCTAssertEqual(wrong.exactMarkerCount, 0)
+        root.isOwner = true
+        root.children.append(root.children[1])
+        let duplicate = try captureIntroduction(h, snapshot: { (_: Int) in root })
+        XCTAssertEqual(duplicate.continueButtonCount, 2)
+        XCTAssertFalse(duplicate.continueEnabled)
+        root.children.removeLast()
+        root.children[1].item = .init(kind: .button, label: "Continue", enabled: false)
+        XCTAssertFalse(try captureIntroduction(h, snapshot: { (_: Int) in root }).continueEnabled)
+    }
+
+    func testBoundIntroductionEnforcesTotalNodeLimit() throws {
+        let h = Harness()
+        var root = IntroductionNode(isOwner: true, children: Array(repeating: .init(), count: 255))
+        XCTAssertEqual(try captureIntroduction(h, snapshot: { (_: Int) in root }).introductionCount, 1)
+        root.children.append(.init())
+        XCTAssertThrowsError(try captureIntroduction(h, snapshot: { (_: Int) in root })) {
+            XCTAssertTrue($0 is NameEntryKeyboardReadiness.Failure)
+        }
+        XCTAssertThrowsError(try captureIntroduction(h, owners: {
+            XCTFail("Failed capture cannot retry")
+            return [7]
+        }, snapshot: { (_: Int) in root }))
+    }
+
+    func testBoundIntroductionLateQueryOrSnapshotCannotRecognize() {
+        for stage in ["query", "snapshot"] {
+            let h = Harness()
+            _ = h.subject
+            var events: [String] = []
+            XCTAssertThrowsError(try h.subject.captureIntroduction(matchingElements: { () throws -> [Int] in
+                events.append("query")
+                if stage == "query" { h.now = 10 }
+                return [7]
+            }, snapshot: { (_: Int) throws -> IntroductionNode in
+                events.append("snapshot")
+                h.now = 10
+                return self.introductionTree()
+            }, matchesOwner: { (_: IntroductionNode) in
+                XCTFail("Late capture cannot classify")
+                return true
+            }, children: { (node: IntroductionNode) in node.children },
+            item: { (node: IntroductionNode) in node.item })) {
+                XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
+            }
+            XCTAssertEqual(events, stage == "query" ? ["query"] : ["query", "snapshot"])
+        }
+    }
+
+    func testBoundIntroductionPreservesNativeErrorAndAttemptDiagnostics() {
+        enum NativeFailure: Error { case unavailable }
+        for stage in ["query", "snapshot"] {
+            let h = Harness()
+            _ = h.subject
+            XCTAssertThrowsError(try captureIntroduction(h, owners: { () throws -> [Int] in
+                if stage == "query" { h.now = 11; throw NativeFailure.unavailable }
+                return [7]
+            }, snapshot: { (_: Int) throws -> IntroductionNode in
+                h.now = 11
+                throw NativeFailure.unavailable
+            })) { XCTAssertTrue($0 is NativeFailure) }
+            let reads = h.clockReads
+            let diagnostic = h.subject.echoDiagnostic
+            XCTAssertEqual(diagnostic["introduction_capture_stage"] as? String, stage)
+            if stage == "snapshot" {
+                XCTAssertEqual(diagnostic["introduction_query_count"] as? Int, 1)
+                XCTAssertEqual(diagnostic["introduction_snapshot_seconds"] as? Double, 11)
+            } else {
+                XCTAssertTrue(diagnostic["introduction_query_count"] is NSNull)
+            }
+            XCTAssertEqual(reads, h.clockReads)
+        }
+    }
+
+    func testBoundIntroductionInterruptedCaptureDoesNotReplaceCompletedObservation() throws {
+        enum NativeFailure: Error { case unavailable }
+        let h = Harness()
+        XCTAssertTrue(try h.poll(observe: {
+            try self.captureIntroduction(h, owners: { [] }, snapshot: { (_: Int) in self.introductionTree() })
+        }))
+        XCTAssertThrowsError(try h.poll(observe: {
+            try self.captureIntroduction(h, snapshot: { (_: Int) throws -> IntroductionNode in
+                throw NativeFailure.unavailable
+            })
+        })) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertEqual(h.subject.diagnostic["introduction_count"] as? Int, 0)
+        XCTAssertEqual(h.subject.echoDiagnostic["introduction_query_count"] as? Int, 1)
+        XCTAssertEqual(h.subject.echoDiagnostic["introduction_capture_stage"] as? String, "snapshot")
+        XCTAssertFalse(h.allowance.attempted)
     }
 
     func testRecognizerRequiresExactTextAndTypedButtonWithoutCountingItsTextChild() {

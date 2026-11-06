@@ -380,6 +380,16 @@ Those diagnostic additions did not guess an ancestor, retry selection, relax the
 interaction assertion, increase the cap or claim the native journey passed. The
 later result-lifecycle policy is described under storage admission below.
 
+`ROOM_IMAGE_IMPORT_V1` application-console rows distinguish provider-read completion
+and individual image-metadata rejection stages using fixed codes and capped numeric
+fields, plus a fixed format category when already known. They contain no image
+content, filenames, paths or hashes. Counts/dimensions use `-1` for unavailable
+values; statuses use `1`, and diagnostic dimensions are integer approximations.
+A valid seeded original does not establish that Photos delivered the same intact
+representation. These rows diagnose the import failure tracked in [issue 24](https://github.com/4alvit/room-inventory-ios/issues/24);
+they preserve the public error, validation order and limits, and do not establish
+that the failure is fixed or justify extending the OCR wait.
+
 ### Explicit OCR selection
 
 The journey verifies all four OCR fields start unselected, then activates only

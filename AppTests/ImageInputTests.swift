@@ -102,6 +102,25 @@ final class ImageInputTests: XCTestCase {
         catch { XCTFail("Cancellation must be checked before file access: \(error)") }
     }
 
+    func testBoundedProviderReadStillRequiresImageValidation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let valid = try tinyPNG()
+        for bytes in [Data(), Data("not an image".utf8), Data(valid.prefix(40))] {
+            let file = directory.appendingPathComponent("provider-image.png")
+            try bytes.write(to: file)
+            let read = try ImageInput.readFile(file)
+            XCTAssertEqual(read, bytes)
+            do {
+                try await ImageInput.validateForImport(read)
+                XCTFail("A completed bounded file read must not bypass image validation")
+            } catch let error as ImageInputError {
+                XCTAssertEqual(error, .invalidMetadata)
+            }
+        }
+    }
+
     func testActualImportPreparationDecodesValidImageAndRejectsTruncatedImage() async throws {
         let image = try tinyPNG()
         try await ImageInput.validateForImport(image)

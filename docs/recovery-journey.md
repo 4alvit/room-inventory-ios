@@ -1559,3 +1559,39 @@ reduce the upper bound. Under maximum new inventory consumption, remaining
 installer time is therefore at most 27.613885292 seconds, and may be insufficient.
 Earlier native deadline and EPERM cleanup failures remain failures even when
 final group absence and leader reaping are subsequently observed.
+
+
+### Immutable Files navigation observations
+
+The EE-parent hosted failure (`42129981242`, Recovery job `127606071582`)
+completed the source ZIP, backup, restore, relaunch and preview checkpoints. The
+final target ZIP reached Files, but an `exists` query for Browse was followed by
+an `isEnabled` query after that button no longer matched. XCTest recorded the
+missing-element failure before the next readiness probe. The later failure tree
+and screenshot show the intended run folder and Save, with the default
+Inventory-package filename. They do not prove when the earlier transition occurred.
+
+Navigation now resolves at most one `Browse View (Picker)` and classifies its
+captured attributes and descendants together. A missing picker or incomplete
+captured state remains pending; ambiguous owners, bars or exact titles fail.
+The local provider's remembered title is not the current folder: current local
+location comes from the uniquely owned bar's direct exact title. Target folder,
+local root, local entry, Browse and Back preserve that priority. Only typed,
+enabled snapshot buttons/cells can identify navigation actions. No snapshot
+attribute is treated as proof of native hittability; existing live tap readiness
+still applies before every navigation action. Folder observation itself needs
+no tap or live property query on its title.
+
+The original 30-second presentation and 10-second subsequent-navigation windows
+are unchanged and cover count, capture, bounded 4,096-node classification and
+waiter return. A capture error propagates, including a picker that disappears
+after its count query. Late results cannot admit a state, and a missing state
+never implies Back. No extra sleep, timeout increase or host accounting change
+is included. Synthetic tests cover the hierarchy, state ordering, ambiguity,
+missing/disabled controls, native capture errors, cancellation and deadlines;
+the actual remote-picker behavior still requires the new hosted run.
+
+Apple documents [snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
+as returning the element attributes and descendant hierarchy. This is the
+boundary used here; live element properties are not repeatedly sampled to
+construct one classification.

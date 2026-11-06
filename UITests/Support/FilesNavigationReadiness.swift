@@ -11,11 +11,13 @@ final class FilesNavigationReadiness {
         let kind: TitleKind
         let label: String
         let identifier: String
+        let enabled: Bool
 
-        init(kind: TitleKind, label: String, identifier: String = "") {
+        init(kind: TitleKind, label: String, identifier: String = "", enabled: Bool = true) {
             self.kind = kind
             self.label = label
             self.identifier = identifier
+            self.enabled = enabled
         }
     }
     static let navigationBarIdentifier = "FullDocumentManagerViewControllerNavigationBar"
@@ -31,6 +33,7 @@ final class FilesNavigationReadiness {
         case invalidTitleSnapshot
         case invalidSelectionCount, selectionAlreadyStarted
         case invalidSelectionSnapshot
+        case invalidNavigationSnapshot, invalidNavigationCount
 
         var description: String { "Files navigation readiness: \(self.name)" }
         private var name: String {
@@ -46,6 +49,8 @@ final class FilesNavigationReadiness {
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
             case .invalidSelectionSnapshot: "invalid or oversized Files selection snapshot"
+            case .invalidNavigationSnapshot: "invalid or oversized Files navigation snapshot"
+            case .invalidNavigationCount: "Files navigation scope is ambiguous"
             }
         }
     }
@@ -97,6 +102,130 @@ final class FilesNavigationReadiness {
 
     func waitForState(probe: @escaping () throws -> State?) throws -> State {
         try waitForResult(probe: probe)
+    }
+
+    /// One immutable picker tree decides the navigation state. Missing owners
+    /// are pending; resolver errors propagate. Snapshot readiness never claims
+    /// native hittability: navigation actions still use their live tap gates.
+    func captureNavigationState<Node>(folder: String, localTitle: String,
+                                       pickerCount: () throws -> Int,
+                                       uniqueSnapshot: () throws -> Node,
+                                       children: (Node) -> [Node],
+                                       attributes: (Node) -> TitleItem) throws -> State? {
+        let count = try perform(pickerCount)
+        guard count == 0 || count == 1 else { throw remember(Failure.invalidNavigationCount) }
+        guard count == 1 else { return nil }
+        let root = try perform(uniqueSnapshot)
+        var pending: [(Node, Int?)] = [(root, nil)]
+        var items: [TitleItem] = []
+        var parents: [Int?] = []
+        while let (node, parent) = pending.popLast() {
+            let item = try perform { attributes(node) }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard items.count + pending.count + descendants.count < Self.titleSnapshotNodeLimit else {
+                    throw Failure.invalidNavigationSnapshot
+                }
+            }
+            let index = items.count
+            items.append(item)
+            parents.append(parent)
+            pending.append(contentsOf: descendants.reversed().map { ($0, Optional(index)) })
+        }
+        return try perform {
+            guard !folder.isEmpty, !localTitle.isEmpty, folder != localTitle,
+                  items.first?.kind == .other,
+                  items.first?.identifier == Self.pickerIdentifier else {
+                throw Failure.invalidNavigationSnapshot
+            }
+            func unique(_ matches: [Int]) throws -> Int? {
+                guard matches.count <= 1 else { throw Failure.invalidNavigationCount }
+                return matches.first
+            }
+            func below(_ child: Int, _ ancestor: Int) -> Bool {
+                var parent = parents[child]
+                while let index = parent {
+                    if index == ancestor { return true }
+                    parent = parents[index]
+                }
+                return false
+            }
+            _ = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier == Self.pickerIdentifier
+            })
+            let owner = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier.hasPrefix("DOC.browsingRoot Source: ")
+            })
+            let bar = try unique(items.indices.filter {
+                items[$0].kind == .navigationBar && items[$0].identifier == Self.navigationBarIdentifier
+            })
+            if let owner {
+                guard items[owner].identifier.utf8.count <= 1_024 else { throw Failure.invalidNavigationSnapshot }
+            }
+            if let owner, let bar, below(bar, owner),
+               items[owner].identifier.hasPrefix(Self.localStorageRootPrefix),
+               items[owner].identifier.count > Self.localStorageRootPrefix.count {
+                func title(_ text: String) throws -> Int? {
+                    try unique(items.indices.filter {
+                        parents[$0] == bar && ((items[$0].kind == .text && items[$0].label == text)
+                            || (items[$0].kind == .button && items[$0].label == text + ", Actions Menu"))
+                    })
+                }
+                let target = try title(folder)
+                let local = try title(localTitle)
+                guard target == nil || local == nil else { throw Failure.invalidNavigationCount }
+                if let target { return items[target].enabled ? .targetFolder : nil }
+                if let local { return items[local].enabled ? .localRoot : nil }
+            }
+            // Only actionable row/button types qualify; nested labels cannot
+            // create a second match. The provider title is not a current-folder title.
+            var insideBar = Array(repeating: false, count: items.count)
+            for index in items.indices {
+                if let parent = parents[index] {
+                    insideBar[index] = insideBar[parent] || items[parent].kind == .navigationBar
+                }
+            }
+            let entry = try unique(items.indices.filter { candidate in
+                (items[candidate].kind == .cell || items[candidate].kind == .button)
+                    && (items[candidate].label == localTitle || items[candidate].label.hasPrefix(localTitle + ","))
+                    && items[candidate].identifier != "BackButton"
+                    && !insideBar[candidate]
+            })
+            if let entry, items[entry].enabled { return .localEntry }
+            let browse = try unique(items.indices.filter {
+                items[$0].kind == .button && (items[$0].label == "Browse" || items[$0].identifier == "Browse")
+            })
+            if let browse, items[browse].enabled { return .browse }
+            if let bar {
+                let back = try unique(items.indices.filter {
+                    parents[$0] == bar && items[$0].kind == .button
+                        && ["Back", "Locations", "Browse"].contains(items[$0].label)
+                })
+                if let back, items[back].enabled { return .back }
+            }
+            return nil
+        }
+    }
+
+    func captureNavigationState(folder: String, localTitle: String,
+                                 pickers: XCUIElementQuery) throws -> State? {
+        try captureNavigationState(folder: folder, localTitle: localTitle,
+            pickerCount: { pickers.count },
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try pickers.element.snapshot() },
+            children: { $0.children }, attributes: { node in
+                let kind: TitleKind
+                switch node.elementType {
+                case .other: kind = .other
+                case .navigationBar: kind = .navigationBar
+                case .staticText: kind = .text
+                case .button: kind = .button
+                case .collectionView: kind = .collectionView
+                case .cell: kind = .cell
+                default: kind = .unrelated
+                }
+                return TitleItem(kind: kind, label: node.label, identifier: node.identifier,
+                                 enabled: node.isEnabled)
+            })
     }
 
     /// Observe the result of one completed filename input. Missing, partial or

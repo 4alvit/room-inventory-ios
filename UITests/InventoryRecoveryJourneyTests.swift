@@ -853,29 +853,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 print("ROOM_FILES_NAVIGATION_V1 \(text)")
             }
         }
-        func interactive(_ element: XCUIElement) throws -> Bool {
-            guard try readiness.perform({ element.exists }) else { return false }
-            guard try readiness.perform({ element.isEnabled }) else { return false }
-            return try readiness.perform { element.isHittable }
-        }
-        func folderOpen(_ title: String) throws -> Bool {
-            let titles = filesFolderTitles(title, app: app)
-            let count = try readiness.perform { titles.count }
-            guard count <= 1 else {
-                throw RecoveryJourneyFailure.assertion("unique Files folder title", String(count), "at most one: \(title)")
-            }
-            guard count == 1 else { return false }
-            return try interactive(titles.element(boundBy: 0))
-        }
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
         let state = try readiness.waitForState {
-            // Live queries include the remote document service. app.snapshot()
-            // alone can omit its controls and cannot prove that it is absent.
-            if try folderOpen(folder) { return .targetFolder }
-            if try folderOpen(localTitle) { return .localRoot }
-            if try interactive(self.fileItem(localTitle, app: app)) { return .localEntry }
-            if try interactive(app.buttons["Browse"]) { return .browse }
-            if try interactive(self.filesBackButton(app: app)) { return .back }
-            return nil
+            // Classify one immutable remote picker tree. Separate exists and
+            // property queries can target different presentation states.
+            try readiness.captureNavigationState(folder: folder, localTitle: localTitle, pickers: pickers)
         }
         selected = state
         return state

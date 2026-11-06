@@ -27,6 +27,20 @@ final class FilesNavigationReadiness {
     struct SelectionObservation {
         let ownerIdentifier: String
     }
+    struct NavigationCaptureDiagnostics {
+        var queryAttempts = 0
+        var queriesCompleted = 0
+        var snapshotAttempts = 0
+        var snapshotsCompleted = 0
+        var lastQueryDuration: TimeInterval?
+        var lastQueryRemainingAtStart: TimeInterval?
+        var lastSnapshotDuration: TimeInterval?
+        var lastSnapshotRemainingAtStart: TimeInterval?
+        var lastPickerCount: Int?
+        var lastNodeCount = 0
+        var stage = "not_started"
+    }
+    private(set) var navigationCaptureDiagnostics = NavigationCaptureDiagnostics()
     enum SelectionTarget { case save; case backup(filename: String) }
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
@@ -102,6 +116,70 @@ final class FilesNavigationReadiness {
 
     func waitForState(probe: @escaping () throws -> State?) throws -> State {
         try waitForResult(probe: probe)
+    }
+
+    /// Resolve all exact matches once and retain their accessibility identities.
+    /// Snapshot only the sole bound result; never re-query it by result index.
+    /// Query and snapshot are separate operations under the same deadline.
+    func captureBoundNavigationState<Element, Node>(folder: String, localTitle: String,
+                                                     matchingElements: () throws -> [Element],
+                                                     snapshot: (Element) throws -> Node,
+                                                     children: (Node) -> [Node],
+                                                     attributes: (Node) -> TitleItem) throws -> State? {
+        let elements = try perform {
+            navigationCaptureDiagnostics.queryAttempts += 1
+            navigationCaptureDiagnostics.stage = "query"
+            navigationCaptureDiagnostics.lastPickerCount = nil
+            navigationCaptureDiagnostics.lastNodeCount = 0
+            navigationCaptureDiagnostics.lastQueryDuration = nil
+            navigationCaptureDiagnostics.lastSnapshotDuration = nil
+            navigationCaptureDiagnostics.lastSnapshotRemainingAtStart = nil
+            let started = lastTime
+            navigationCaptureDiagnostics.lastQueryRemainingAtStart = end - started
+            defer {
+                let finished = clock()
+                let elapsed = finished - started
+                if finished.isFinite, elapsed.isFinite, elapsed >= 0 {
+                    navigationCaptureDiagnostics.lastQueryDuration = elapsed
+                }
+            }
+            let matches = try matchingElements()
+            navigationCaptureDiagnostics.queriesCompleted += 1
+            return matches
+        }
+        navigationCaptureDiagnostics.lastPickerCount = elements.count
+        guard elements.count <= 1 else { throw remember(Failure.invalidNavigationCount) }
+        guard let element = elements.first else {
+            navigationCaptureDiagnostics.stage = "missing"
+            return nil
+        }
+        let root = try perform {
+            navigationCaptureDiagnostics.snapshotAttempts += 1
+            navigationCaptureDiagnostics.stage = "snapshot"
+            let started = lastTime
+            navigationCaptureDiagnostics.lastSnapshotRemainingAtStart = end - started
+            defer {
+                let finished = clock()
+                let elapsed = finished - started
+                if finished.isFinite, elapsed.isFinite, elapsed >= 0 {
+                    navigationCaptureDiagnostics.lastSnapshotDuration = elapsed
+                }
+            }
+            let captured = try snapshot(element)
+            navigationCaptureDiagnostics.snapshotsCompleted += 1
+            return captured
+        }
+        navigationCaptureDiagnostics.stage = "classification"
+        // Count and snapshot below are now local values. The classifier retains
+        // its exact picker, owner, title and descendant checks.
+        let state = try captureNavigationState(folder: folder, localTitle: localTitle,
+            pickerCount: { elements.count }, uniqueSnapshot: { root },
+            children: children, attributes: { node in
+                navigationCaptureDiagnostics.lastNodeCount += 1
+                return attributes(node)
+            })
+        navigationCaptureDiagnostics.stage = state == nil ? "pending" : "ready"
+        return state
     }
 
     /// One immutable picker tree decides the navigation state. Missing owners
@@ -208,13 +286,15 @@ final class FilesNavigationReadiness {
     }
 
     func captureNavigationState(folder: String, localTitle: String,
-                                 pickers: XCUIElementQuery) throws -> State? {
-        try captureNavigationState(folder: folder, localTitle: localTitle,
-            pickerCount: { pickers.count },
-            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try pickers.element.snapshot() },
+                                 app: XCUIApplication) throws -> State? {
+        let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", Self.pickerIdentifier))
+        return try captureBoundNavigationState(folder: folder, localTitle: localTitle,
+            matchingElements: { pickers.allElementsBoundByAccessibilityElement },
+            snapshot: { (element: XCUIElement) throws -> any XCUIElementSnapshot in try element.snapshot() },
             children: { $0.children }, attributes: { node in
                 let kind: TitleKind
                 switch node.elementType {
+                case .application: kind = .application
                 case .other: kind = .other
                 case .navigationBar: kind = .navigationBar
                 case .staticText: kind = .text

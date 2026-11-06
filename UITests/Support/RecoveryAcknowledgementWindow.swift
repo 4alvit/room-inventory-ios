@@ -4,6 +4,17 @@ import XCTest
 /// One monotonic allowance covers publication, observation and validation.
 /// Host accounting and durable capture can take longer on hosted Simulators.
 struct RecoveryAcknowledgementWindow {
+    enum Phase {
+        case installation, exportCapture
+
+        var allowance: TimeInterval {
+            switch self {
+            case .installation: 180
+            case .exportCapture: 60
+            }
+        }
+    }
+
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired
         case waiterResult(Int)
@@ -20,9 +31,10 @@ struct RecoveryAcknowledgementWindow {
     private let clock: () -> TimeInterval
     private let end: TimeInterval
 
-    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(phase: Phase = .exportCapture,
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.clock = clock
-        end = clock() + 60
+        end = clock() + phase.allowance
     }
 
     func remaining() throws -> TimeInterval {

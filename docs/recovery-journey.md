@@ -179,9 +179,20 @@ it and checks that it is not running. It performs no inventory or Photos action.
 Only then does it atomically publish one `installation-request.json` in its own
 fresh journey bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
 and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK shares
-one 60-second monotonic deadline starting before request publication with the
+one installation-only 180-second monotonic deadline starting before request publication with the
 wait and acknowledgement validation. Late observations cannot authorize success;
-the XCTest and controller deadlines remain active and are never renewed.
+the six export-capture barriers retain their 60-second windows, and the XCTest
+and controller deadlines remain active and are never renewed.
+
+In run `42174123340`, the host's exclusive installation-ACK evidence was written
+about 81.5 seconds after the request attachment, after the former 60-second window.
+The controller services bridge requests after guarded resource accounting; a
+device census in that UI command took 103.25 seconds. The installation allowance
+therefore includes room for that measured host work and subsequent validation,
+without skipping a census, weakening ACK identity checks or retrying the handshake.
+The retained evidence does not locate the exact runner-ACK publication time or
+attribute the whole delay to one census. The finite allowance is not a guarantee
+of hosted filesystem latency, and it does not extend the 720-second test case.
 
 All runner publications (installation, Photos seed/isolation and numbered export
 requests) write a complete exclusive temporary file in the same directory, then
@@ -193,7 +204,8 @@ This avoids the former hard-link-then-unlink sequence: removing the temporary
 link could change the published inode's link count and `ctime` during a strict
 collector read, even when its bytes, size and modification time were unchanged.
 The collector still rejects every observed identity, content or metadata change
-during a read. Request/acknowledgement hashes, ordering and deadlines are unchanged.
+during a read. Request/acknowledgement hashes, ordering and the phase-specific
+deadlines remain enforced.
 
 The host's existing guarded callback searches only the owned Simulator's
 `data/Containers/Data/Application` directory, with at most 2,000 entries and
@@ -379,6 +391,16 @@ partial traversal). The smaller standalone Photos observations described in
 Those diagnostic additions did not guess an ancestor, retry selection, relax the
 interaction assertion, increase the cap or claim the native journey passed. The
 later result-lifecycle policy is described under storage admission below.
+
+`ROOM_IMAGE_IMPORT_V1` application-console rows distinguish provider-read completion
+and individual image-metadata rejection stages using fixed codes and capped numeric
+fields, plus a fixed format category when already known. They contain no image
+content, filenames, paths or hashes. Counts/dimensions use `-1` for unavailable
+values; statuses use `1`, and diagnostic dimensions are integer approximations.
+A valid seeded original does not establish that Photos delivered the same intact
+representation. These rows diagnose the import failure tracked in [issue 24](https://github.com/4alvit/room-inventory-ios/issues/24);
+they preserve the public error, validation order and limits, and do not establish
+that the failure is fixed or justify extending the OCR wait.
 
 ### Explicit OCR selection
 
@@ -1590,8 +1612,26 @@ missing-element failure before the next readiness probe. The later failure tree
 and screenshot show the intended run folder and Save, with the default
 Inventory-package filename. They do not prove when the earlier transition occurred.
 
-Navigation now resolves at most one `Browse View (Picker)` and classifies its
-captured attributes and descendants together. A missing picker or incomplete
+In RC run `42162115958`, Files was visible about 14 seconds before the
+presentation deadline. Three live picker-count queries took about 7.14, 14.90
+and 6.83 seconds. The separate unique-picker snapshot then began about one
+second before the deadline and was interrupted by the enclosing waiter.
+Visible controls did not establish timely accessibility-query completion.
+This regression is tracked in [issue #22](https://github.com/4alvit/room-inventory-ios/issues/22).
+
+In PR run `42167432555`, 55 application-root captures completed without establishing
+a navigation state; the final capture contained only 15 nodes and no picker. Current video shows On My
+iPhone, Save and Inventory-package before the cutoff, and the session records
+that Files view appearing 8.38 seconds before the deadline. A successful snapshot
+of the application root therefore did not establish coverage of the remote picker.
+The last capture took about 0.18 seconds; that value does not describe every capture.
+
+Navigation now evaluates the owned application's exact, typed
+`Browse View (Picker)` query once per probe using
+`allElementsBoundByAccessibilityElement`. Its returned array is checked locally:
+zero matches remain pending, multiple matches fail, and exactly one match is
+snapshotted through that same accessibility-bound element. There is no indexed
+re-query, first-match fallback or error-to-absence conversion. An incomplete
 captured state remains pending; ambiguous owners, bars or exact titles fail.
 The local provider's remembered title is not the current folder: current local
 location comes from the uniquely owned bar's direct exact title. Target folder,
@@ -1602,15 +1642,29 @@ still applies before every navigation action. Folder observation itself needs
 no tap or live property query on its title.
 
 The original 30-second presentation and 10-second subsequent-navigation windows
-are unchanged and cover count, capture, bounded 4,096-node classification and
-waiter return. A capture error propagates, including a picker that disappears
-after its count query. Late results cannot admit a state, and a missing state
-never implies Back. No extra sleep, timeout increase or host accounting change
-is included. Synthetic tests cover the hierarchy, state ordering, ambiguity,
-missing/disabled controls, native capture errors, cancellation and deadlines;
-the actual remote-picker behavior still requires the new hosted run.
+are unchanged. The picker classifier retains its 4,096-node limit; the query,
+bound-element snapshot, local traversal and waiter return share the original
+deadline. The next probe is scheduled 0.1 seconds after the previous probe returns,
+so probes do not overlap. Query and snapshot errors still propagate, including
+errors returned after the deadline. Late results cannot admit a state, and a
+missing state never implies Back. No extra sleep, timeout increase or host
+accounting change is included. The bounded `ROOM_FILES_NAVIGATION_V1` diagnostic
+uses schema version 2 with separate query and snapshot attempt/completion counts,
+last durations and remaining allowances, plus the last picker/node counts and
+stage. It makes no additional AX calls.
 
-Apple documents [snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
-as returning the element attributes and descendant hierarchy. This is the
-boundary used here; live element properties are not repeatedly sampled to
-construct one classification.
+Query resolution and snapshot capture remain two separate native operations.
+The element can disappear between them; that native failure is retained. The
+local node limit does not bound native call time, returned-array allocation,
+transferred hierarchy size or framework memory. Avoiding indexed re-resolution
+is not a guarantee of faster completion or an atomic UI observation. Successful
+remote capture and the complete journey still require fresh hosted validation.
+Synthetic tests preserve the selected identity, missing/duplicate handling,
+state ordering, exact hierarchy, native errors and the original deadline.
+
+Apple documents
+[accessibility-bound query results](https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/allelementsboundbyaccessibilityelement)
+as immediately evaluated results bound to their accessibility elements.
+[Snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
+returns the selected element's attributes and descendant hierarchy. Live element
+properties are not repeatedly sampled to construct one classification.

@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 import zipfile
 
@@ -281,6 +282,112 @@ class DeviceOwnership(unittest.TestCase):
         device={'udid':ID,'name':'RC-'+ID,'deviceTypeIdentifier':R.DEVICES['ipad'],'state':'Shutdown'}
         for after in [{'devices':{'other':[device]}},{'devices':{R.RUNTIME:[device]}}]:
             with self.assertRaises(R.AcceptanceError):R.validate_created_device(before,after,ID,'RC-'+ID,R.DEVICES['iphone'])
+
+class OwnedDeviceCleanup(unittest.TestCase):
+    def fixture(self, root):
+        run=R.Run(root,root/'out');run.device=ID
+        device={'udid':ID,'name':'RC-'+ID,'deviceTypeIdentifier':R.DEVICES['iphone'],'state':'Shutdown'}
+        run.claim_created_device({'devices':{R.RUNTIME:[]}},
+            {'devices':{R.RUNTIME:[device]}},ID,'RC-'+ID,R.DEVICES['iphone'])
+        return run,device
+    def commands(self, run, responses):
+        calls=[]
+        def sim(*args,**kwargs):
+            calls.append((args,kwargs));response=responses.pop(0)
+            if isinstance(response,Exception):raise response
+            return json.dumps(response).encode() if isinstance(response,dict) else response
+        run.sim=sim
+        return calls
+    def test_initial_census_error_still_shuts_down_only_owned_uuid(self):
+        with tempfile.TemporaryDirectory() as d:
+            run,device=self.fixture(Path(d))
+            calls=self.commands(run,[R.AcceptanceError('census stalled'),b'',{'devices':{R.RUNTIME:[device]}}])
+            with self.assertRaisesRegex(R.AcceptanceError,'initial census.*census stalled'):run.close_device()
+            self.assertEqual([c[0] for c in calls],[('list','devices','--json'),('shutdown',ID),('list','devices','--json')])
+            self.assertEqual(run.device_cleanup['state'],'Shutdown')
+            self.assertEqual(len(run.device_cleanup['errors']),1)
+            self.assertTrue(all(c[1]['cleanup'] for c in calls))
+    def test_missing_or_changed_ownership_never_calls_simctl(self):
+        for change in ['unclaimed','uuid','receipt']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
+                run,device=self.fixture(Path(d));calls=self.commands(run,[])
+                if change=='unclaimed':run.owned_device=None
+                elif change=='uuid':run.device=str(uuid.uuid4()).upper()
+                else:(run.out/'owned-device.json').write_text('{}')
+                with self.assertRaisesRegex(R.AcceptanceError,'ownership'):run.close_device()
+                self.assertEqual(calls,[])
+                self.assertEqual(run.device_cleanup['state'],'unproved')
+    def test_identity_conflict_blocks_shutdown_even_if_final_read_recovers(self):
+        for field,value in [('name','foreign'),('deviceTypeIdentifier',R.DEVICES['ipad'])]:
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as d:
+                run,device=self.fixture(Path(d));changed=dict(device);changed[field]=value
+                calls=self.commands(run,[{'devices':{R.RUNTIME:[changed]}},{'devices':{R.RUNTIME:[device]}}])
+                with self.assertRaisesRegex(R.AcceptanceError,'initial identity'):run.close_device()
+                self.assertEqual([c[0][0] for c in calls],['list','list'])
+                self.assertFalse(run.device_cleanup['shutdown_requested'])
+    def test_already_shutdown_is_independently_verified_without_shutdown(self):
+        with tempfile.TemporaryDirectory() as d:
+            run,device=self.fixture(Path(d));snapshot={'devices':{R.RUNTIME:[device]}}
+            calls=self.commands(run,[snapshot,snapshot]);run.close_device()
+            self.assertEqual([c[0][0] for c in calls],['list','list'])
+            self.assertEqual(run.device_cleanup['state'],'Shutdown')
+            self.assertEqual(run.device_cleanup['errors'],[])
+    def test_shutdown_failure_does_not_skip_final_verification(self):
+        with tempfile.TemporaryDirectory() as d:
+            run,device=self.fixture(Path(d));booted=dict(device,state='Booted')
+            calls=self.commands(run,[{'devices':{R.RUNTIME:[booted]}},R.AcceptanceError('shutdown stalled'),{'devices':{R.RUNTIME:[device]}}])
+            with self.assertRaisesRegex(R.AcceptanceError,'shutdown.*shutdown stalled'):run.close_device()
+            self.assertEqual([c[0][0] for c in calls],['list','shutdown','list'])
+            self.assertEqual(run.device_cleanup['state'],'Shutdown')
+            self.assertEqual(len(run.device_cleanup['errors']),1)
+    def test_failed_final_state_is_never_called_shutdown(self):
+        for final in [R.AcceptanceError('verification stalled'),{'devices':{}},
+                      {'devices':{R.RUNTIME:[{'udid':ID,'name':'foreign'}]}}]:
+            with self.subTest(final=final),tempfile.TemporaryDirectory() as d:
+                run,device=self.fixture(Path(d));booted=dict(device,state='Booted')
+                self.commands(run,[{'devices':{R.RUNTIME:[booted]}},b'',final])
+                with self.assertRaisesRegex(R.AcceptanceError,'final verification'):run.close_device()
+                self.assertEqual(run.device_cleanup['state'],'unproved')
+    def test_cleanup_uses_one_deadline_and_stops_admitting_commands(self):
+        for first_duration,expected_calls in [(31,3),(90,1)]:
+            with self.subTest(first_duration=first_duration),tempfile.TemporaryDirectory() as d:
+                run,device=self.fixture(Path(d));now=[0.0];calls=[]
+                def capture(argv,**kwargs):
+                    calls.append((argv,kwargs['timeout']))
+                    if len(calls)==1:
+                        now[0]+=first_duration
+                        raise R.AcceptanceError('census stalled')
+                    if argv[2]=='shutdown':now[0]+=31;return b''
+                    return json.dumps({'devices':{R.RUNTIME:[device]}}).encode()
+                with patch.object(R.time,'monotonic',side_effect=lambda:now[0]),patch.object(R,'bounded_capture',side_effect=capture):
+                    with self.assertRaisesRegex(R.AcceptanceError,'initial census'):run.close_device()
+                self.assertEqual(run.cleanup_end,90)
+                self.assertEqual(len(calls),expected_calls)
+                if expected_calls==3:
+                    self.assertEqual([c[1] for c in calls],[30,30,24])
+                    self.assertEqual(run.device_cleanup['state'],'Shutdown')
+                else:
+                    self.assertEqual(run.device_cleanup['state'],'unproved')
+                    self.assertTrue(run.device_cleanup['shutdown_requested'])
+                    self.assertEqual([c[0][2] for c in calls],['list'])
+    def test_execute_keeps_primary_error_and_records_cleanup_error(self):
+        primary=R.AcceptanceError('original install failure')
+        cleanup=R.AcceptanceError('initial census failure; final state unproved')
+        expected={'tag':'v0.1.0-rc.1','source_sha':'a'*40,'source_tree':'b'*40,
+                  'run_id':12,'run_attempt':1,'release_id':8,'manifest_sha256':'c'*64}
+        env={'GITHUB_ACTIONS':'true','GITHUB_EVENT_NAME':'workflow_dispatch',
+             'GITHUB_REPOSITORY':R.REPO,'GITHUB_REF':'refs/heads/main','RUNNER_ARCH':'ARM64',
+             'GITHUB_WORKFLOW_REF':R.REPO+'/.github/workflows/rc-acceptance.yml@refs/heads/main'}
+        with tempfile.TemporaryDirectory() as d:
+            args=R.argparse.Namespace(expected=expected,harness_sha='a'*40,device='iphone',output=Path(d)/'out')
+            with patch.dict(os.environ,env),patch.object(R.Run,'command',side_effect=primary),patch.object(R.Run,'close_device',side_effect=cleanup):
+                with self.assertRaises(R.AcceptanceError) as caught:R.execute(args)
+            self.assertIs(caught.exception,primary)
+            result=json.loads((args.output/'result.json').read_bytes())
+            self.assertEqual(result['status'],'FAILED')
+            self.assertEqual(result['error'],'AcceptanceError: original install failure')
+            self.assertEqual(result['cleanup_errors'],['AcceptanceError: initial census failure; final state unproved'])
+
 
 class ProcessEvidence(unittest.TestCase):
     def test_failed_child_retains_bounded_streams_and_is_reaped(self):

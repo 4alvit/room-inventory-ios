@@ -95,23 +95,16 @@ final class PrivacySupportTests: XCTestCase {
             })
             .onAppear { appeared.fulfill() }
         let controller = UIHostingController(rootView: page)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
-        window.rootViewController = controller
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previousKeyWindow?.makeKey()
+        try await TestWindowHost.withHost(controller) { host in
+            let result = await XCTWaiter.fulfillment(of: [appeared], timeout: 5)
+            XCTAssertEqual(result, .completed)
+            controller.view.layoutIfNeeded()
+            XCTAssertTrue(controller.view.window === host.window)
+            XCTAssertFalse(controller.view.bounds.isEmpty)
+            XCTAssertTrue(recorder.opened.isEmpty, "Presenting local explanations must not invoke openURL")
         }
-        window.makeKeyAndVisible()
-        let result = await XCTWaiter.fulfillment(of: [appeared], timeout: 5)
-        XCTAssertEqual(result, .completed)
-        controller.view.layoutIfNeeded()
-        XCTAssertTrue(controller.view.window === window)
-        XCTAssertFalse(controller.view.bounds.isEmpty)
-        XCTAssertTrue(recorder.opened.isEmpty, "Presenting local explanations must not invoke openURL")
+        XCTAssertNil(controller.viewIfLoaded?.window, "The privacy page must detach after real dismissal")
+        XCTAssertTrue(recorder.opened.isEmpty, "Dismissing local explanations must not invoke openURL")
     }
 
     private func packagedStrings(language: String) throws -> [String: String] {

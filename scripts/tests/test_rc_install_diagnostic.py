@@ -98,7 +98,7 @@ class Telemetry(unittest.TestCase):
             P.bounded_capture([sys.executable,'-c','raise SystemExit(4)'],timeout=3,limit=1024,phase_sink=fail)
     def test_global_reserve_keeps_terminal_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            r=D.DiagnosticRun(tmp,Path(tmp)/'out');r.diagnostic_bytes=D.TELEMETRY_CAP-512*1024-D.R.MIB
+            r=D.DiagnosticRun(tmp,Path(tmp)/'out');r.diagnostic_bytes=D.TELEMETRY_CAP-D.HEARTBEAT_RESERVE-D.R.MIB
             self.assertFalse(r.keep('overflow.json',{'x':'x'}))
             self.assertTrue(r.keep('terminal-summary.json',{'terminal':True},final=True))
             self.assertEqual(r.omissions[0]['reason'],'retention_cap')
@@ -209,7 +209,7 @@ class NativeSequence(unittest.TestCase):
         commands=[x for x in f.calls if isinstance(x[0],tuple)]
         self.assertEqual([x[0][0] for x in commands],['list','list','create','list','boot','bootstatus','install'])
         self.assertEqual(commands[-1][1],{'cap':60});self.assertTrue(result['install_completed'])
-        self.assertLessEqual(commands[-2][1]['cap'],180)
+        self.assertLessEqual(commands[-2][1]['cap'],600)
     def test_install_error_not_retried_and_no_success(self):
         f=self.Fake(True);result={}
         with self.assertRaises(P.CaptureFailure):D.native_sequence(f,Path('/app'),result)
@@ -217,10 +217,39 @@ class NativeSequence(unittest.TestCase):
         self.assertNotIn('install_completed',result)
     def test_boot_deadline_never_renews_or_reaches_install(self):
         f=self.Fake()
-        with patch.object(D.time,'monotonic',side_effect=[0,0,181]):
+        with patch.object(D.time,'monotonic',side_effect=[0,0,600]):
             with self.assertRaisesRegex(D.R.AcceptanceError,'Boot budget expired'):
                 D.native_sequence(f,Path('/app'),{})
         self.assertFalse(any(isinstance(x[0],tuple) and x[0][0]=='install' for x in f.calls))
+    def test_positive_readiness_after_old_window_allows_one_install(self):
+        f=self.Fake();result={}
+        with patch.object(D.time,'monotonic',side_effect=[0,0,4,4,400]):
+            D.native_sequence(f,Path('/app'),result)
+        commands=[x for x in f.calls if isinstance(x[0],tuple)]
+        self.assertEqual(commands[-3][1],{'cap':600})
+        self.assertEqual(commands[-2][1],{'cap':596})
+        self.assertEqual(commands[-1][1],{'cap':60})
+        self.assertEqual(sum(x[0][0]=='install' for x in commands),1)
+        self.assertTrue(result['install_completed'])
+    def test_bootstatus_at_shared_deadline_cannot_authorize_install(self):
+        f=self.Fake();result={}
+        with patch.object(D.time,'monotonic',side_effect=[0,0,4,4,600]):
+            with self.assertRaisesRegex(D.R.AcceptanceError,'Boot status returned late'):
+                D.native_sequence(f,Path('/app'),result)
+        self.assertFalse(any(isinstance(x[0],tuple) and x[0][0]=='install' for x in f.calls))
+        self.assertNotIn('install_completed',result)
+    def test_heartbeat_sample_cap_and_reserve_cover_longer_observer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'rc-install-diagnostic/diagnostic';out.mkdir(parents=True)
+            with patch.dict(os.environ,environment(tmp),clear=True),patch.object(D.time,'monotonic',return_value=0),patch.object(D.time,'sleep'),patch.object(D.os,'getloadavg',return_value=(1,2,3)),patch.object(D.shutil,'disk_usage',return_value=type('Disk',(),{'free':D.FREE_FLOOR})()):
+                D.heartbeat(out,ID,900)
+            rows=(out/'heartbeat.jsonl').read_text().splitlines()
+            self.assertEqual(len(rows),900)
+            self.assertTrue(all(len(row.encode())+1<=1024 for row in rows))
+            self.assertLessEqual(900*1024+4096,D.HEARTBEAT_RESERVE)
+            self.assertEqual(D.HEARTBEAT_RESERVE,D.R.MIB)
+            self.assertEqual(D.TELEMETRY_CAP,8*D.R.MIB)
+            self.assertEqual(json.loads((out/'heartbeat-result.json').read_text())['samples'],900)
     def test_preexisting_device_never_owned_or_booted(self):
         f=self.Fake();original=f.sim
         def sim(*a,**kw):

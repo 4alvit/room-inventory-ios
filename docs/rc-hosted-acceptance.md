@@ -61,8 +61,14 @@ RC, builds the same standalone runner, creates one new iPhone 17 on iOS 27.0,
 and stops after one AUT installation and cleanup. It never installs the runner,
 executes XCTest, publishes, promotes, or satisfies either installed acceptance row.
 
-The 1,800-second work budget, shared 180-second boot window, 60-second install,
-90-second cleanup reserve and 35-minute job are unchanged. No sleeps are used to
+The diagnostic uses one shared 600-second boot/bootstatus window. This controlled
+variant follows an earlier diagnostic that expired at 180 seconds and a successful
+main run whose readiness query occurred about 387 seconds after boot began and
+reported the device already booted. The actual readiness time was not recorded;
+600 seconds is an experiment, not a required production timeout. Only timely
+successful bootstatus permits the one install. The 1,800-second work budget,
+60-second install, 90-second cleanup reserve and 35-minute job are unchanged;
+the production installed-RC boot window remains 180 seconds. No sleeps are used to
 settle Simulator state; no retry, reset, runtime removal, remount or signing change
 is performed. The existing list-first cleanup remains observable, including its
 inability to reach shutdown if the first list fails. Issue33's proposed fallback
@@ -70,7 +76,9 @@ is not included. Failed or unknown process/device closure remains a failure.
 
 After runner build, one separately owned heartbeat-only child records clock,
 load and free-space samples at one-second measurement intervals for at most
-480 seconds, clipped to the existing parent deadline. Its final join is also
+900 seconds and at most 900 rows, clipped to the existing parent deadline. One
+MiB of the unchanged 8 MiB telemetry ceiling is reserved for bounded heartbeat
+rows and final/stop records. Its final join is also
 clipped to any existing cleanup deadline. It launches no subprocesses. Coverage
 is best effort and never renewed: device operations plus overhead can outlast it. The parent owns bounded
 process snapshots, two runtime-registry/mount snapshots and one scoped native-log

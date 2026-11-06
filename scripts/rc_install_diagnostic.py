@@ -29,7 +29,9 @@ GIB = 1024**3
 FREE_FLOOR = 16 * GIB
 OWNED_CEILING = 12 * GIB
 TELEMETRY_CAP = 8 * R.MIB
-OBSERVER_SECONDS = 480
+BOOT_SECONDS = 600
+OBSERVER_SECONDS = 900
+HEARTBEAT_RESERVE = R.MIB
 SAFE_ENV_NAMES = ('SIMULATOR_RUNTIME_VERSION', 'SIMULATOR_UDID', 'SIMULATOR_ROOT',
                   'SIMCTL_CHILD_DYLD_INSERT_LIBRARIES', 'DYLD_INSERT_LIBRARIES',
                   'DYLD_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH')
@@ -209,7 +211,7 @@ def heartbeat(output, token, end):
     R.require(math.isfinite(end) and end<=time.monotonic()+OBSERVER_SECONDS,'Invalid observer deadline')
     count=0;reason='fixed_deadline';first=stamp()
     with (output/'heartbeat.jsonl').open('x') as stream:
-        while time.monotonic()<end and count<480:
+        while time.monotonic()<end and count<OBSERVER_SECONDS:
             if (output/'observer-stop.json').exists():
                 R.require(R.loads(R.regular(output/'observer-stop.json',128))==dict(token=token),'Observer stop mismatch')
                 reason='requested';break
@@ -230,8 +232,8 @@ class DiagnosticRun(R.Run):
         self.diagnostic_dir=self.out/'diagnostic';self.diagnostic_dir.mkdir()
     def keep(self,name,value,final=False):
         raw=(json.dumps(value,allow_nan=False,indent=2)+'\n').encode()
-        # Reserve512KiB for the480 bounded heartbeat rows and their final record.
-        limit=TELEMETRY_CAP-512*1024 if final else TELEMETRY_CAP-512*1024-R.MIB
+        # Reserve1MiB for at most900 bounded heartbeat rows and final/stop records.
+        limit=TELEMETRY_CAP-HEARTBEAT_RESERVE if final else TELEMETRY_CAP-HEARTBEAT_RESERVE-R.MIB
         if len(raw)>R.MIB or self.diagnostic_bytes+len(raw)>limit:
             if len(self.omissions)<128:self.omissions.append(dict(name=name,reason='retention_cap'))
             return False
@@ -327,7 +329,7 @@ class DiagnosticRun(R.Run):
         end=min(self.observer_end,self.cleanup_end if self.cleanup_end is not None else self.end)
         self.observer.join(max(0,end-time.monotonic()))
         self.keep('observer-owner.json',dict(operation=dict(self.observer_record),error=self.observer_error,
-                  owner_thread_finished=not self.observer.is_alive(),coverage='best_effort_fixed480s_no_renewal'))
+                  owner_thread_finished=not self.observer.is_alive(),coverage='best_effort_fixed900s_no_renewal'))
         R.require(not self.observer.is_alive() and self.observer_record.get('cleanup',{}).get('success') is True,
                   'Heartbeat owner cleanup unproved')
 
@@ -345,7 +347,7 @@ def native_sequence(run,aut,result):
     R.require(created not in {x['udid'] for group in before['devices'].values() for x in group},'Preexisting device')
     run.device=created;result['device_uuid']=created
     result['created_device']=R.validate_created_device(before,R.loads(run.sim('list','devices','--json')),created,name,R.DEVICES['iphone'])
-    boot_end=time.monotonic()+180
+    boot_end=time.monotonic()+BOOT_SECONDS
     run.sim('boot',created,cap=boot_end-time.monotonic());R.require(time.monotonic()<boot_end,'Boot budget expired')
     run.sim('bootstatus',created,'-b',cap=boot_end-time.monotonic());R.require(time.monotonic()<boot_end,'Boot status returned late')
     run.snapshot('after-boot')
@@ -421,7 +423,7 @@ def execute(args):
         result['observation_operations']=[dict(name=x['name'],status=x['status'],operation=x['operation']) for x in run.diagnostics]
         result['observer_operation']=dict(run.observer_record)
         result['limitations']=['No UI tests or matrix acceptance.','Cooperative deadlines can overshoot on a stalled host.',
-                              'Heartbeat coverage is fixed480s and may expire before cleanup.','No source, runtime registration or signing repair is performed.']
+                              'Heartbeat coverage is fixed900s and may expire before cleanup.','No source, runtime registration or signing repair is performed.']
         if cleanup_errors:result['status']='DIAGNOSTIC_FAILED'
         R.save(run.out/'result.json',result)
     if primary:raise primary

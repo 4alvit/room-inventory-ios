@@ -392,57 +392,66 @@ class OwnedDeviceCleanup(unittest.TestCase):
 
 class InstallationWindow(unittest.TestCase):
     @contextmanager
-    def fixture(self, durations, start=0):
+    def fixture(self, durations, start=0, cleanup_durations=None, returncodes=None):
         # Exercise the real command admission and capture deadlines without
         # starting simctl; process/pipe cleanup behavior has separate fixtures.
         import rc_acceptance_process as P
         now=[0.0];calls=[]
         def spawn(argv, **kwargs):
-            duration=durations[len(calls)]
-            process=Mock(pid=1000+len(calls),returncode=None)
+            index=len(calls);duration=durations[index]
+            process=Mock(pid=1000+index,returncode=None)
             def poll():
-                now[0]+=duration;process.returncode=0;return 0
+                now[0]+=duration
+                process.returncode=0 if returncodes is None else returncodes[index]
+                return process.returncode
             process.poll.side_effect=poll
             calls.append(list(argv))
             return process
+        def cleanup(process, deadline, *, state):
+            # A controlled cleanup delay also exercises the phase postcheck,
+            # which must reject a timely child whose capture returns late.
+            if cleanup_durations is not None:now[0]+=cleanup_durations[process.pid-1000]
+            return {'success':True}
         selector=Mock();selector.get_map.return_value={}
         with tempfile.TemporaryDirectory() as d, \
                 patch.object(P.time,'monotonic',side_effect=lambda:now[0]), \
                 patch.object(P.subprocess,'Popen',side_effect=spawn), \
                 patch.object(P.selectors,'DefaultSelector',return_value=selector), \
                 patch.object(P.os,'set_blocking'), \
-                patch.object(P,'kill_owned',return_value={'success':True}):
+                patch.object(P,'kill_owned',side_effect=cleanup):
             run=R.Run(d,Path(d)/'out');run.device=ID;now[0]=start
             yield run,now,calls
 
-    def test_aut_can_cross_sixty_seconds_then_runner_keeps_its_cap(self):
-        for duration in [72,89.999]:
-            with self.subTest(duration=duration),self.fixture([duration,1]) as (run,now,calls):
+    def test_both_installs_can_cross_prior_caps_with_one_remaining_budget(self):
+        for aut,runner in [(100,70),(200,90),(72,100)]:
+            with self.subTest(aut=aut,runner=runner),self.fixture([aut,runner]) as (run,now,calls):
                 R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
                 self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app'],
                                         ['xcrun','simctl','install',ID,'standalone-runner.app']])
-                self.assertEqual([c['timeout_seconds'] for c in run.commands],[90,60])
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,296-aut])
                 self.assertTrue(all(c['cleanup_reserved_seconds']==4 for c in run.commands))
+                self.assertEqual(now[0],aut+runner)
                 self.assertEqual(run.end,1800)
                 self.assertIsNone(run.cleanup_end)
 
-    def test_aut_at_or_after_ninety_never_installs_runner_or_retries(self):
+    def test_aut_at_or_after_work_allowance_never_installs_runner_or_retries(self):
         from rc_acceptance_process import CaptureFailure
-        for duration in [90,91]:
+        for duration in [296,297,300]:
             with self.subTest(duration=duration),self.fixture([duration]) as (run,now,calls):
                 with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
                     R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
                 self.assertEqual(len(calls),1)
-                self.assertEqual(run.commands[0]['timeout_seconds'],90)
+                self.assertEqual(run.commands[0]['timeout_seconds'],296)
                 self.assertEqual(run.commands[0]['elapsed_seconds'],duration)
 
-    def test_runner_at_sixty_still_fails_without_retry(self):
+    def test_runner_at_residual_work_allowance_fails_without_retry(self):
         from rc_acceptance_process import CaptureFailure
-        with self.fixture([72,60]) as (run,now,calls):
-            with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
-                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-            self.assertEqual(len(calls),2)
-            self.assertEqual([c['timeout_seconds'] for c in run.commands],[90,60])
+        for duration in [224,225]:
+            with self.subTest(duration=duration),self.fixture([72,duration]) as (run,now,calls):
+                with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
+                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(len(calls),2)
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,224])
 
     def test_parent_deadline_clips_both_installs_without_renewal(self):
         with self.fixture([20,5],start=1770) as (run,now,calls):
@@ -459,11 +468,56 @@ class InstallationWindow(unittest.TestCase):
                 R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
             self.assertEqual(len(calls),1)
             self.assertEqual(run.commands[0]['timeout_seconds'],26)
-        with self.fixture([],start=1796) as (run,now,calls):
-            with self.assertRaisesRegex(R.AcceptanceError,'Overall acceptance deadline'):
+        for start in [1796,1800,1801]:
+            with self.subTest(start=start),self.fixture([],start=start) as (run,now,calls):
+                with self.assertRaisesRegex(R.AcceptanceError,'Shared installation deadline'):
+                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(calls,[])
+                self.assertEqual(run.commands,[])
+
+    def test_phase_starts_at_installation_entry_and_not_at_run_creation(self):
+        with self.fixture([100,70],start=400) as (run,now,calls):
+            R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,196])
+            self.assertEqual(now[0],570)
+            self.assertEqual(run.end,1800)
+
+    def test_aut_cleanup_at_or_after_phase_end_blocks_runner(self):
+        for delay in [5,6]:
+            with self.subTest(delay=delay),self.fixture([295],cleanup_durations=[delay]) as (run,now,calls):
+                with self.assertRaisesRegex(R.AcceptanceError,'Artifact installation returned late'):
+                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(len(calls),1)
+                self.assertEqual(run.commands[0]['returncode'],0)
+                self.assertNotIn('error',run.commands[0])
+                self.assertEqual(now[0],295+delay)
+
+    def test_runner_cleanup_at_or_after_same_phase_end_is_not_success(self):
+        for delay in [5,6]:
+            with self.subTest(delay=delay),self.fixture([100,195],cleanup_durations=[0,delay]) as (run,now,calls):
+                with self.assertRaisesRegex(R.AcceptanceError,'Artifact installation returned late'):
+                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(len(calls),2)
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,196])
+                self.assertTrue(all(c['returncode']==0 for c in run.commands))
+                self.assertEqual(now[0],295+delay)
+
+    def test_remaining_cleanup_reserve_cannot_admit_second_install(self):
+        with self.fixture([290],cleanup_durations=[6]) as (run,now,calls):
+            with self.assertRaisesRegex(R.AcceptanceError,'Shared installation deadline'):
                 R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-            self.assertEqual(calls,[])
-            self.assertEqual(run.commands,[])
+            self.assertEqual(len(calls),1)
+            self.assertEqual(run.commands[0]['returncode'],0)
+            self.assertEqual(now[0],296)
+
+    def test_first_install_failure_is_preserved_without_runner_or_retry(self):
+        from rc_acceptance_process import CaptureFailure
+        with self.fixture([1],returncodes=[7]) as (run,now,calls):
+            with self.assertRaisesRegex(CaptureFailure,'Metadata command exited 7'):
+                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
+            self.assertEqual(run.commands[0]['returncode'],7)
+            self.assertEqual(run.commands[0]['error'],'CaptureFailure: Metadata command exited 7')
 
 class CleanupAdmission(unittest.TestCase):
     @contextmanager

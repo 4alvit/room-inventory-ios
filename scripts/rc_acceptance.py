@@ -26,7 +26,7 @@ from urllib.parse import unquote
 from rc_acceptance_process import bounded_capture
 
 MIB = 1024 * 1024
-AUT_INSTALL_SECONDS = 90
+INSTALLATION_SECONDS = 300
 REPO = '4alvit/room-inventory-ios'
 BUNDLE = 'com.alvit.roominventory'
 RUNNER = 'com.alvit.roominventory.rcacceptance.xctrunner'
@@ -245,8 +245,12 @@ def validate_created_device(before, after, device_id, name, device_type):
     return current[0]
 
 def install_artifacts(run, aut, runner):
-    run.sim('install',run.device,aut,cap=AUT_INSTALL_SECONDS)
-    run.sim('install',run.device,runner,cap=60)
+    phase_end=min(time.monotonic()+INSTALLATION_SECONDS,run.end)
+    for artifact in (aut,runner):
+        remaining=phase_end-time.monotonic()
+        require(remaining>4,'Shared installation deadline')
+        run.sim('install',run.device,artifact,cap=remaining-4)
+        require(time.monotonic()<phase_end,'Artifact installation returned late')
 
 class Run:
     def __init__(self, root, out):

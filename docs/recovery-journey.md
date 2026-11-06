@@ -302,14 +302,24 @@ not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
 Opening the system Photos picker has one 90-second monotonic appearance window,
-starting after the single `import.photos` activation. The first live existence
-probe runs on the active waiter's first run-loop turn. A negative query schedules
+starting after the single `import.photos` activation. The first observation
+probe runs on the active waiter's first run-loop turn. It resolves the unique
+`photosView_content_scroll_view` and captures that owner's immutable snapshot.
+The snapshot must contain exactly one Image whose label begins with `Photo,`
+(case insensitive); zero owners or photos remain pending, while duplicate
+owners or photos fail. Snapshot traversal is limited to 4,096 nodes and 1,024
+UTF-8 bytes per identifier or label. Count and label come from that same
+capture, without a later broad `app.images` count or label query.
+A negative observation schedules
 the next probe one second after it returns, so native queries cannot overlap
 and accessibility traversal leaves a quiet interval for presentation work.
 Waiter teardown disables queued probes and cancels the pending timer. This avoids
 `waitForExistence`'s additional query after its timeout; an already active native
 query may still return late, and a positive result at or after the deadline is
 rejected. This is not a hard wall-clock cancellation of native work.
+Resolver and snapshot errors propagate, including errors returned after the
+deadline. The actual image action is resolved afresh as a unique element inside
+the same exact owner and retains the existing enabled/hittable tap gates.
 The selector still requires a `Photo,` Image, followed by
 the existing exactly-one-photo, interaction and original-byte checks. There is
 no second picker launch or seed attempt, and the XCTest/controller limits do not
@@ -318,6 +328,15 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `42139185613`, the current recording shows the receipt in Photos well
+before the 90-second deadline, but the broad application image query first
+returned no matches and then incurred two 30-second remote-query timeouts.
+The third framework attempt was interrupted by the enclosing waiter. The
+owner-scoped observation changes that query path; it does not claim to repair
+the system Photos service or guarantee accessibility readiness from visible
+pixels. The deadline, one-second serialized cadence, fixture isolation and
+single picker activation remain unchanged and require fresh hosted validation.
 
 In run `41663409152`, the former 30-second window began at 16:06:31.516 UTC.
 Six queries returned no match; the seventh was interrupted by the waiter's
@@ -571,11 +590,40 @@ setup expired after 21 keyboard queries, with the last returned count zero and
 no input attempted. That change also added
 the software-keyboard prerequisite, so comparison with the earlier passing
 Ordinary run does not isolate the cause or establish the field's responder state.
-The appearance observer now makes an explicit focus request at UIKit's
-[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller),
-instead of relying on a default-focus preference or a pre-presentation task.
-SwiftUI manages the observer's containment and layout; it neither accesses
-private text-field internals nor changes the field's value.
+The subsequent background appearance observer requested SwiftUI focus at UIKit's
+[post-presentation callback](https://developer.apple.com/documentation/uikit/displaying-and-managing-views-with-a-view-controller).
+In hosted run `42071309515`, the first home sheet again exhausted setup without
+input. Its recording shows the caret and software keyboard appear, followed by
+the keyboard withdrawing while the sheet remains visible. The intervening test
+operations only read accessibility state; they do not tap, type, dismiss or
+background the app. The final screenshot alone would have missed that initial
+appearance. These observations establish a loss of visible keyboard readiness,
+not the precise cause of the responder transition.
+
+The name field now belongs directly to a UIKit controller rather than splitting
+the field and focus request between SwiftUI and a background observer. That
+controller owns one stable `UITextField`, requests first responder only while
+visible in its key window, and records the actual responder outcome without
+logging entered text. Updates preserve the existing field and marked text;
+ending editing does not trigger a focus retry. The existing single-input,
+no-field-tap UI regression remains the behavioral acceptance check. This
+ownership change needs a fresh hosted run; the prior recording is diagnostic
+evidence, not evidence that the new implementation passes.
+
+The seven `NameEntryTextFieldTests` cases use actual windows and text fields.
+Run `42087951355` passed all seven, but its original pending-teardown fixture
+called `viewDidAppear` directly and UIKit reported unsupported lifecycle use,
+followed by unbalanced-transition diagnostics. Those passing assertions did not
+establish natural appearance ordering. The fixture now presents a containing
+controller through UIKit, awaits presentation completion, and awaits dismissal
+before removing the test window. Apple's [presentation contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/present(_:animated:completion:))
+places completion after `viewDidAppear`; its [appearance transition contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/beginappearancetransition(_:animated:))
+prohibits calling lifecycle callbacks directly. The non-key-window and teardown
+cases retain their real responder and callback assertions. A fresh hosted run
+must verify the corrected fixture; the earlier pass does not prove that its
+lifecycle diagnostics are absent. Full Recovery remains the separate check of
+name entry inside the application's sheets.
+
 The setup prerequisite now prevents input while the keyboard is absent; missing,
 duplicate, late or throwing keyboard observations cannot start or renew input.
 Localization's tap-based path does not require an existing keyboard before its
@@ -757,6 +805,53 @@ wait before tapping the cell. The combined allowance replaces that wait plus
 subsequent unshared checks; it does not claim to cure native service latency.
 Current hosted execution must still verify all three exports and their bytes.
 
+Save readiness captures the uniquely resolved `Browse View (Picker)` once per
+probe and checks its bounded, immutable hierarchy. It requires one local-storage
+browsing owner, one Files navigation bar under that owner, one exact direct title
+for the requested folder, and one Save button under the same bar. The descriptive
+`Title:` suffix in `DOC.browsingRoot` is not the current-folder identity: in run
+`42087951355`, the second export's failure capture showed `Title: On My iPhone`
+while the bar displayed the exact run folder and the first ZIP was already there.
+The former run-folder owner predicate would reject that captured hierarchy. The
+capture was taken after the deadline and does not establish when that state arose.
+
+The unique picker resolver preserves native errors: a missing or ambiguous picker
+fails rather than becoming a pending observation. Within a resolved picker, each
+probe rejects ambiguous or wrongly nested owners and titles; omitted children
+remain pending. Live interaction resolves Save under the exact owner identifier
+returned by that probe and checks enabled/hittable state. After filename editing
+and evidence capture, the final Save phase takes a fresh scoped snapshot and taps
+once. Both phases retain their ten-second deadlines; late or throwing operations
+cannot authorize a tap. Replacing four serial scope-count queries does not promise
+that any native operation will finish in time. The complete new hosted journey
+must still verify all exported and restored bytes.
+
+After the single filename `typeText`, one ten-second monotonic observation window
+waits for the full exact base name. Each fresh read resolves the unique typed
+`DOCPicker.filenameTextField`; the original window checks its deadline before
+and after that read and again when the waiter returns. Missing, wrong and partial
+values remain pending. A stable mismatch expires without a second input, tap,
+shortened name or prefix acceptance. Native resolver errors and cancellation
+remain terminal. Only timely full equality reaches the existing ledger assertion
+and later Save phase. The navigation, Save and overall journey budgets are unchanged.
+
+`ROOM_FILES_FILENAME_ECHO_V1` records schema version 1, export role, exact expected
+and last returned values, started and returned read counts, last stage, elapsed
+seconds and `matched`/`failed`. A JSON null means no String value was returned;
+the counts distinguish an absent value from no completed read. The diagnostic
+uses only values already read, makes no extra UI query and cannot replace the
+primary native error. A full value returned at or after the deadline can appear
+in the diagnostic while the result remains `failed`.
+
+In source `e54025bb357b2aa7f2c2a4fe13a041ed0f0c4c72`, Recovery run
+`42099598151` failed the first export's immediate value assertion: it returned
+`source-E1836DD1-50AE-4CE6-9473-89` instead of the complete
+`source-E1836DD1-50AE-4CE6-9473-89348E24DB97`. Later failure imagery showed the
+previously missing tail and a caret. That does not establish the full field's
+equality at the assertion or whether the original read reflected delayed echo
+or incomplete input. Bounded exact observation tests that distinction without
+accepting an incorrect filename; the fresh hosted journey remains required.
+
 After one real Save, return from the external Files service has a separate
 30-second monotonic allowance. Each serial probe classifies one immutable app
 snapshot. An observed Files action or alert blocks progress. A remaining share
@@ -810,19 +905,23 @@ therefore uses the stable app root's later `debugDescription`, which includes th
 remote picker. `hierarchy_observation` explicitly distinguishes these observations;
 they are diagnostic evidence and do not authorize an action or prove acceptance.
 
-Restore-file selection uses the exact typed hierarchy observed in the picker:
-one `Browse View (Picker)`, its run-bound local-storage `DOC.browsingRoot`, one
-`File View` collection and one cell whose identifier is the full backup filename
-followed by `, roominventory`. Each scope must be unique before querying its
-descendants. A single active ten-second window covers those live checks,
-enabled/hittable readiness and one direct tap. Missing or noninteractive targets
-remain pending; duplicate scopes, errors, late results and repeated selection
-fail. The generic scrolling/tap helper is not used for this restore selection.
+Restore-file selection uses the same bounded picker snapshot and current-folder
+title checks, then requires one `File View` collection under the matched
+local-storage owner and one cell whose identifier is the full backup filename
+followed by `, roominventory`. The container's descriptive title does not replace
+the exact current-folder title. A single active ten-second window covers the
+snapshot, live enabled/hittable readiness and one direct tap resolved under the
+matched owner. Missing or noninteractive targets remain pending; duplicate
+scopes, errors, late results and repeated selection fail. The generic
+scrolling/tap helper is not used for this restore selection.
 In run `41704117640`, that helper's repeated existence query ran outside its
 waiter after the file had already been found. The scoped path removes that
 unbounded query sequence; it does not establish the cause of native query latency.
-`ROOM_FILES_SELECTION_V1` records the exact folder/filename, elapsed time, last
-returned counts, current stage and tap admissions from existing operations only.
+`ROOM_FILES_SELECTION_V2` uses schema version 2 and records the exact folder and
+filename, elapsed time, current stage and tap admissions from existing operations
+only. `last_returned_counts` records `complete_snapshot_scope` as zero or one after
+a completed classifier result and stays empty when that capture fails. It does
+not reconstruct the former four live-query counts.
 A timely tap still requires the replacement alert and all subsequent restore,
 persistence and exported-byte checks; it is not itself proof of restoration.
 
@@ -1479,3 +1578,39 @@ reduce the upper bound. Under maximum new inventory consumption, remaining
 installer time is therefore at most 27.613885292 seconds, and may be insufficient.
 Earlier native deadline and EPERM cleanup failures remain failures even when
 final group absence and leader reaping are subsequently observed.
+
+
+### Immutable Files navigation observations
+
+The EE-parent hosted failure (`42129981242`, Recovery job `127606071582`)
+completed the source ZIP, backup, restore, relaunch and preview checkpoints. The
+final target ZIP reached Files, but an `exists` query for Browse was followed by
+an `isEnabled` query after that button no longer matched. XCTest recorded the
+missing-element failure before the next readiness probe. The later failure tree
+and screenshot show the intended run folder and Save, with the default
+Inventory-package filename. They do not prove when the earlier transition occurred.
+
+Navigation now resolves at most one `Browse View (Picker)` and classifies its
+captured attributes and descendants together. A missing picker or incomplete
+captured state remains pending; ambiguous owners, bars or exact titles fail.
+The local provider's remembered title is not the current folder: current local
+location comes from the uniquely owned bar's direct exact title. Target folder,
+local root, local entry, Browse and Back preserve that priority. Only typed,
+enabled snapshot buttons/cells can identify navigation actions. No snapshot
+attribute is treated as proof of native hittability; existing live tap readiness
+still applies before every navigation action. Folder observation itself needs
+no tap or live property query on its title.
+
+The original 30-second presentation and 10-second subsequent-navigation windows
+are unchanged and cover count, capture, bounded 4,096-node classification and
+waiter return. A capture error propagates, including a picker that disappears
+after its count query. Late results cannot admit a state, and a missing state
+never implies Back. No extra sleep, timeout increase or host accounting change
+is included. Synthetic tests cover the hierarchy, state ordering, ambiguity,
+missing/disabled controls, native capture errors, cancellation and deadlines;
+the actual remote-picker behavior still requires the new hosted run.
+
+Apple documents [snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
+as returning the element attributes and descendant hierarchy. This is the
+boundary used here; live element properties are not repeatedly sampled to
+construct one classification.

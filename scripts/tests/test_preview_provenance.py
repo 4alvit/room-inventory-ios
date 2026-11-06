@@ -506,7 +506,12 @@ class PreviewWorkflowTests(unittest.TestCase):
             "tested-tree": "${{ steps.preview-version.outputs.tree }}",
         })
         output_script = steps[output_index]["run"]
-        self.assertIn('("commit", "HEAD"), ("tree", "HEAD^{tree}")', output_script)
+        self.assertIn('expected = [os.environ["EXPECTED_SOURCE_COMMIT"], os.environ["EXPECTED_SOURCE_TREE"]]', output_script)
+        self.assertIn('["git", "--no-replace-objects", "rev-parse", "HEAD", "HEAD^{tree}"]', output_script)
+        self.assertIn('actual != expected or expected[0] != os.environ["GITHUB_SHA"]', output_script)
+        self.assertIn(r'commit={actual[0]}\ntree={actual[1]}', output_script)
+        self.assertLess(output_script.index("if actual != expected"),
+                        output_script.index('with open(os.environ["GITHUB_OUTPUT"]'))
         self.assertIn('os.environ["GITHUB_OUTPUT"]', output_script)
         self.assertIn('Path("VERSION")', output_script)
 

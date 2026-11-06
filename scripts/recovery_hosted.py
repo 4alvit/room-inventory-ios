@@ -82,7 +82,7 @@ def validate_host(env, profile, root, *, machine=None, system=None):
             "Missing or invalid runner image version", Failure)
     for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "RECOVERY_TESTED_COMMIT", "RECOVERY_TESTED_TREE"):
         require(re.fullmatch(r"[0-9a-f]{40}", env.get(key, "")), "Missing source identity: " + key, Failure)
-    require(env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"], "iOS job tested a different commit", Failure)
+    require(env["GITHUB_SHA"] == env["RECOVERY_TESTED_COMMIT"], "Source identity prerequisite recorded a different commit", Failure)
     for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         require(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")), "Invalid run identity", Failure)
     require(env.get("GITHUB_EVENT_NAME") in profile["allowed_events"], "Unsupported event", Failure)
@@ -1116,6 +1116,92 @@ class HostedRecoveryRun(controller.RecoveryRun):
         capture_build_identity(self, self.output.parent / "build-identity", self.guard)
 
 
+def small_failure_diagnostic(work, context, guard):
+    """Copy bounded existing evidence; never rerun a command or inspect native state."""
+    from recovery_retention import Files, plain, metadata, encoded, digest
+    files = Files(guard)
+    guard()
+    work = plain(work)
+    require(work.name == "room-recovery-work" and work.is_dir(), "Unexpected diagnostic work root")
+    output = plain(work.parent / "room-recovery-diagnostic")
+    output.mkdir(mode=0o700)  # An existing output is never reused or overwritten.
+    report = {"schema_version": 1, "status": "INCOMPLETE", "byte_cap": 4 * controller.MIB,
+              "source_commit": context.get("source_commit"), "source_tree": context.get("source_tree"),
+              "run_id": context.get("hosted_identity", {}).get("run_id"),
+              "run_attempt": context.get("hosted_identity", {}).get("run_attempt"),
+              "files": {}, "failed_command": None,
+              "scope": "Diagnostic copies only; full recovery archive remains authoritative."}
+    files.write(output / "diagnostic.json", encoded(report))
+    total = 0
+    result = None
+    for source, target, cap in (("preflight/adapter-result.json", "run-summary.json", 65536),
+                                ("run/result.json", "result.json", 2 * controller.MIB)):
+        try:
+            raw, observed = files.read(work / source, cap)
+            files.write(output / target, raw)
+            total += len(raw)
+            report["files"][target] = {"status": "COPIED", "source": source,
+                                       "bytes": len(raw), "sha256": digest(raw)}
+            if target == "result.json":
+                result = json.loads(raw)
+        except (OSError, ValueError) as error:
+            report["files"].setdefault(target, {"status": "OMITTED", "source": source})
+            report["files"][target].update(error_type=type(error).__name__, read_cap_bytes=cap,
+                reason=str(error)[:200] if isinstance(error, ValueError) else "file_read_or_write_error",
+                errno=getattr(error, "errno", None))
+    # Select only an unambiguous command carrying the actual primary error.
+    # An absent/oversize/malformed result never authorizes a guessed log path.
+    commands = result.get("commands") if isinstance(result, dict) else None
+    primary = result.get("primary_error") if isinstance(result, dict) else None
+    if isinstance(commands, list) and len(commands) <= 1000 and isinstance(primary, dict) and primary:
+        matches = [item for item in commands if isinstance(item, dict)
+                   and item.get("primary_error") == primary]
+        if len(matches) == 1:
+            name = matches[0].get("name")
+            if isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
+                report["failed_command"] = name
+    if report["failed_command"] is not None:
+        for suffix in ("stdout", "stderr"):
+            source = "run/logs/" + report["failed_command"] + "." + suffix
+            target = "failed-command." + suffix + ".tail"
+            try:
+                guard()
+                path = plain(work / source)
+                info = path.lstat()
+                require(stat.S_ISREG(info.st_mode) and info.st_size >= 0, "Diagnostic log is not regular")
+                before = metadata(info)
+                start = max(0, info.st_size - 512 * 1024)
+                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+                    require(metadata(os.fstat(stream.fileno())) == before, "Diagnostic log changed before read")
+                    guard()
+                    stream.seek(start)
+                    raw = stream.read(512 * 1024 + 1)
+                    guard()
+                    require(len(raw) == info.st_size - start and metadata(os.fstat(stream.fileno())) == before,
+                            "Diagnostic log changed during read")
+                require(metadata(path.lstat()) == before, "Diagnostic log replaced during read")
+                files.write(output / target, raw)
+                total += len(raw)
+                report["files"][target] = {"status": "COPIED", "source": source,
+                    "source_bytes": info.st_size, "start_byte": start, "end_byte_exclusive": info.st_size,
+                    "truncated": start != 0, "first_line_may_be_partial": start != 0,
+                    "bytes": len(raw), "sha256": digest(raw)}
+            except (OSError, ValueError) as error:
+                report["files"][target] = {"status": "OMITTED", "source": source,
+                    "error_type": type(error).__name__, "read_cap_bytes": 512 * 1024,
+                    "reason": str(error)[:200] if isinstance(error, ValueError) else "file_read_or_write_error",
+                    "errno": getattr(error, "errno", None)}
+    report["status"] = "COMPLETE_WITH_OMISSIONS" if any(
+        item["status"] == "OMITTED" or "error_type" in item for item in report["files"].values()
+    ) or report["failed_command"] is None else "COMPLETE"
+    final = encoded(report)
+    require(len(final) <= 16384 and total + len(final) <= report["byte_cap"], "Diagnostic byte cap exceeded")
+    files.write(output / "diagnostic-final.json", final)
+    guard()
+    os.replace(output / "diagnostic-final.json", output / "diagnostic.json")
+    return report
+
+
 def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usage=shutil.disk_usage):
     env = dict(os.environ if env is None else env)
     start = clock()
@@ -1253,6 +1339,13 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
                     alarm.check()
                 retention_guard()
                 controller.write_json(work / "preflight/adapter-result.json", context)
+                if code != 0 or not (work / "run/result.json").exists():
+                    try:
+                        small_failure_diagnostic(work, context, retention_guard)
+                    except Exception as error:
+                        # Diagnostic failure cannot replace the original outcome.
+                        context["small_diagnostic_error"] = {"type": type(error).__name__}
+                    retention_guard()
                 report = package_evidence(work, upload, context, retention_guard, collector=runner.collector if runner else None)
                 retention_guard()
                 failure_precedence = report.get("failure_precedence")

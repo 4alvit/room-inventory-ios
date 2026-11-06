@@ -24,15 +24,17 @@ One push to a branch with an open PR triggers the existing Quality gate through
 1. Change scope.
 2. CI configuration contracts.
 3. Release tooling contracts.
-4. Core and iOS tests.
-5. Recovery journey, after the Core and iOS tests.
-6. PR Simulator candidate, after both iOS and recovery, for a same-repository PR.
-7. Swift security analysis.
-8. Python tooling security analysis.
-9. Actions security analysis.
-10. CI gate.
+4. Source identity.
+5. Core and iOS tests, after source identity.
+6. Recovery journey, after source identity and independent of Core completion.
+7. PR Simulator candidate, after both iOS and recovery, for a same-repository PR.
+8. Acceptance harness.
+9. Swift security analysis.
+10. Python tooling security analysis.
+11. Actions security analysis.
+12. CI gate.
 
-These are ten workflow jobs for a successful same-repository PR cohort, not a
+These are twelve workflow jobs for a successful same-repository PR cohort, not a
 promise about the number of platform-generated check runs. Existing Core/app
 tests, CodeQL builds and preview packaging still run; the one-build/one-test limit
 applies specifically to the new recovery scenario. No new push trigger or separate
@@ -147,8 +149,12 @@ changing the clock or trusting an unverified transaction is not a recovery step.
 
 ## Source and platform identity
 
-The job checks out `github.sha`, then supplies the exact commit and tree produced
-by the preceding `ios` job as `RECOVERY_TESTED_COMMIT` and `RECOVERY_TESTED_TREE`.
+The shared `source-identity` prerequisite checks out `github.sha`, verifies the
+clean checkout and records its exact commit and tree. Core and Recovery depend
+on this prerequisite and may run concurrently. Core verifies that identity
+before native work and again when publishing its tested outputs. Recovery
+receives the same prerequisite outputs as `RECOVERY_TESTED_COMMIT` and
+`RECOVERY_TESTED_TREE`.
 The adapter rejects a dirty checkout or a mismatch before native work. On a PR,
 this is the actual merge commit; the PR head is recorded separately. GitHub's
 [event reference](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
@@ -158,8 +164,8 @@ having run on its unchanged base commit.
 For an open PR, the adapter requires the canonical `refs/pull/<number>/merge`
 ref, the event repository and base repository to match this repository, and
 well-formed base/head SHA and repository fields. A fork head repository may
-differ. The checked-out commit must equal both `GITHUB_SHA` and the preceding
-iOS job's tested commit; its tree must equal the tested tree.
+differ. The checked-out commit must equal both `GITHUB_SHA` and the shared source
+prerequisite's commit; its tree must equal that prerequisite's tree.
 
 The event's `merge_commit_sha` is diagnostic metadata: missing, null, and a valid
 SHA differing from the run are allowed only while all authoritative source
@@ -274,6 +280,15 @@ still uses that complete response. No additional query or retry is performed.
 All other discovery command caps remain unchanged. In particular, the XcodeGen installer
 requests 70 seconds within the same absolute 120-second discovery window.
 
+The digest-pinned XcodeGen download permits at most three GET attempts for HTTP
+429, 500, 502, 503 or 504. Attempts and 1/2-second backoffs share a 60-second
+acquisition budget; a valid `Retry-After` can lengthen a wait but cannot extend
+that budget. Invalid or out-of-budget delays, transport/TLS errors, body failures
+and size or digest mismatches fail immediately. A Unix process timer interrupts
+blocking I/O, and monotonic checks reject late results. Python signal handling
+can be delayed by C code, so the existing hosted command owner remains the
+authoritative process deadline; its 70-second cap is unchanged.
+
 For each command, its deadline is the earlier of start plus its requested cap
 and the absolute discovery deadline; work must finish four seconds before that.
 The adapter refuses to start a command with fewer than eight seconds remaining
@@ -373,6 +388,46 @@ snapshot. A cap failure alone does not establish physical disk exhaustion. For
 an earlier failure without a crossing observation, the last complete sample or
 last build-log line cannot identify the missing entry, exact size or cause.
 
+## Resource scan cost breakdown
+
+`resource_scan_cost` retains its existing inclusive scan wall time and SELF CPU
+observations. The additive `resource_scan_breakdown` schema version 1 measures
+only calls already performed inside `resource_size`, including post-command
+walks without a cooperative callback. Its fixed category/operation map stores
+started, returned, failed, exhausted, interrupted-before-call, active, measured and missing
+counts, plus wall-time sum/max. Counts saturate at 2^31−1 and duration sums at
+86,400 seconds; saturation or an unavailable/regressing sample marks capture
+incomplete. `interrupted_before_call` means a timing-boundary interruption prevented the
+normal call path; required iterator-release fallback may then run once outside
+that incomplete timed span. A started span can remain active if its completion could
+not be captured. No per-entry records, paths, command text, child CPU samples or
+additional filesystem/native probes are added.
+
+Walker buckets cover existing root metadata calls, scandir open, iterator
+entry/advancement/close, entry stat, ownership validation and checkpoints.
+Cooperative-service buckets cover the two existing disk-usage calls, selector,
+pipe read/write, child poll, ownership validation and nested log validation.
+All named spans are **inclusive and nonadditive**: checkpoint time contains its
+service calls; nested log validation contains its walker calls, including nested
+checkpoints. Aggregated walker buckets can therefore include both the outer
+walk and the nested log walk. Do not sum these buckets or subtract them to claim
+an exclusive syscall cost. Uninstrumented Python/control work and measurement
+overhead remain in the inclusive scan duration. A long span can also include
+scheduler delay; the observation does not establish a filesystem, controller or
+CoreSimulator cause.
+
+The wrappers call each original operation once with its original arguments.
+Only monotonic clock samples and bounded in-memory metadata are added. Existing
+cadence, deadlines, caps, ownership checks and final native-completion barriers
+are unchanged. A timing interruption after acquiring/entering a scandir
+iterator closes that acquired resource before propagating the interruption.
+Normal and error context exits still use the original context protocol.
+Failure-path accounting retains available partial measurements, marks missing
+data, and cannot replace an existing native/deadline/cancellation error.
+An interruption during successful accounting remains fatal. The existing
+receipt/retention path persists these fields after cleanup; in-memory capture
+does not guarantee that an upload or final receipt succeeded.
+
 ## Retention on an ephemeral runner
 
 A hosted runner's live simulator and DerivedData will be unavailable after the
@@ -430,6 +485,18 @@ from the selector snapshot. Both remain diagnostic evidence within the same caps
 Snapshot APIs do not expose hit testing: `hittable: null` is
 explicitly unknown, not false, and cannot establish a non-hittable failure.
 The real tap and readiness assertions still use live UI controls.
+
+Export saving enters the existing 30-second Files presentation/navigation
+window before checking the Save control. A separate early lookup by the label
+`Save` must not prevent that navigation window from observing the remote picker.
+Once the run's folder is open, the test requires unique picker, local-folder,
+navigation-bar and `DOCPicker.actionButton`/`Save` scopes, with current enabled
+and hittable observations within ten seconds. Filename editing uses the exact
+`DOCPicker.filenameTextField` identifier. After editing and evidence capture,
+another ten-second window resolves those Save scopes again and admits one tap;
+late results or ambiguous scopes fail. A failure screenshot taken after a
+deadline can establish the later visible state, but not when the picker appeared
+or whether it was interactive during the earlier wait.
 
 If the original result reaches its active 512 MiB allowance or reaches the
 192 MiB final-result bound, the small capture can still be retained in a

@@ -115,3 +115,37 @@ After a terminal infrastructure failure, inspect existing tags, assets and activ
 runs before retrying. Where the existing policy allows a retry before publication,
 use **Re-run all jobs** at the unchanged source; an earlier attempt's successful
 validation does not qualify a later attempt.
+
+## CLI archive download recovery
+
+The unauthenticated CLI archive downloader carries a focused backport from
+[toolkit commit `92a333986c8eb0546fb245207c8bbd945fca41f6`](https://github.com/victron-venus/venus-os-ci-toolkit/commit/92a333986c8eb0546fb245207c8bbd945fca41f6)
+([PR #406](https://github.com/victron-venus/venus-os-ci-toolkit/pull/406)). Its downloader
+and formatted regression tests are copied from that commit with only the two
+runtime-version strings in each file changed from Go 1.27.3 to this project's
+qualified Go 1.27.2. The installed file SHA-256 values are:
+
+- `scripts/download_release_gh.go`: `627b71bd6044ac497b3e7d580616c6f4a43f7c5e96f482c323962674b4fe98b3`
+- `scripts/download_release_gh_test.go`: `3c5c213ce73709cf2da20c459c850641e67b7e4e67ef609ae56791b753500538`
+
+The downloader makes at most three GET attempts for HTTP 429, 500, 502, 503 or
+504. All attempts, response reads and waits share one 60-second absolute HTTP
+deadline. It closes each failed response before waiting one second, then two
+seconds. A valid `Retry-After` can require a longer wait; malformed values or a
+wait that cannot fit the remaining deadline stop the download. HTTP 429 recovery
+applies only to this unauthenticated archive GET, not to the release API client's
+rate-limit policy described above.
+
+Transport and TLS errors, other HTTP statuses including 404, response-body read
+errors and oversized responses remain terminal. The 180-second outer Go process
+limit, 32 MiB archive cap, HTTPS/redirect rules, FIPS profile, exclusive output,
+archive and executable checksums and CLI version checks are unchanged. Publication
+writes are never retried by this helper.
+
+The existing **Core and iOS tests** job runs all 14 downloader regressions using
+Go 1.27.2 with FIPS enabled before the native build. This is a targeted backport;
+`.release-policy.json` retains generator baseline
+`755c2e66fb1e79fc67d9e4c85ecffcc046b967db`, and GitHub CLI remains 2.102.0.
+Keep this canonical provenance and the regression invocation when later rendering
+from the toolkit. Full generator or CLI upgrades require review of their complete
+diff; this change does not claim either upgrade.

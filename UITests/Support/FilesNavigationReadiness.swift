@@ -6,24 +6,34 @@ import XCTest
 @MainActor
 final class FilesNavigationReadiness {
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
-    enum TitleKind { case application, navigationBar, text, button, other }
+    enum TitleKind { case application, navigationBar, text, button, other, collectionView, cell, unrelated }
     struct TitleItem {
         let kind: TitleKind
         let label: String
         let identifier: String
+        let enabled: Bool
 
-        init(kind: TitleKind, label: String, identifier: String = "") {
+        init(kind: TitleKind, label: String, identifier: String = "", enabled: Bool = true) {
             self.kind = kind
             self.label = label
             self.identifier = identifier
+            self.enabled = enabled
         }
     }
     static let navigationBarIdentifier = "FullDocumentManagerViewControllerNavigationBar"
     static let titleSnapshotNodeLimit = 4_096
+    static let pickerIdentifier = "Browse View (Picker)"
+    static let localStorageRootPrefix = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: "
+    struct SelectionObservation {
+        let ownerIdentifier: String
+    }
+    enum SelectionTarget { case save; case backup(filename: String) }
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
         case invalidTitleSnapshot
         case invalidSelectionCount, selectionAlreadyStarted
+        case invalidSelectionSnapshot
+        case invalidNavigationSnapshot, invalidNavigationCount
 
         var description: String { "Files navigation readiness: \(self.name)" }
         private var name: String {
@@ -38,6 +48,9 @@ final class FilesNavigationReadiness {
             case .invalidTitleSnapshot: "invalid or oversized folder title snapshot"
             case .invalidSelectionCount: "file selection scope count is not zero or one"
             case .selectionAlreadyStarted: "file selection already started"
+            case .invalidSelectionSnapshot: "invalid or oversized Files selection snapshot"
+            case .invalidNavigationSnapshot: "invalid or oversized Files navigation snapshot"
+            case .invalidNavigationCount: "Files navigation scope is ambiguous"
             }
         }
     }
@@ -89,6 +102,141 @@ final class FilesNavigationReadiness {
 
     func waitForState(probe: @escaping () throws -> State?) throws -> State {
         try waitForResult(probe: probe)
+    }
+
+    /// One immutable picker tree decides the navigation state. Missing owners
+    /// are pending; resolver errors propagate. Snapshot readiness never claims
+    /// native hittability: navigation actions still use their live tap gates.
+    func captureNavigationState<Node>(folder: String, localTitle: String,
+                                       pickerCount: () throws -> Int,
+                                       uniqueSnapshot: () throws -> Node,
+                                       children: (Node) -> [Node],
+                                       attributes: (Node) -> TitleItem) throws -> State? {
+        let count = try perform(pickerCount)
+        guard count == 0 || count == 1 else { throw remember(Failure.invalidNavigationCount) }
+        guard count == 1 else { return nil }
+        let root = try perform(uniqueSnapshot)
+        var pending: [(Node, Int?)] = [(root, nil)]
+        var items: [TitleItem] = []
+        var parents: [Int?] = []
+        while let (node, parent) = pending.popLast() {
+            let item = try perform { attributes(node) }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard items.count + pending.count + descendants.count < Self.titleSnapshotNodeLimit else {
+                    throw Failure.invalidNavigationSnapshot
+                }
+            }
+            let index = items.count
+            items.append(item)
+            parents.append(parent)
+            pending.append(contentsOf: descendants.reversed().map { ($0, Optional(index)) })
+        }
+        return try perform {
+            guard !folder.isEmpty, !localTitle.isEmpty, folder != localTitle,
+                  items.first?.kind == .other,
+                  items.first?.identifier == Self.pickerIdentifier else {
+                throw Failure.invalidNavigationSnapshot
+            }
+            func unique(_ matches: [Int]) throws -> Int? {
+                guard matches.count <= 1 else { throw Failure.invalidNavigationCount }
+                return matches.first
+            }
+            func below(_ child: Int, _ ancestor: Int) -> Bool {
+                var parent = parents[child]
+                while let index = parent {
+                    if index == ancestor { return true }
+                    parent = parents[index]
+                }
+                return false
+            }
+            _ = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier == Self.pickerIdentifier
+            })
+            let owner = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier.hasPrefix("DOC.browsingRoot Source: ")
+            })
+            let bar = try unique(items.indices.filter {
+                items[$0].kind == .navigationBar && items[$0].identifier == Self.navigationBarIdentifier
+            })
+            if let owner {
+                guard items[owner].identifier.utf8.count <= 1_024 else { throw Failure.invalidNavigationSnapshot }
+            }
+            if let owner, let bar, below(bar, owner),
+               items[owner].identifier.hasPrefix(Self.localStorageRootPrefix),
+               items[owner].identifier.count > Self.localStorageRootPrefix.count {
+                func title(_ text: String) throws -> Int? {
+                    try unique(items.indices.filter {
+                        parents[$0] == bar && ((items[$0].kind == .text && items[$0].label == text)
+                            || (items[$0].kind == .button && items[$0].label == text + ", Actions Menu"))
+                    })
+                }
+                let target = try title(folder)
+                let local = try title(localTitle)
+                guard target == nil || local == nil else { throw Failure.invalidNavigationCount }
+                if let target { return items[target].enabled ? .targetFolder : nil }
+                if let local { return items[local].enabled ? .localRoot : nil }
+            }
+            // Only actionable row/button types qualify; nested labels cannot
+            // create a second match. The provider title is not a current-folder title.
+            var insideBar = Array(repeating: false, count: items.count)
+            for index in items.indices {
+                if let parent = parents[index] {
+                    insideBar[index] = insideBar[parent] || items[parent].kind == .navigationBar
+                }
+            }
+            let entry = try unique(items.indices.filter { candidate in
+                (items[candidate].kind == .cell || items[candidate].kind == .button)
+                    && (items[candidate].label == localTitle || items[candidate].label.hasPrefix(localTitle + ","))
+                    && items[candidate].identifier != "BackButton"
+                    && !insideBar[candidate]
+            })
+            if let entry, items[entry].enabled { return .localEntry }
+            let browse = try unique(items.indices.filter {
+                items[$0].kind == .button && (items[$0].label == "Browse" || items[$0].identifier == "Browse")
+            })
+            if let browse, items[browse].enabled { return .browse }
+            if let bar {
+                let back = try unique(items.indices.filter {
+                    parents[$0] == bar && items[$0].kind == .button
+                        && ["Back", "Locations", "Browse"].contains(items[$0].label)
+                })
+                if let back, items[back].enabled { return .back }
+            }
+            return nil
+        }
+    }
+
+    func captureNavigationState(folder: String, localTitle: String,
+                                 pickers: XCUIElementQuery) throws -> State? {
+        try captureNavigationState(folder: folder, localTitle: localTitle,
+            pickerCount: { pickers.count },
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try pickers.element.snapshot() },
+            children: { $0.children }, attributes: { node in
+                let kind: TitleKind
+                switch node.elementType {
+                case .other: kind = .other
+                case .navigationBar: kind = .navigationBar
+                case .staticText: kind = .text
+                case .button: kind = .button
+                case .collectionView: kind = .collectionView
+                case .cell: kind = .cell
+                default: kind = .unrelated
+                }
+                return TitleItem(kind: kind, label: node.label, identifier: node.identifier,
+                                 enabled: node.isEnabled)
+            })
+    }
+
+    /// Observe the result of one completed filename input. Missing, partial or
+    /// wrong values stay pending; only the full exact value can admit Save.
+    /// Every fresh native read shares this window's original deadline.
+    func waitForFilenameEcho(expected: String,
+                             readValue: @escaping () throws -> String?) throws -> String {
+        try waitForResult {
+            let value = try self.perform(readValue)
+            return value == expected ? value : nil
+        }
     }
 
     private func waitForResult<Value>(probe: @escaping () throws -> Value?) throws -> Value {
@@ -164,6 +312,144 @@ final class FilesNavigationReadiness {
                 }
                 return TitleItem(kind: kind, label: node.label, identifier: node.identifier)
             })
+    }
+
+    /// The browsing-root title can describe the provider entry location rather
+    /// than the current folder. Bind current location to the bar's direct title
+    /// in one immutable, uniquely resolved remote picker snapshot instead.
+    func captureSelection<Node>(folder: String, target: SelectionTarget = .save, uniqueSnapshot: () throws -> Node,
+                                  children: (Node) -> [Node],
+                                  attributes: (Node) -> TitleItem) throws -> SelectionObservation? {
+        let root = try perform(uniqueSnapshot)
+        var pending: [(Node, Int?)] = [(root, nil)]
+        var items: [TitleItem] = []
+        var parents: [Int?] = []
+        while let (node, parent) = pending.popLast() {
+            let item = try perform { attributes(node) }
+            let descendants = try perform { children(node) }
+            try perform {
+                guard items.count + pending.count + descendants.count < Self.titleSnapshotNodeLimit else {
+                    throw Failure.invalidSelectionSnapshot
+                }
+            }
+            let index = items.count
+            items.append(item)
+            parents.append(parent)
+            pending.append(contentsOf: descendants.reversed().map { ($0, Optional(index)) })
+        }
+        return try perform {
+            guard !folder.isEmpty, items.first?.kind == .other,
+                  items.first?.identifier == Self.pickerIdentifier else { throw Failure.invalidSelectionSnapshot }
+            func unique(_ matches: [Int]) throws -> Int? {
+                guard matches.count <= 1 else { throw Failure.invalidSelectionCount }
+                return matches.first
+            }
+            func below(_ child: Int, _ ancestor: Int) -> Bool {
+                var parent = parents[child]
+                while let index = parent {
+                    if index == ancestor { return true }
+                    parent = parents[index]
+                }
+                return false
+            }
+            _ = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier == Self.pickerIdentifier
+            })
+            guard let owner = try unique(items.indices.filter {
+                items[$0].kind == .other && items[$0].identifier.hasPrefix("DOC.browsingRoot Source: ")
+            }) else { return nil }
+            let ownerID = items[owner].identifier
+            guard below(owner, 0), ownerID.hasPrefix(Self.localStorageRootPrefix),
+                  ownerID.count > Self.localStorageRootPrefix.count,
+                  ownerID.utf8.count <= 1_024 else { throw Failure.invalidSelectionSnapshot }
+            guard let bar = try unique(items.indices.filter {
+                items[$0].kind == .navigationBar && items[$0].identifier == Self.navigationBarIdentifier
+            }) else { return nil }
+            guard below(bar, owner) else { throw Failure.invalidSelectionSnapshot }
+            guard try unique(items.indices.filter {
+                parents[$0] == bar && ((items[$0].kind == .text && items[$0].label == folder)
+                    || (items[$0].kind == .button && items[$0].label == folder + ", Actions Menu"))
+            }) != nil else { return nil }
+            switch target {
+            case .save:
+                guard let save = try unique(items.indices.filter {
+                    items[$0].kind == .button && items[$0].identifier == "DOCPicker.actionButton"
+                }) else { return nil }
+                guard below(save, bar), items[save].label == "Save" else { throw Failure.invalidSelectionSnapshot }
+            case let .backup(filename):
+                guard filename.hasSuffix(".roominventory"), filename.count > ".roominventory".count else {
+                    throw Failure.invalidSelectionSnapshot
+                }
+                guard let files = try unique(items.indices.filter {
+                    items[$0].kind == .collectionView && items[$0].identifier == "File View"
+                }) else { return nil }
+                guard below(files, owner) else { throw Failure.invalidSelectionSnapshot }
+                guard let file = try unique(items.indices.filter {
+                    items[$0].kind == .cell && items[$0].identifier == filename + ", roominventory"
+                }) else { return nil }
+                guard below(file, files) else { throw Failure.invalidSelectionSnapshot }
+            }
+            return SelectionObservation(ownerIdentifier: ownerID)
+        }
+    }
+
+    func captureSelection(folder: String, target: SelectionTarget = .save,
+                          pickers: XCUIElementQuery) throws -> SelectionObservation? {
+        // Callers have already observed positive Files navigation. As with the
+        // title-capture adapter, a missing/ambiguous owner's native resolution
+        // error is terminal. Missing descendants in a resolved picker remain
+        // pending. Do not substitute an app snapshot that can omit remote Files.
+        try captureSelection(folder: folder, target: target,
+            uniqueSnapshot: { () throws -> any XCUIElementSnapshot in try pickers.element.snapshot() },
+            children: { $0.children }, attributes: { node in
+                let kind: TitleKind
+                switch node.elementType {
+                case .other: kind = .other
+                case .navigationBar: kind = .navigationBar
+                case .staticText: kind = .text
+                case .button: kind = .button
+                case .collectionView: kind = .collectionView
+                case .cell: kind = .cell
+                default: kind = .unrelated
+                }
+                return TitleItem(kind: kind, label: node.label, identifier: node.identifier)
+            })
+    }
+
+    private func readySelection(observe: () throws -> SelectionObservation?,
+                                 enabled: (SelectionObservation) throws -> Bool,
+                                 hittable: (SelectionObservation) throws -> Bool) throws -> SelectionObservation? {
+        guard let observation = try perform(observe) else { return nil }
+        guard try perform({ try enabled(observation) }),
+              try perform({ try hittable(observation) }) else { return nil }
+        return observation
+    }
+
+    func waitForSelection(observe: @escaping () throws -> SelectionObservation?,
+                           enabled: @escaping (SelectionObservation) throws -> Bool,
+                           hittable: @escaping (SelectionObservation) throws -> Bool) throws -> Bool {
+        let _: SelectionObservation = try waitForResult {
+            try self.readySelection(observe: observe, enabled: enabled, hittable: hittable)
+        }
+        return true
+    }
+
+    func waitAndTapSelection(observe: @escaping () throws -> SelectionObservation?,
+                              enabled: @escaping (SelectionObservation) throws -> Bool,
+                              hittable: @escaping (SelectionObservation) throws -> Bool,
+                              tap: @escaping (SelectionObservation) throws -> Void) throws {
+        _ = try remaining()
+        guard !selectionStarted else { throw remember(Failure.selectionAlreadyStarted) }
+        selectionStarted = true
+        let _: SelectionObservation = try waitForResult {
+            guard let observation = try self.readySelection(observe: observe, enabled: enabled, hittable: hittable) else {
+                return nil
+            }
+            guard !self.tapConsumed else { throw Failure.selectionAlreadyStarted }
+            self.tapConsumed = true
+            try self.perform { try tap(observation) }
+            return observation
+        }
     }
 
     /// Observe the folder opened by creation. Its unique exact title proves the

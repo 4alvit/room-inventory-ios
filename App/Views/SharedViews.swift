@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import OSLog
 
 enum InventoryTheme {
     static let accent = Color(red: 0.08, green: 0.40, blue: 0.37)
@@ -21,8 +22,6 @@ struct NameEntrySheet: View {
     @State private var saving = false
     @State private var errorMessage: String?
     @State private var discarding = false
-    @State private var initialFocusRequested = false
-    @FocusState private var focused: Bool
 
     init(title: String, placeholder: String, explanation: String, initialName: String = "", actionTitle: String = UIL10n.text("Add"), save: @escaping (String) async -> Bool) {
         self.title = title; self.placeholder = placeholder; self.explanation = explanation
@@ -34,9 +33,7 @@ struct NameEntrySheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField(placeholder, text: $name).focused($focused).submitLabel(.done)
-                        .accessibilityIdentifier("entry.name")
-                        .onSubmit { submit() }
+                    NameEntryTextField(text: $name, placeholder: placeholder, onSubmit: submit)
                 } footer: { Text(explanation) }
                 if let errorMessage { Section { Text(errorMessage).foregroundStyle(.red) } }
             }
@@ -61,15 +58,6 @@ struct NameEntrySheet: View {
                 Button(UIL10n.text("Keep editing"), role: .cancel) {}
             }
         }
-        .background {
-            NameEntryAppearance {
-                guard !initialFocusRequested else { return }
-                initialFocusRequested = true
-                focused = true
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
     }
     private func submit() {
         guard !saving, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -85,50 +73,166 @@ struct NameEntrySheet: View {
     }
 }
 
-/// Request focus after the sheet's presentation, once its field is onscreen.
-/// SwiftUI's onAppear/task can run before the presentation has completed.
+/// The controller requesting initial focus also owns the actual text field.
+/// Ordinary SwiftUI updates never request focus or replace text being composed.
 @MainActor
-private struct NameEntryAppearance: UIViewControllerRepresentable {
-    let onAppear: () -> Void
+struct NameEntryTextField: UIViewControllerRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let onSubmit: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
 
-    @MainActor
-    final class Coordinator {
-        var onAppear: (() -> Void)?
-        init(onAppear: @escaping () -> Void) { self.onAppear = onAppear }
-    }
+    final class Controller: UIViewController, UITextFieldDelegate {
+        let textField: UITextField
+        private static let logger = Logger(subsystem: "com.alvit.roominventory", category: "NameEntryFocus")
+        private var onChange: ((String) -> Void)?
+        private var onSubmit: (() -> Void)?
+        private var appeared = false
+        private var initialFocusRequested = false
+        private var dismantled = false
+        private weak var observedWindow: UIWindow?
 
-    final class Controller: UIViewController {
-        weak var coordinator: Coordinator?
+        init(textField: UITextField = UITextField()) {
+            self.textField = textField
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
         override func loadView() {
-            view = UIView()
-            view.backgroundColor = .clear
-            view.isUserInteractionEnabled = false
-            view.accessibilityElementsHidden = true
+            view = textField
+            textField.delegate = self
+            textField.font = .preferredFont(forTextStyle: .body)
+            textField.adjustsFontForContentSizeCategory = true
+            textField.textColor = .label
+            textField.textAlignment = .natural
+            textField.returnKeyType = .done
+            textField.accessibilityIdentifier = "entry.name"
+            textField.addTarget(self, action: #selector(editingChanged), for: .editingChanged)
+        }
+
+        func configure(text: String, placeholder: String, enabled: Bool,
+                       onChange: @escaping (String) -> Void, onSubmit: @escaping () -> Void) {
+            guard !dismantled else { return }
+            loadViewIfNeeded()
+            self.onChange = onChange
+            self.onSubmit = onSubmit
+            textField.placeholder = placeholder
+            if textField.text != text && textField.markedTextRange == nil {
+                textField.text = text
+            }
+            textField.isEnabled = enabled
         }
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            guard view.window != nil, !isBeingDismissed else { return }
-            coordinator?.onAppear?()
+            guard !dismantled else { return }
+            appeared = true
+            requestInitialFocusIfAdmitted()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            appeared = false
+            stopObservingWindow()
+        }
+
+        private func requestInitialFocusIfAdmitted() {
+            guard appeared, !dismantled, !initialFocusRequested, !isBeingDismissed,
+                  textField.isEnabled, let window = viewIfLoaded?.window,
+                  textField.window === window else { return }
+            guard window.isKeyWindow else {
+                if observedWindow !== window {
+                    stopObservingWindow()
+                    observedWindow = window
+                    NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)),
+                        name: UIWindow.didBecomeKeyNotification, object: window)
+                }
+                return
+            }
+            stopObservingWindow()
+            // Consume only after actual admission, before UIKit can call back.
+            initialFocusRequested = true
+            if textField.isFirstResponder {
+                Self.logger.info("Initial name focus already present")
+                return
+            }
+            let acquired = textField.becomeFirstResponder()
+            let firstResponder = textField.isFirstResponder
+            Self.logger.info("Initial name focus request completed: accepted=\(acquired, privacy: .public), firstResponder=\(firstResponder, privacy: .public)")
+        }
+
+        @objc private func windowBecameKey(_ notification: Notification) {
+            guard let window = notification.object as? UIWindow,
+                  window === observedWindow, window === viewIfLoaded?.window else { return }
+            requestInitialFocusIfAdmitted()
+        }
+
+        private func stopObservingWindow() {
+            NotificationCenter.default.removeObserver(self, name: UIWindow.didBecomeKeyNotification, object: nil)
+            observedWindow = nil
+        }
+
+        @objc private func editingChanged() {
+            guard !dismantled, textField.isEnabled else { return }
+            onChange?(textField.text ?? "")
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            guard textField === self.textField, !dismantled, textField.isEnabled,
+                  textField.markedTextRange == nil else { return false }
+            onSubmit?()
+            // Exactly one callback per Return; the sheet's saving guard owns
+            // duplicate saves. A failed save must not disable later Return.
+            return false // Submission owns dismissal; do not also resign focus.
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            guard textField === self.textField, !dismantled else { return }
+            Self.logger.info("Name field editing ended")
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            guard textField === self.textField, !dismantled else { return }
+            // A user's own focus action also satisfies initial focus. Never
+            // reacquire it later merely because the window becomes key again.
+            initialFocusRequested = true
+            stopObservingWindow()
+            Self.logger.info("Name field editing began")
+        }
+
+        func dismantle() {
+            guard !dismantled else { return }
+            dismantled = true
+            appeared = false
+            stopObservingWindow()
+            onChange = nil
+            onSubmit = nil
+            textField.delegate = nil
+            textField.removeTarget(self, action: #selector(editingChanged), for: .editingChanged)
+            if textField.isFirstResponder { textField.resignFirstResponder() }
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onAppear: onAppear) }
-
     func makeUIViewController(context: Context) -> Controller {
         let controller = Controller()
-        controller.coordinator = context.coordinator
+        updateUIViewController(controller, context: context)
         return controller
     }
 
     func updateUIViewController(_ controller: Controller, context: Context) {
-        context.coordinator.onAppear = onAppear
+        controller.configure(text: text, placeholder: placeholder, enabled: isEnabled,
+            onChange: { text = $0 }, onSubmit: onSubmit)
     }
 
-    static func dismantleUIViewController(_ controller: Controller, coordinator: Coordinator) {
-        coordinator.onAppear = nil
-        controller.coordinator = nil
+    func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: Controller, context: Context) -> CGSize? {
+        let size = uiViewController.textField.intrinsicContentSize
+        return CGSize(width: proposal.width ?? max(0, size.width), height: max(1, size.height))
+    }
+
+    static func dismantleUIViewController(_ controller: Controller, coordinator: ()) {
+        controller.dismantle()
     }
 }
 

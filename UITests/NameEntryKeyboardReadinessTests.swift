@@ -1465,4 +1465,143 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertEqual(h.subject.echoDiagnostic["timing_mode"] as? String, "shared_ten_seconds")
     }
 
+    func testLocalizationSharedWindowAllowsOneTapPastTenSeconds() throws {
+        let h = Harness(timing: .localizationSharedThirtySeconds)
+        h.advanceAt = ["entry-count": 3, "field-enabled": 2.5, "field-hit": 2.5, "field-tap": 5]
+        try h.subject.waitAndTapField(observe: { h.stage("observe"); return .init() },
+            continueHittable: { h.stage("continue-hit"); return true },
+            tapContinue: { h.stage("continue-tap") },
+            entryNameCount: { h.stage("entry-count"); return 1 },
+            fieldEnabled: { h.stage("field-enabled"); return true },
+            fieldHittable: { h.stage("field-hit"); return true },
+            tapField: { h.stage("field-tap") }, evidence: { h.recordEvidence($0) })
+        XCTAssertEqual(h.now, 13)
+        XCTAssertEqual(h.events, ["observe", "entry-count", "field-enabled", "field-hit", "field-tap"])
+        XCTAssertTrue(h.subject.fieldTapAttempted)
+        XCTAssertThrowsError(try h.tapField())
+        XCTAssertEqual(h.events.filter { $0 == "field-tap" }.count, 1)
+        XCTAssertEqual(h.subject.diagnostic["input_attempted_once"] as? Bool, false)
+        XCTAssertEqual(h.subject.diagnostic["setup_completed"] as? Bool, true)
+    }
+
+    func testLocalizationSharedWindowRejectsExpiredFieldReadiness() {
+        for end in [30.0, 31.0] {
+            for stage in ["observe", "entry-count", "field-enabled", "field-hit"] {
+                let h = Harness(timing: .localizationSharedThirtySeconds)
+                h.advanceAt[stage] = end
+                XCTAssertThrowsError(try h.wait())
+                let events = h.events
+                XCTAssertThrowsError(try h.tapField())
+                XCTAssertEqual(h.events, events)
+                XCTAssertFalse(h.subject.fieldTapAttempted)
+            }
+        }
+    }
+
+    func testLocalizationSharedWindowRejectsDeadlineBeforeTap() throws {
+        for end in [30.0, 31.0] {
+            let h = Harness(timing: .localizationSharedThirtySeconds)
+            h.advanceAt["observe"] = 29
+            try h.wait()
+            h.now = end
+            XCTAssertThrowsError(try h.tapField())
+            XCTAssertFalse(h.events.contains("field-tap"))
+            XCTAssertFalse(h.subject.fieldTapAttempted)
+        }
+    }
+
+    func testLocalizationSharedWindowRejectsLateTapWithoutRenewal() throws {
+        for duration in [1.0, 2.0] {
+            let h = Harness(timing: .localizationSharedThirtySeconds)
+            h.advanceAt["observe"] = 29
+            try h.wait()
+            h.advanceAt["field-tap"] = duration
+            XCTAssertThrowsError(try h.tapField())
+            let events = h.events
+            XCTAssertThrowsError(try h.wait())
+            XCTAssertThrowsError(try h.tapField())
+            XCTAssertEqual(h.events, events)
+            XCTAssertEqual(h.events.filter { $0 == "field-tap" }.count, 1)
+            XCTAssertEqual(h.now, 29 + duration)
+        }
+    }
+
+    func testLocalizationSharedWindowKeepsOneExactContinueAndFieldTap() throws {
+        let h = Harness(timing: .localizationSharedThirtySeconds)
+        h.showIntroduction()
+        let introduction = h.observation
+        h.advanceAt["observe"] = 6
+        var observations = 0
+        try h.subject.waitAndTapField(observe: {
+            h.stage("observe")
+            observations += 1
+            return observations == 1 ? introduction : .init()
+        }, continueHittable: { h.stage("continue-hit"); return true },
+        tapContinue: { h.stage("continue-tap") },
+        entryNameCount: { h.stage("entry-count"); return 1 },
+        fieldEnabled: { h.stage("field-enabled"); return true },
+        fieldHittable: { h.stage("field-hit"); return true },
+        tapField: { h.stage("field-tap") }, evidence: { h.recordEvidence($0) })
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(h.now, 12)
+        XCTAssertEqual(h.events.filter { $0 == "continue-tap" }.count, 1)
+        XCTAssertEqual(h.events.filter { $0 == "field-tap" }.count, 1)
+        XCTAssertTrue(h.allowance.attempted)
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        XCTAssertFalse(h.events.contains("keyboard-count"))
+    }
+
+    func testLocalizationSharedWindowPreservesIntroductionAndHittabilityGuards() throws {
+        let invalid: [NameEntryKeyboardReadiness.Observation] = [
+            .init(introductionCount: 2, exactMarkerCount: 1, continueButtonCount: 1, continueEnabled: true),
+            .init(introductionCount: 1, exactMarkerCount: 0, continueButtonCount: 1, continueEnabled: true),
+            .init(introductionCount: 1, exactMarkerCount: 2, continueButtonCount: 1, continueEnabled: true),
+            .init(introductionCount: 1, exactMarkerCount: 1, continueButtonCount: 2, continueEnabled: true),
+            .init(introductionCount: 1, exactMarkerCount: 1, continueButtonCount: 1, continueEnabled: false)
+        ]
+        for observation in invalid {
+            let h = Harness(timing: .localizationSharedThirtySeconds)
+            h.observation = observation
+            XCTAssertFalse(try h.poll())
+            XCTAssertThrowsError(try h.tapField())
+            XCTAssertFalse(h.events.contains("continue-tap"))
+            XCTAssertFalse(h.subject.fieldTapAttempted)
+        }
+        let intro = Harness(timing: .localizationSharedThirtySeconds)
+        intro.showIntroduction(); intro.continueHittable = false
+        XCTAssertFalse(try intro.poll())
+        XCTAssertFalse(intro.events.contains("continue-tap"))
+        let field = Harness(timing: .localizationSharedThirtySeconds)
+        field.fieldHittable = false
+        XCTAssertFalse(try field.poll())
+        XCTAssertThrowsError(try field.tapField())
+        XCTAssertFalse(field.subject.fieldTapAttempted)
+    }
+
+    func testLocalizationSharedWindowRetainsNativeErrorAndClockFreeDiagnostics() throws {
+        enum NativeFailure: Error { case tap }
+        let h = Harness(timing: .localizationSharedThirtySeconds)
+        h.advanceAt["observe"] = 12
+        try h.wait()
+        XCTAssertThrowsError(try h.subject.tapField {
+            h.stage("field-tap")
+            throw NativeFailure.tap
+        }) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertThrowsError(try h.subject.perform { h.stage("unexpected") }) {
+            XCTAssertTrue($0 is NativeFailure)
+        }
+        let reads = h.clockReads
+        let diagnostic = h.subject.diagnostic
+        let echo = h.subject.echoDiagnostic
+        XCTAssertEqual(h.clockReads, reads)
+        XCTAssertEqual(diagnostic["timing_mode"] as? String, "localization_shared_thirty_seconds")
+        XCTAssertEqual(diagnostic["setup_allowance_seconds"] as? Double, 30)
+        XCTAssertEqual(diagnostic["input_allowance_seconds"] as? Int, 30)
+        XCTAssertEqual(echo["allowance_seconds"] as? Int, 30)
+        XCTAssertTrue(diagnostic["input_elapsed_seconds"] is NSNull)
+        XCTAssertEqual(diagnostic["input_attempted_once"] as? Bool, false)
+        XCTAssertFalse(h.events.contains("unexpected"))
+        XCTAssertEqual(h.events.filter { $0 == "field-tap" }.count, 1)
+    }
+
 }

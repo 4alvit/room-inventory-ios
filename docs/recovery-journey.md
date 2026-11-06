@@ -574,8 +574,20 @@ In [issue #25](https://github.com/4alvit/room-inventory-ios/issues/25), run
 `42183451138` returned the full name before the deadline, then interrupted the
 introduction snapshot. This supports correcting repeated owner resolution, not
 retyping the already retained name or claiming a universal timing fix.
-Localization reuses this bound-owner capture while retaining its separate shared
-ten-second `waitAndTapField` path, field tap, input and evidence handling.
+Localization reuses this bound-owner capture with an explicit shared thirty-second
+`waitAndTapField` window for introduction handling, field readiness and its one
+field tap. Its subsequent direct `typeText`, Save and dismissal flow is unchanged;
+those calls do not use the helper's input/echo window.
+
+In run `42212115025`, Localization admitted the field tap about 8.25 seconds into
+the former ten-second window, but native event synthesis and idle waiting returned
+at 12.82 seconds. The post-action deadline check correctly rejected that late
+return before any text input. The named Localization mode allows thirty seconds
+from the original start, including optional evidence and the tap; it does not renew
+the timer or retry an action. The default shared mode remains ten seconds, and
+autofocus retains its separate 90/30-second windows. This accommodates the observed
+native delay without claiming to fix its cause or preempt a synchronous native call
+([issue #32](https://github.com/4alvit/room-inventory-ios/issues/32)).
 
 In actual-main run `42193424143`, the complete introduction was visible about
 26 seconds before the former 30-second setup deadline. The exact owner query
@@ -583,7 +595,7 @@ took 7.154 seconds, then its bound snapshot was interrupted after 15.227 seconds
 neither Continue nor input had run. Cold setup now uses the explicitly named
 90-second allowance to give those native observations and the guarded dismissal
 more time. The ordinary readiness initializer still rejects allowances above
-30 seconds; autofocus input uses thirty seconds, Localization keeps ten seconds, and the
+30 seconds; autofocus input and Localization's readiness/tap window use thirty seconds, and the
 complete Recovery case remains capped at 900 seconds. No phase renews its timer.
 This accommodates slow accessibility observation; it does not establish the
 underlying OS cause or guarantee that any native call will finish in time.
@@ -593,7 +605,7 @@ complete name plus keyboard introduction appeared before the former ten-second
 echo deadline. The final native introduction query was nevertheless interrupted.
 Autofocus now has one thirty-second input/echo window, including any guarded
 Continue and a fresh exact value after dismissal. Both diagnostic allowance
-fields report that bound; Localization retains its shared ten seconds. No input
+fields report that bound; the default shared mode remains ten seconds. No input
 is repeated, no phase is renewed, and the change does not claim to repair OS
 accessibility latency ([issue #25](https://github.com/4alvit/room-inventory-ios/issues/25)).
 
@@ -613,8 +625,8 @@ Localization's exact recognizer and a per-test Continue allowance shared across
 all three sheets. It requires the introduction to disappear and the field to
 be ready afterward. Optional before/after screenshots consume the setup window;
 they do not renew it. `waitForField` omits the field tap. The helper's explicit
-setup/input mode is used for AutofocusedNameEntry; Localization retains its
-existing shared ten-second `waitAndTapField` path and field tap. A late query or
+setup/input mode is used for AutofocusedNameEntry; Localization uses its explicit
+shared thirty-second `waitAndTapField` path and field tap. For autofocus, a late query or
 input cannot authorize Save; there is no generic Continue action, field-tap
 fallback or retyping. Keyboard presence is a setup prerequisite, not proof that
 the intended field has focus: native input and its exact echo remain required. Generic item-editor
@@ -776,6 +788,23 @@ that native query's latency remains unknown.
 
 ### Files location titles
 
+System Files-provider observation and action admission use the named
+`FilesNavigationReadiness.systemProviderAllowance` of 30 seconds. This applies to
+presentation and navigation, created-folder observation, save-dialog readiness,
+exact filename echo, fresh Save admission and backup selection. Each phase has
+one fixed deadline, with the existing exact identity, cardinality, fresh-state
+and single-action checks. Generic app/Localization waits, inline-editor detection,
+input actions, the 900-second case and outer controller budgets are unchanged.
+
+In actual-main run `42207985117`, Done returned before a fresh ten-second creation
+window began. Remote provider resolution took about 9.796 seconds; the exact
+folder title appeared in the returned tree, but the final selected-bar snapshot
+returned just after the deadline. The failure image showed the created folder
+open and empty. The common bounded Files allowance addresses this narrow timing
+policy across the same native provider; it does not fix or guarantee native AX
+latency. See issue [#29](https://github.com/4alvit/room-inventory-ios/issues/29).
+Fresh full-journey and installed-RC evidence remain required.
+
 The journey recognizes a Files location by its exact, unique, visible title
 among a navigation bar's direct children: static text for local storage, or a
 button labelled with the folder name followed by `, Actions Menu`. The known
@@ -790,7 +819,7 @@ remain mandatory.
 Files can also create a new folder with a focused `DOC.inlineRenameField` text
 view in the file grid. The journey requires this editor to be unique and ready,
 replaces the selected default name, verifies the exact result and activates the
-unique keyboard Done button. A ten-second folder-state observation then requires
+unique keyboard Done button. A 30-second folder-state observation then requires
 exactly one title for the new folder. Each probe uses
 `navigationBars.element.snapshot()` for the navigation-bar query with the exact
 identifier `FullDocumentManagerViewControllerNavigationBar`. The entire expression
@@ -809,8 +838,11 @@ native errors and cancellation within the original deadline. The successful
 observation satisfies the existing folder assertions without repeating the title
 query or navigation tap. Apple's [unique-element contract](https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/element)
 does not guarantee one internal traversal or RPC, nor completion within the
-deadline. The creation diagnostic retains its last returned title count when a
-later probe fails, without making additional UI queries. Exact saved-file and
+deadline. The creation diagnostic distinguishes `native_snapshot`, `native_returned`,
+`local_validation` and `completed` using the existing operations only. A native
+return can still fail its deadline check, and completion of title capture does not
+replace the final waiter deadline check. The last returned title count is retained
+when a later probe fails, without extra UI queries or clock samples. Exact saved-file and
 restored-content acceptance remains mandatory.
 
 In attempt 2 of run `41829513390`, eleven application-root snapshot requests
@@ -890,19 +922,20 @@ probe rejects ambiguous or wrongly nested owners and titles; omitted children
 remain pending. Live interaction resolves Save under the exact owner identifier
 returned by that probe and checks enabled/hittable state. After filename editing
 and evidence capture, the final Save phase takes a fresh scoped snapshot and taps
-once. Both phases retain their ten-second deadlines; late or throwing operations
+once. Both phases use the fixed 30-second Files allowance; late or throwing operations
 cannot authorize a tap. Replacing four serial scope-count queries does not promise
 that any native operation will finish in time. The complete new hosted journey
 must still verify all exported and restored bytes.
 
-After the single filename `typeText`, one ten-second monotonic observation window
+After the single filename `typeText`, one 30-second monotonic observation window
 waits for the full exact base name. Each fresh read resolves the unique typed
 `DOCPicker.filenameTextField`; the original window checks its deadline before
 and after that read and again when the waiter returns. Missing, wrong and partial
 values remain pending. A stable mismatch expires without a second input, tap,
 shortened name or prefix acceptance. Native resolver errors and cancellation
 remain terminal. Only timely full equality reaches the existing ledger assertion
-and later Save phase. The navigation, Save and overall journey budgets are unchanged.
+and later Save phase. All observations share their own original phase deadline;
+the overall journey budget is unchanged.
 
 `ROOM_FILES_FILENAME_ECHO_V1` records schema version 1, export role, exact expected
 and last returned values, started and returned read counts, last stage, elapsed
@@ -978,7 +1011,7 @@ Restore-file selection uses the same bounded picker snapshot and current-folder
 title checks, then requires one `File View` collection under the matched
 local-storage owner and one cell whose identifier is the full backup filename
 followed by `, roominventory`. The container's descriptive title does not replace
-the exact current-folder title. A single active ten-second window covers the
+the exact current-folder title. A single active 30-second Files window covers the
 snapshot, live enabled/hittable readiness and one direct tap resolved under the
 matched owner. Missing or noninteractive targets remain pending; duplicate
 scopes, errors, late results and repeated selection fail. The generic
@@ -1688,8 +1721,8 @@ attribute is treated as proof of native hittability; existing live tap readiness
 still applies before every navigation action. Folder observation itself needs
 no tap or live property query on its title.
 
-The original 30-second presentation and 10-second subsequent-navigation windows
-are unchanged. The picker classifier retains its 4,096-node limit; the query,
+Presentation and subsequent navigation each use the fixed 30-second Files
+allowance. The picker classifier retains its 4,096-node limit; the query,
 bound-element snapshot, local traversal and waiter return share the original
 deadline. The next probe is scheduled 0.1 seconds after the previous probe returns,
 so probes do not overlap. Query and snapshot errors still propagate, including

@@ -214,7 +214,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
 
     private func filesNavigationState(_ folder: String, localTitle: String, initial: Bool,
                                       _ app: XCUIApplication) throws -> FilesNavigationReadiness.State {
-        let allowance: TimeInterval = initial ? 30 : 10
+        let allowance = FilesNavigationReadiness.systemProviderAllowance
         let readiness = FilesNavigationReadiness(timeout: allowance)
         let began = ProcessInfo.processInfo.systemUptime
         var selected: FilesNavigationReadiness.State?
@@ -283,18 +283,17 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                 try tap(app.alerts.buttons.matching(NSPredicate(format: "label == 'Done' OR label == 'Create'")))
             }
             // Observe the exact remote Files owner, never a disappeared editor.
-            let creation = FilesNavigationReadiness(timeout: 10)
+            let creation = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
             let began = ProcessInfo.processInfo.systemUptime
             var folderReady = false
-            var creationStage = "snapshot"
             var titleCount: Int?
             defer {
                 let record: [String: Any] = [
                     "schema_version": 1, "phase": "creation", "folder": folder,
-                    "allowance_seconds": 10,
+                    "allowance_seconds": FilesNavigationReadiness.systemProviderAllowance,
                     "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                     "result": folderReady ? "ready" : "failed",
-                    "last_stage": creationStage,
+                    "last_stage": creation.titleCaptureStage.rawValue,
                     "last_returned_title_count": titleCount as Any? ?? NSNull()
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
@@ -306,7 +305,6 @@ final class RCArtifactAcceptanceTests: XCTestCase {
                 FilesNavigationReadiness.navigationBarIdentifier)
             folderReady = try creation.waitForCreatedFolderObservation(
                 titleCount: {
-                    creationStage = "snapshot"
                     let count = try creation.captureTargetFolderTitleCount(title: folder,
                         navigationBars: navigationBars)
                     titleCount = count
@@ -368,7 +366,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
 
     private func selectBackup(_ app: XCUIApplication) throws {
         try select("Restore a backup", app); try folder(false, app)
-        let w = FilesNavigationReadiness(timeout: 10)
+        let w = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
         let roots = pickers.otherElements.matching(identifier:
             "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: RC-" + runID)

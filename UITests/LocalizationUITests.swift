@@ -237,7 +237,8 @@ final class LocalizationUITests: XCTestCase {
             guard let owner = boundIntroduction else { throw NameEntryKeyboardReadiness.Failure.notReady }
             return owner.buttons.matching(NSPredicate(format: "label == %@", "Continue")).element
         }
-        let readiness = NameEntryKeyboardReadiness(allowance: keyboardIntroductionAllowance)
+        let readiness = NameEntryKeyboardReadiness(allowance: keyboardIntroductionAllowance,
+                                                  timing: .localizationSharedThirtySeconds)
         do {
             try readiness.waitAndTapField(observe: {
                 boundIntroduction = nil
@@ -271,7 +272,7 @@ final class LocalizationUITests: XCTestCase {
             if let enabled = readiness.fieldEnabled { observed["enabled"] = enabled }
             if let hittable = readiness.fieldHittable { observed["hittable"] = hittable }
             keepActionFailureEvidence(observed: observed, file: file, line: line)
-            XCTFail("Name entry or its exact keyboard introduction was not ready within the shared 10 seconds", file: file, line: line)
+            XCTFail("Name entry or its exact keyboard introduction was not ready within the shared 30 seconds", file: file, line: line)
             return
         }
         field.typeText(value)

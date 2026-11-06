@@ -2,7 +2,8 @@ import Foundation
 import XCTest
 
 /// Handles only the observed system keyboard introduction. Autofocus may use a
-/// separate setup allowance; the default keeps Localization's shared ten seconds.
+/// separate setup allowance; Localization opts into thirty shared seconds while
+/// the default shared allowance remains ten seconds.
 @MainActor
 final class NameEntryKeyboardReadiness {
     static let introductionID = "UIContinuousPathIntroductionView"
@@ -50,7 +51,7 @@ final class NameEntryKeyboardReadiness {
 
     enum Failure: Error { case notReady }
     enum EvidenceStage: String { case beforeContinue, dismissedAndFieldReady }
-    enum Timing { case sharedTenSeconds, keyboardSetupThenInput }
+    enum Timing { case sharedTenSeconds, localizationSharedThirtySeconds, keyboardSetupThenInput }
 
     // Cache only samples already requested by the deadline engine. Diagnostics
     // must not query the UI or advance an injected clock.
@@ -73,7 +74,8 @@ final class NameEntryKeyboardReadiness {
     private var terminalError: Error?
     private var inputAttempted = false
     private var window: RecoveryOCRReadinessWindow { inputWindow ?? setupWindow }
-    private var inputAllowance: Int { timing == .keyboardSetupThenInput ? 30 : 10 }
+    private var usesSharedWindow: Bool { timing != .keyboardSetupThenInput }
+    private var inputAllowance: Int { timing == .sharedTenSeconds ? 10 : 30 }
     private let allowance: ContinueAllowance
     private(set) var observation: Observation?
     private(set) var sawIntroduction = false
@@ -109,7 +111,8 @@ final class NameEntryKeyboardReadiness {
         self.clock = sampledClock
         setupWindow = timing == .keyboardSetupThenInput
             ? .coldKeyboardSetup(clock: sampledClock.now)
-            : RecoveryOCRReadinessWindow(clock: sampledClock.now)
+            : RecoveryOCRReadinessWindow(timeout: timing == .localizationSharedThirtySeconds ? 30 : 10,
+                                         clock: sampledClock.now)
         setupStartedAt = sampledClock.latest
     }
 
@@ -268,7 +271,7 @@ final class NameEntryKeyboardReadiness {
         // Only the shared path taps the field. Autofocused input needs keyboard
         // focus, which native typeText enforces; a coordinate hit test does not
         // establish that focus and can stall while the cold keyboard settles.
-        if timing == .sharedTenSeconds {
+        if usesSharedWindow {
             self.fieldHittable = try perform(fieldHittable)
             guard self.fieldHittable == true else { return false }
         }
@@ -315,7 +318,7 @@ final class NameEntryKeyboardReadiness {
     }
 
     func tapField(_ action: () throws -> Void) throws {
-        guard timing == .sharedTenSeconds, fieldReady, !fieldTapAttempted else { throw Failure.notReady }
+        guard usesSharedWindow, fieldReady, !fieldTapAttempted else { throw Failure.notReady }
         try perform {
             fieldTapAttempted = true
             try action()
@@ -362,7 +365,7 @@ final class NameEntryKeyboardReadiness {
 
     func typeTextOnce(_ action: () throws -> Void) throws {
         guard fieldReady, !inputAttempted,
-              timing == .sharedTenSeconds || inputWindow != nil else { throw Failure.notReady }
+              usesSharedWindow || inputWindow != nil else { throw Failure.notReady }
         try perform {
             inputAttempted = true
             try action()
@@ -378,7 +381,7 @@ final class NameEntryKeyboardReadiness {
                            tapContinue: @escaping () throws -> Void = {},
                            read: @escaping () throws -> String?) throws -> String {
         guard fieldReady, !echoWaitStarted,
-              timing == .sharedTenSeconds || (inputWindow != nil && inputAttempted) else { throw Failure.notReady }
+              usesSharedWindow || (inputWindow != nil && inputAttempted) else { throw Failure.notReady }
         echoWaitStarted = true
         var matchedValue: String?
         try waitUntil {
@@ -519,11 +522,17 @@ final class NameEntryKeyboardReadiness {
             let value = end - start
             return value.isFinite && value >= 0 ? value as Any : NSNull()
         }
-        return ["timing_mode": timing == .keyboardSetupThenInput ? "keyboard_setup_then_input" : "shared_ten_seconds",
+        let mode: String
+        switch timing {
+        case .sharedTenSeconds: mode = "shared_ten_seconds"
+        case .localizationSharedThirtySeconds: mode = "localization_shared_thirty_seconds"
+        case .keyboardSetupThenInput: mode = "keyboard_setup_then_input"
+        }
+        return ["timing_mode": mode,
                 "keyboard_count": keyboardCount.map { $0 as Any } ?? NSNull(),
                 "active_phase": inputWindow != nil ? "input" : "setup",
                 "setup_allowance_seconds": timing == .keyboardSetupThenInput
-                    ? RecoveryOCRReadinessWindow.coldKeyboardSetupAllowance : 10,
+                    ? RecoveryOCRReadinessWindow.coldKeyboardSetupAllowance : TimeInterval(inputAllowance),
                 "input_allowance_seconds": inputAllowance,
                 "setup_elapsed_seconds": elapsed(from: setupStartedAt, to: inputStartedAt ?? clock.latest),
                 "input_elapsed_seconds": inputStartedAt.map { elapsed(from: $0, to: clock.latest) } ?? NSNull(),

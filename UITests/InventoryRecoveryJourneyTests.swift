@@ -560,7 +560,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // the typed action, not every element in the remote share hierarchy.
         let saveToFiles = app.cells.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
-        let shareAction = FilesNavigationReadiness(timeout: 30)
+        let shareAction = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         // As in the standalone RC runner, this action has no Files navigation
         // scopes yet. Check its unique count and live readiness, then tap once
         // inside the same waiter. A late native query cannot authorize a tap.
@@ -585,7 +585,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                                                    "DOCPicker.actionButton", "Save")).element
             }
         }
-        let dialog = FilesNavigationReadiness(timeout: 10)
+        let dialog = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         let saveReady = try dialog.waitForSelection(
             observe: { try dialog.captureSelection(folder: folder, pickers: pickers) },
             enabled: { try saveButton($0, window: dialog).isEnabled },
@@ -602,7 +602,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             // One observation allowance after the single input. A partial echo
             // never triggers another interaction or renews this deadline.
             let began = ProcessInfo.processInfo.systemUptime
-            let echo = FilesNavigationReadiness(timeout: 10)
+            let echo = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
             var lastReturned: String?
             var readsStarted = 0
             var readsReturned = 0
@@ -613,7 +613,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                     "schema_version": 1, "phase": "export_filename_echo", "role": role.rawValue,
                     "expected": baseName, "last_returned": lastReturned.map { $0 as Any } ?? NSNull(),
                     "reads_started": readsStarted, "reads_returned": readsReturned,
-                    "stage": stage, "allowance_seconds": 10,
+                    "stage": stage, "allowance_seconds": FilesNavigationReadiness.systemProviderAllowance,
                     "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                     "result": matched ? "matched" : "failed"
                 ]
@@ -647,7 +647,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         }
         // Editing and capture can change the remote hierarchy. Resolve and
         // admit the exact Save action again, then tap once in that same window.
-        let saving = FilesNavigationReadiness(timeout: 10)
+        let saving = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         try saving.waitAndTapSelection(
             observe: { try saving.captureSelection(folder: folder, pickers: pickers) },
             enabled: { try saveButton($0, window: saving).isEnabled },
@@ -774,19 +774,18 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 let done = app.keyboards.buttons.matching(identifier: "Done")
                 try ledger.require("unique folder keyboard Done", done.count == 1)
                 try tap(done.element(boundBy: 0), app: app)
-                let creation = FilesNavigationReadiness(timeout: 10)
+                let creation = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
                 let began = ProcessInfo.processInfo.systemUptime
                 var folderReady = false
-                var creationStage = "snapshot"
                 var titleCount: Int?
                 do {
                     defer {
                         let record: [String: Any] = [
                             "schema_version": 1, "phase": "inline_creation", "folder": folder,
-                            "allowance_seconds": 10,
+                            "allowance_seconds": FilesNavigationReadiness.systemProviderAllowance,
                             "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                             "result": folderReady ? "ready" : "failed",
-                            "last_stage": creationStage,
+                            "last_stage": creation.titleCaptureStage.rawValue,
                             "last_returned_title_count": titleCount as Any? ?? NSNull()
                         ]
                         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
@@ -798,7 +797,6 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                         FilesNavigationReadiness.navigationBarIdentifier)
                     folderReady = try creation.waitForCreatedFolderObservation(
                         titleCount: {
-                            creationStage = "snapshot"
                             let count = try creation.captureTargetFolderTitleCount(title: folder,
                                 navigationBars: navigationBars)
                             titleCount = count
@@ -840,7 +838,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
 
     private func waitForFilesNavigationState(_ folder: String, localTitle: String,
                                             app: XCUIApplication, initial: Bool) throws -> FilesNavigationReadiness.State {
-        let allowance: TimeInterval = initial ? 30 : 10
+        let allowance = FilesNavigationReadiness.systemProviderAllowance
         let readiness = FilesNavigationReadiness(timeout: allowance)
         let began = ProcessInfo.processInfo.systemUptime
         var selected: FilesNavigationReadiness.State?
@@ -901,7 +899,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     private func selectRestoreBackup(folder: String, journeyID: String, app: XCUIApplication) throws {
         let filename = "backup-\(journeyID).roominventory"
         let began = ProcessInfo.processInfo.systemUptime
-        let selection = FilesNavigationReadiness(timeout: 10)
+        let selection = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         var tapped = false
         var tapAdmissions = 0
         var lastCounts: [String: Int] = [:]
@@ -909,7 +907,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         defer {
             let record: [String: Any] = [
                 "schema_version": 2, "phase": "restore_backup", "journey_id": journeyID,
-                "folder": folder, "filename": filename, "allowance_seconds": 10,
+                "folder": folder, "filename": filename, "allowance_seconds": FilesNavigationReadiness.systemProviderAllowance,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                 "result": tapped ? "tapped" : "failed", "tap_admissions": tapAdmissions,
                 "last_returned_counts": lastCounts, "stage": stage

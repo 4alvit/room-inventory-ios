@@ -255,12 +255,34 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             if state == .targetFolder { try require(!create, "Fresh export folder required"); return }
             if state == .localRoot { break }
             try require(index < 5, "Files navigation action cap")
+            let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
+            let target: XCUIElementQuery
+            let navigationContextCount: () -> Int
             switch state {
-            case .localEntry: try tap(fileRow(local, app))
-            case .browse: try tap(app.buttons.matching(identifier: "Browse"))
-            case .back: try tap(app.navigationBars.buttons.matching(identifier: "Back"))
+            case .localEntry:
+                let localEntry = NSPredicate(format:
+                    "(elementType == %d OR elementType == %d) AND identifier != %@ AND (label == %@ OR label BEGINSWITH %@)",
+                    XCUIElement.ElementType.cell.rawValue, XCUIElement.ElementType.button.rawValue,
+                    "BackButton", local, local + ",")
+                target = pickers.descendants(matching: .any).matching(localEntry)
+                let navigationMatches = pickers.navigationBars.descendants(matching: .any).matching(localEntry)
+                // A bar title is not a location action. Fail closed if the native
+                // query cannot distinguish it from the observed local entry.
+                navigationContextCount = { navigationMatches.count == 0 ? 1 : 0 }
+            case .browse:
+                target = pickers.buttons.matching(NSPredicate(format: "label == %@ OR identifier == %@", "Browse", "Browse"))
+                navigationContextCount = { 1 }
+            case .back:
+                let bars = pickers.navigationBars.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.navigationBarIdentifier))
+                target = bars.children(matching: .button).matching(NSPredicate(
+                    format: "label == 'Back' OR label == 'Locations' OR label == 'Browse'"))
+                navigationContextCount = { bars.count }
             default: throw Failure(message: "Unexpected Files state")
             }
+            let action = FilesNavigationReadiness(timeout: 10)
+            try action.waitAndTapFile(pickerCount: { pickers.count }, folderCount: navigationContextCount,
+                fileViewCount: { 1 }, fileCount: { target.count }, enabled: { target.firstMatch.isEnabled },
+                hittable: { target.firstMatch.isHittable }, tap: { target.firstMatch.tap() })
         }
         try ready(titleQuery(local, app))
         if create {

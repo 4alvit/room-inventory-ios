@@ -770,7 +770,11 @@ XCTest. This measures host test overhead, not total hosted CI or UI-query latenc
 `ElementDismissalReadiness` observes the count of the original, typed UI query
 inside an active waiter. Its first probe has no initial predicate polling delay;
 later probes do not overlap. Only a zero count returned within the original
-ten-second monotonic window proves absence. An error or late result cannot
+monotonic window proves absence. The generic default remains ten seconds; the
+Recovery journey's private helper explicitly uses thirty seconds for its four
+existing Save, Apply, name-entry and Cancel query sites. This uses the existing
+generic thirty-second maximum and does not extend the 900-second case or any
+controller budget. An error or late result cannot
 authorize progress, and XCTest issues remain failures. The preceding action
 still happens once. The helper is shared by OCR Apply, editor Save/Cancel, name
 entry, privacy dismissal and the Files transitions below. Each caller retains
@@ -785,6 +789,21 @@ does not prove the complete persistence/export/restore journey. Immediate probin
 removes the observed initial scheduling delay; it neither extends the deadline
 nor guarantees that a slow accessibility query will finish in time. The cause of
 that native query's latency remains unknown.
+
+In PR run `42277270226`, the post-Cancel count activity took 10.295 seconds;
+the later failure screenshot and accessibility tree show the dismissed editor
+and retained item values. Neither records when dismissal occurred or the count
+returned to the expired waiter. The Recovery-only allowance is an observation
+availability policy, not a demonstrated latency repair or a guarantee that the
+whole journey will finish. A missing dismissal can now take twenty additional
+seconds to fail, consuming more of the unchanged case budget.
+
+After each Recovery dismissal waiter exits, `ROOM_DISMISSAL_V1` emits stored
+query attempts, last raw returned count, duration, throwing status, last admitted
+count and outcome. The independent diagnostic clock does not participate in
+admission, and these fields make no additional native query. A late raw zero is
+retained only as diagnostic evidence; it cannot replace the last timely count
+or authorize progress. Unavailable or nonfinite duration is recorded as null.
 
 ### Files location titles
 

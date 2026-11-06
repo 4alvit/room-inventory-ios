@@ -27,34 +27,30 @@ enum AutofocusedNameEntry {
         let fields = app.textFields.matching(NSPredicate(format: "identifier == %@", "entry.name"))
         // Resolve the unique live element only inside an admitted callback:
         // even element resolution can traverse the native accessibility tree.
-        let introductions = app.otherElements.matching(identifier: NameEntryKeyboardReadiness.introductionID)
-        // Count and snapshot recognition below establish uniqueness before use.
-        // Stop resolution at that known owner/button instead of indexing all matches.
-        let introduction = introductions.firstMatch
-        let continueButton = introduction.buttons
-            .matching(NSPredicate(format: "label == %@", "Continue")).firstMatch
+        let introductions = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", NameEntryKeyboardReadiness.introductionID))
+        var boundIntroduction: XCUIElement?
+        let continueButton: () throws -> XCUIElement = {
+            guard let owner = boundIntroduction else { throw Failure.unexpectedField }
+            return owner.buttons.matching(NSPredicate(format: "label == %@", "Continue")).element
+        }
         var placeholder: String?
         var fieldObservation: NameEntryKeyboardReadiness.FieldObservation?
         var stage = "keyboard_setup"
         let observeIntroduction: () throws -> NameEntryKeyboardReadiness.Observation = {
-            var state = NameEntryKeyboardReadiness.Observation()
-            state.introductionCount = try readiness.perform { introductions.count }
-            guard state.introductionCount == 1 else { return state }
-            // Use the same exact owner/marker/button recognition as Localization.
+            boundIntroduction = nil
             // A root application snapshot can omit this keyboard sibling.
-            let root = try readiness.perform { try introduction.snapshot() }
-            guard root.elementType == .other,
-                  root.identifier == NameEntryKeyboardReadiness.introductionID else { return state }
-            var pending: [any XCUIElementSnapshot] = [root]
-            var nodes: [any XCUIElementSnapshot] = []
-            while let node = pending.popLast() {
-                _ = try readiness.perform { () }
-                guard nodes.count < 256 else { throw NameEntryKeyboardReadiness.Failure.notReady }
-                nodes.append(node)
-                pending.append(contentsOf: node.children)
-            }
-            return NameEntryKeyboardReadiness.recognize(introductionCount: state.introductionCount,
-                items: nodes.map { node in
+            // Enumerate exact owners once, then retain the sole bound identity
+            // for its snapshot and any subsequently admitted Continue action.
+            return try readiness.captureIntroduction(
+                matchingElements: { introductions.allElementsBoundByAccessibilityElement },
+                snapshot: { (owner: XCUIElement) throws -> any XCUIElementSnapshot in
+                    boundIntroduction = owner
+                    return try owner.snapshot()
+                }, matchesOwner: { (node: any XCUIElementSnapshot) in
+                    node.elementType == .other && node.identifier == NameEntryKeyboardReadiness.introductionID
+                }, children: { (node: any XCUIElementSnapshot) in node.children },
+                item: { (node: any XCUIElementSnapshot) in
                     let kind: NameEntryKeyboardReadiness.Item.Kind = node.elementType == .button ? .button
                         : node.elementType == .staticText ? .text : .other
                     return .init(kind: kind, label: node.label, enabled: node.isEnabled)
@@ -62,7 +58,7 @@ enum AutofocusedNameEntry {
         }
         do {
             try readiness.waitForField(observe: observeIntroduction,
-            continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() },
+            continueHittable: { try continueButton().isHittable }, tapContinue: { try continueButton().tap() },
             entryNameCount: {
                 fieldObservation = nil
                 let captured = try readiness.captureNameField(snapshot: { () throws -> any XCUIElementSnapshot in
@@ -95,7 +91,7 @@ enum AutofocusedNameEntry {
             try readiness.typeTextOnce { try readiness.perform { fields.element }.typeText(value) }
             stage = "echo"
             let after = try readiness.waitForExactValue(value, observeIntroduction: observeIntroduction,
-                continueHittable: { continueButton.isHittable }, tapContinue: { continueButton.tap() }) {
+                continueHittable: { try continueButton().isHittable }, tapContinue: { try continueButton().tap() }) {
                 try readiness.perform { fields.element }.value as? String
             }
             stage = "record_typed"

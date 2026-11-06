@@ -112,3 +112,64 @@ jobs:
             ${{ runner.temp }}/rc-acceptance/exports
             ${{ runner.temp }}/rc-acceptance/payload
             ${{ runner.temp }}/rc-acceptance/Acceptance.xcresult
+  install-diagnostic:
+    name: Diagnose RC install responsiveness
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diagnostic/rc-install-responsiveness' && github.repository == '4alvit/room-inventory-ios'
+    runs-on: xcode-27
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      GODEBUG: fips140=on
+      GH_HOST: github.com
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      RC_TAG: ${{ inputs.rc_tag }}
+      RC_SOURCE: ${{ inputs.source_sha }}
+      RC_TREE: ${{ inputs.source_tree }}
+      RC_RUN: ${{ inputs.rc_run_id }}
+      RC_ATTEMPT: ${{ inputs.rc_run_attempt }}
+      RC_RELEASE: ${{ inputs.release_id }}
+      RC_MANIFEST: ${{ inputs.manifest_sha256 }}
+      HARNESS_SHA: ${{ inputs.harness_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.27.2
+          cache: false
+      - name: Bind exact diagnostic inputs
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          value = dict(tag=os.environ['RC_TAG'], source_sha=os.environ['RC_SOURCE'], source_tree=os.environ['RC_TREE'],
+                       run_id=int(os.environ['RC_RUN']), run_attempt=int(os.environ['RC_ATTEMPT']),
+                       release_id=int(os.environ['RC_RELEASE']), manifest_sha256=os.environ['RC_MANIFEST'])
+          with (Path(os.environ['RUNNER_TEMP']) / 'rc-diagnostic-expected.json').open('x') as f:
+              json.dump(value, f)
+          PY
+      - name: Diagnose exact RC install without UI exercise
+        run: |
+          export GH_CONFIG_DIR="$RUNNER_TEMP/rc-diagnostic-gh-config"
+          mkdir "$GH_CONFIG_DIR"
+          python3 scripts/rc_install_diagnostic.py run --expected "$RUNNER_TEMP/rc-diagnostic-expected.json" \
+            --harness-sha "$HARNESS_SHA" --output "$RUNNER_TEMP/rc-install-diagnostic"
+      - name: Preserve bounded install diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rc-install-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/rc-diagnostic-expected.json
+            ${{ runner.temp }}/rc-install-diagnostic/*.json
+            ${{ runner.temp }}/rc-install-diagnostic/operations
+            ${{ runner.temp }}/rc-install-diagnostic/diagnostic

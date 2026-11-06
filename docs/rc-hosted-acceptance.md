@@ -49,3 +49,50 @@ Review both rows, screenshots/AX and both PDFs, verify that their RC/manifest/as
 ## Validation status of the initial proposal
 
 The isolated proposal is validated by pure Python fixtures only. No local Xcode/Swift/Simulator command was executed. The first authorized hosted run must still establish that the selected XcodeGen/Xcode combination emits the supported standalone UI-runner shape, that destination-artifacts mode starts it with the installed RC, and that the pinned runtime exposes the exact public Files/editing selectors. Those are fail-closed validation assumptions, not native PASS claims or reasons to loosen the guards.
+
+## Branch-only install responsiveness diagnostic
+
+The exact `diagnostic/rc-install-responsiveness` branch can dispatch the existing
+workflow's separate `install-diagnostic` job. The normal main-only exercise job
+and Python entry point retain their guards. The diagnostic takes the same eight
+inputs, with its reviewed branch commit as `harness_sha` and the separately pinned
+accepted RC source as `source_sha`. It downloads and verifies the same published
+RC, builds the same standalone runner, creates one new iPhone 17 on iOS 27.0,
+and stops after one AUT installation and cleanup. It never installs the runner,
+executes XCTest, publishes, promotes, or satisfies either installed acceptance row.
+
+The 1,800-second work budget, shared 180-second boot window, 60-second install,
+90-second cleanup reserve and 35-minute job are unchanged. No sleeps are used to
+settle Simulator state; no retry, reset, runtime removal, remount or signing change
+is performed. The existing list-first cleanup remains observable, including its
+inability to reach shutdown if the first list fails. Issue33's proposed fallback
+is not included. Failed or unknown process/device closure remains a failure.
+
+After runner build, one separately owned heartbeat-only child records clock,
+load and free-space samples at one-second measurement intervals for at most
+480 seconds, clipped to the existing parent deadline. Its final join is also
+clipped to any existing cleanup deadline. It launches no subprocesses. Coverage
+is best effort and never renewed: device operations plus overhead can outlast it. The parent owns bounded
+process snapshots, two runtime-registry/mount snapshots and one scoped native-log
+query. These bypass normal raw-stream file persistence; only sanitized fixed
+categories, UUID/build/mount-device correlations and numeric fields are retained.
+Runtime and process observations retain the real runner environment; only the
+log query uses an empty home to exclude `.logrc`. Failed or capped queries retain
+only prefix byte counts/digests and fixed sanitized correlations, marked incomplete.
+Environment evidence contains only presence of fixed Simulator/DYLD names and
+allowlisted toolchain identity, never values or a complete environment dump.
+
+Optional process phase hooks preserve the command owner and its default-off
+behavior. Command events have a 2,048-row cap with independent terminal summaries;
+the largest gap's two bounding events survive saturation. Diagnostic output has
+an 8 MiB ceiling and omission reasons. Checks inspect only
+the owned output tree (12 GiB ceiling, 100,000 entries, ten seconds) and enforce a
+16 GiB free-space floor. Observational children require their own closure; no
+new device action is admitted after an unproved observational child. The fixed
+cleanup path is still attempted after ordinary, closed observational failures.
+
+These are cooperative deadlines, not a hard scheduling guarantee. Continuing
+independent heartbeats can help distinguish a main-process pause from a wider
+host pause. Neither gaps nor native log vocabulary alone establishes causation;
+missing, capped or unavailable observations remain explicit. A passing command
+or diagnostic job does not replace the required two-row installed-RC acceptance.

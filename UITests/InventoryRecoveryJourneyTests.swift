@@ -975,8 +975,27 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func waitForDismissal(_ query: XCUIElementQuery) throws {
-        let dismissal = ElementDismissalReadiness()
-        try ledger.require("sheet dismissed", try dismissal.waitForDismissal { query.count })
+        let dismissal = ElementDismissalReadiness(timeout: 30)
+        var outcome = "threw"
+        defer {
+            let diagnostic = dismissal.queryDiagnostics
+            let record: [String: Any] = [
+                "schema_version": 1, "allowance_seconds": dismissal.allowance,
+                "query_attempts": diagnostic.attempts,
+                "last_query_returned_count": diagnostic.returnedCount as Any? ?? NSNull(),
+                "last_query_duration_seconds": diagnostic.duration as Any? ?? NSNull(),
+                "last_query_threw": diagnostic.threw,
+                "last_admitted_count": dismissal.lastCount as Any? ?? NSNull(),
+                "outcome": outcome
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               let text = String(data: data, encoding: .utf8) {
+                print("ROOM_DISMISSAL_V1 " + text)
+            }
+        }
+        let dismissed = try dismissal.waitForDismissal { query.count }
+        outcome = dismissed ? "dismissed" : "not_dismissed"
+        try ledger.require("sheet dismissed", dismissed)
     }
 
     private func reveal(_ target: XCUIElement, app: XCUIApplication) throws {

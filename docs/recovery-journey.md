@@ -302,14 +302,24 @@ not add a host command, retry or additional allowance. Hosted execution must
 still prove that later scenario launches preserve the final pinned containers.
 
 Opening the system Photos picker has one 90-second monotonic appearance window,
-starting after the single `import.photos` activation. The first live existence
-probe runs on the active waiter's first run-loop turn. A negative query schedules
+starting after the single `import.photos` activation. The first observation
+probe runs on the active waiter's first run-loop turn. It resolves the unique
+`photosView_content_scroll_view` and captures that owner's immutable snapshot.
+The snapshot must contain exactly one Image whose label begins with `Photo,`
+(case insensitive); zero owners or photos remain pending, while duplicate
+owners or photos fail. Snapshot traversal is limited to 4,096 nodes and 1,024
+UTF-8 bytes per identifier or label. Count and label come from that same
+capture, without a later broad `app.images` count or label query.
+A negative observation schedules
 the next probe one second after it returns, so native queries cannot overlap
 and accessibility traversal leaves a quiet interval for presentation work.
 Waiter teardown disables queued probes and cancels the pending timer. This avoids
 `waitForExistence`'s additional query after its timeout; an already active native
 query may still return late, and a positive result at or after the deadline is
 rejected. This is not a hard wall-clock cancellation of native work.
+Resolver and snapshot errors propagate, including errors returned after the
+deadline. The actual image action is resolved afresh as a unique element inside
+the same exact owner and retains the existing enabled/hittable tap gates.
 The selector still requires a `Photo,` Image, followed by
 the existing exactly-one-photo, interaction and original-byte checks. There is
 no second picker launch or seed attempt, and the XCTest/controller limits do not
@@ -318,6 +328,15 @@ session events show the Photos service appearing about 20 seconds after the
 existence wait began, beyond the former ten-second window. The later failure
 snapshot contains that exact image; it does not prove the image was available
 during the earlier wait.
+
+In run `42139185613`, the current recording shows the receipt in Photos well
+before the 90-second deadline, but the broad application image query first
+returned no matches and then incurred two 30-second remote-query timeouts.
+The third framework attempt was interrupted by the enclosing waiter. The
+owner-scoped observation changes that query path; it does not claim to repair
+the system Photos service or guarantee accessibility readiness from visible
+pixels. The deadline, one-second serialized cadence, fixture isolation and
+single picker activation remain unchanged and require fresh hosted validation.
 
 In run `41663409152`, the former 30-second window began at 16:06:31.516 UTC.
 Six queries returned no match; the seventh was interrupted by the waiter's

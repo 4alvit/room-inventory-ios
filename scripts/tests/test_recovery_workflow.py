@@ -229,8 +229,18 @@ class RecoveryWorkflowTests(unittest.TestCase):
 
     def test_upload_keeps_only_compact_packet_even_on_failure(self):
         uploads = [step for step in self.job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")]
-        self.assertEqual(len(uploads), 1)
-        upload = uploads[0]
+        self.assertEqual(len(uploads), 2)
+        diagnostic, upload = uploads
+        self.assertEqual(diagnostic["if"], "${{ always() && steps.recovery.outcome != 'success' }}")
+        self.assertEqual(diagnostic["timeout-minutes"], "1")
+        self.assertEqual(diagnostic["with"], {
+            "name": "recovery-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}",
+            "path": "${{ runner.temp }}/room-recovery-diagnostic/",
+            "include-hidden-files": "false", "if-no-files-found": "warn",
+            "compression-level": "0", "retention-days": "14",
+        })
+        journey = next(step for step in self.job["steps"] if step.get("id") == "recovery")
+        self.assertEqual(journey["name"], "Run one bounded hosted recovery journey")
         self.assertEqual(upload["if"], "${{ always() }}")
         self.assertEqual(upload["timeout-minutes"], "5")
         self.assertEqual(upload["with"], {

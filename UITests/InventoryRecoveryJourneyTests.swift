@@ -127,18 +127,22 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // PhotoKit verified the original and isolated this owned library before
         // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
-        let photos = app.images.matching(photoPredicate)
-        let photoAppeared = try photosAppearance.waitForProbe {
-            photos.firstMatch.exists
+        let photoOwners = app.scrollViews.matching(identifier: RecoveryPhotosAppearanceWindow.contentIdentifier)
+        let photoObservation = try photosAppearance.waitForObservation {
+            try photosAppearance.captureObservation(owners: photoOwners)
         }
-        try ledger.require("seeded photo appears", photoAppeared)
+        try ledger.require("seeded photo appears", photoObservation != nil)
+        guard let photoObservation else { throw RecoveryPhotosAppearanceWindow.Failure.expired }
         ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
-        try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
-        let photoLabel = photos.firstMatch.label
+        try ledger.require("exactly one seeded photo", actual: String(photoObservation.imageCount), expected: "1")
+        let photoLabel = photoObservation.label
+        // Resolve the actual action afresh inside the same exact owner. Native
+        // uniqueness, enabled and hittable checks still gate the single tap.
+        let photos = photoOwners.element.images.matching(photoPredicate)
         ledger.capturePhotosSelection("before", fixtureIsolated: bridge != nil,
                                       app: app)
         do {
-            try tap(photos.firstMatch, app: app)
+            try tap(photos.element, app: app)
         } catch {
             ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
                                           app: app, failure: error)

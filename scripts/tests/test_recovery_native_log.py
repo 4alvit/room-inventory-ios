@@ -427,7 +427,7 @@ class WrapperTests(unittest.TestCase):
         self.assertNotIn("/usr/bin/sample", source)
         self.assertNotIn("NATIVE_SAMPLE", source)
         self.assertEqual(H.POLICY["discovery_seconds"], 120)
-        self.assertEqual(H.POLICY["recovery_seconds"], 1800)
+        self.assertEqual(H.POLICY["recovery_seconds"], 1980)
 
 
 if __name__ == "__main__":

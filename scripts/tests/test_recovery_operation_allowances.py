@@ -361,7 +361,7 @@ class OperationAllowanceTests(base.ControllerCase):
         request = self.collection_shutdown_request()
         for phase_start, elapsed, work, scan_step in ((700, 700, 80, 2),
                                                      (700, 900, 30, .25),
-                                                     (1600, 1700, 30, .25)):
+                                                     (1780, 1880, 30, .25)):
             with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
                 run = w.run
                 w.clock.now = run.start + phase_start
@@ -377,7 +377,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 w.stat_action = inspect
                 run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 90, phase_start + 240, 1740))
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 90, phase_start + 240, 1920))
                 self.assertGreater(record["child_completed_elapsed"] - elapsed, 21)
                 self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
                 self.assertTrue(record["cleanup"]["success"])
@@ -395,7 +395,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_collection_shutdown_rejects_own_collection_and_outer_work_boundaries(self):
         request = self.collection_shutdown_request()
         for phase_start, elapsed, work in ((700, 700, 86), (700, 700, 86.5),
-                                           (700, 900, 36), (1600, 1700, 36)):
+                                           (700, 900, 36), (1780, 1880, 36)):
             with self.subTest(elapsed=elapsed, work=work), devices.World(module=C) as w:
                 run = w.run
                 w.clock.now = run.start + phase_start
@@ -415,7 +415,7 @@ class OperationAllowanceTests(base.ControllerCase):
 
     def test_collection_shutdown_cannot_spawn_with_exhausted_existing_budget(self):
         request = self.collection_shutdown_request()
-        for phase_start in (700, 1600):
+        for phase_start in (700, 1780):
             for remaining in (7, 4, 0):
                 with self.subTest(phase_start=phase_start, remaining=remaining), devices.World(module=C) as w:
                     run = w.run
@@ -677,6 +677,6 @@ class OperationAllowanceTests(base.ControllerCase):
             w.process.wait.side_effect = lambda timeout: (setattr(w.clock, "now", start + 7) or 0)
             with self.assertRaises(C.DeadlineFailure):
                 run.command(*requests[2].args, **requests[2].kwargs)
-            self.assertEqual(run.record["commands"][0]["end_deadline_elapsed"], 1800)
+            self.assertEqual(run.record["commands"][0]["end_deadline_elapsed"], 1980)
             self.assertTrue(w.cleaned)
             self.assertEqual(run.outer_end - run.work_end, 60)

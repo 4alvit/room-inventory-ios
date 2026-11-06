@@ -26,7 +26,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
                           "Requires a fresh controller-owned Simulator for the exact synthetic Photos receipt.")
-        executionTimeAllowance = 720
+        executionTimeAllowance = 900
         continueAfterFailure = false
         let journeyID = try requiredUUID("RECOVERY_JOURNEY_RUN_ID", environment)
         let sourceID = try requiredUUID("RECOVERY_SOURCE_RUN_ID", environment)

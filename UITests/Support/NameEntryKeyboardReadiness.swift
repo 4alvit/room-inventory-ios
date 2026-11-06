@@ -73,6 +73,7 @@ final class NameEntryKeyboardReadiness {
     private var terminalError: Error?
     private var inputAttempted = false
     private var window: RecoveryOCRReadinessWindow { inputWindow ?? setupWindow }
+    private var inputAllowance: Int { timing == .keyboardSetupThenInput ? 30 : 10 }
     private let allowance: ContinueAllowance
     private(set) var observation: Observation?
     private(set) var sawIntroduction = false
@@ -345,7 +346,8 @@ final class NameEntryKeyboardReadiness {
                 // Construct exactly once, then check that the complete handoff
                 // still falls within setup's deadline before publishing it.
                 let (candidate, startedAt) = try setupWindow.perform {
-                    let candidate = RecoveryOCRReadinessWindow(clock: self.clock.now)
+                    let candidate = RecoveryOCRReadinessWindow(timeout: TimeInterval(self.inputAllowance),
+                                                               clock: self.clock.now)
                     return (candidate, self.clock.latest)
                 }
                 inputStartedAt = startedAt
@@ -472,7 +474,7 @@ final class NameEntryKeyboardReadiness {
     /// Test-owned synthetic names only. This never queries the UI or clock.
     var echoDiagnostic: [String: Any] {
         let record: [String: Any] = ["schema_version": 1,
-         "allowance_seconds": 10,
+         "allowance_seconds": inputAllowance,
          "echo_wait_started": echoWaitStarted,
          "timely_observation_count": echoObservationCount,
          "matched": echoMatched,
@@ -522,7 +524,7 @@ final class NameEntryKeyboardReadiness {
                 "active_phase": inputWindow != nil ? "input" : "setup",
                 "setup_allowance_seconds": timing == .keyboardSetupThenInput
                     ? RecoveryOCRReadinessWindow.coldKeyboardSetupAllowance : 10,
-                "input_allowance_seconds": 10,
+                "input_allowance_seconds": inputAllowance,
                 "setup_elapsed_seconds": elapsed(from: setupStartedAt, to: inputStartedAt ?? clock.latest),
                 "input_elapsed_seconds": inputStartedAt.map { elapsed(from: $0, to: clock.latest) } ?? NSNull(),
                 "setup_completed": setupCompleted,

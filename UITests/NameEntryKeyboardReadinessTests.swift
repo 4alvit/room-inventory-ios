@@ -785,7 +785,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             try h.wait()
             h.events.removeAll()
             try h.subject.typeTextOnce { h.stage("type") }
-            h.now = 9.5
+            h.now = 29.5
             h.showIntroduction()
             switch kind {
             case 0: h.observation.introductionCount = 2
@@ -812,12 +812,54 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         }
     }
 
+    func testAutofocusedEchoCanCrossTenSecondsWithOneInputAndFreshPostContinueValue() throws {
+        let h = Harness(timing: .keyboardSetupThenInput)
+        try h.wait()
+        h.events.removeAll()
+        try h.subject.typeTextOnce { h.stage("type"); h.now = 1 }
+        var observations = 0
+        var reads = 0
+        let value = try h.subject.waitForExactValue("Test Home", observeIntroduction: {
+            observations += 1
+            h.stage("observe")
+            switch observations {
+            case 1: h.now = 4
+            case 2: h.now = 11; h.showIntroduction()
+            case 3: h.now = 14
+            default: h.now = 16
+            }
+            return h.observation
+        }, continueHittable: {
+            h.stage("continue-hit"); h.now = 12; return true
+        }, tapContinue: {
+            h.stage("continue-tap"); h.now = 13; h.observation = .init()
+        }, read: { () throws -> String? in
+            reads += 1
+            h.stage("read")
+            h.now = reads == 1 ? 5 : 15
+            return reads == 1 ? "Home name" : "Test Home"
+        })
+        XCTAssertEqual(value, "Test Home")
+        XCTAssertEqual(observations, 4)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(h.now, 16)
+        XCTAssertEqual(h.events, ["type", "observe", "read", "observe", "continue-hit",
+                                  "continue-tap", "observe", "read", "observe"])
+        XCTAssertTrue(h.subject.dismissedIntroduction)
+        XCTAssertEqual(h.subject.echoDiagnostic["input_allowance_seconds"] as? Int, 30)
+        XCTAssertEqual(h.subject.echoDiagnostic["allowance_seconds"] as? Int, 30)
+        XCTAssertThrowsError(try h.subject.typeTextOnce { XCTFail("Do not repeat input") })
+        XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {
+            XCTFail("Do not restart the echo window"); return "Test Home"
+        })
+    }
+
     func testPersistentEchoIntroductionCannotPassOrTapAgain() throws {
         let h = Harness(timing: .keyboardSetupThenInput)
         try h.wait()
         h.events.removeAll()
         try h.subject.typeTextOnce { h.stage("type") }
-        h.now = 8.5
+        h.now = 28.5
         h.showIntroduction()
         XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
             h.stage("observe"); h.now += 0.25; return h.observation
@@ -840,13 +882,13 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
     }
 
     func testEveryLateEchoIntroductionStageRetainsOriginalInputDeadline() throws {
-        for end in [10.0, 10.001] {
+        for end in [30.0, 31.0] {
             for stage in ["observe", "continue-hit", "continue-tap", "read", "final-observe"] {
                 let h = Harness(timing: .keyboardSetupThenInput)
                 try h.wait()
                 h.events.removeAll()
                 try h.subject.typeTextOnce { h.stage("type") }
-                h.now = 9.75
+                h.now = 29.75
                 if stage.hasPrefix("continue-") { h.showIntroduction() }
                 var observations = 0
                 @MainActor func record(_ name: String) {
@@ -882,12 +924,12 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
             try h.wait()
             h.events.removeAll()
             try h.subject.typeTextOnce { h.stage("type") }
-            h.now = 9.75
+            h.now = 29.75
             if stage.hasPrefix("continue-") { h.showIntroduction() }
             var observations = 0
             @MainActor func record(_ name: String) throws {
                 h.stage(name)
-                if name == stage { h.now = 11; throw NativeFailure.operation }
+                if name == stage { h.now = 31; throw NativeFailure.operation }
             }
             XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home", observeIntroduction: {
                 observations += 1
@@ -958,7 +1000,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         let diagnostic = h.subject.echoDiagnostic
         XCTAssertEqual(diagnostic["setup_elapsed_seconds"] as? Double, 88)
         XCTAssertEqual(diagnostic["setup_allowance_seconds"] as? Double, 90)
-        XCTAssertEqual(diagnostic["input_allowance_seconds"] as? Int, 10)
+        XCTAssertEqual(diagnostic["input_allowance_seconds"] as? Int, 30)
         XCTAssertEqual(diagnostic["input_elapsed_seconds"] as? Double, 7)
         XCTAssertEqual(diagnostic["active_phase"] as? String, "input")
         XCTAssertEqual(diagnostic["input_attempted_once"] as? Bool, true)
@@ -1175,7 +1217,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         XCTAssertThrowsError(try h.wait())
         XCTAssertThrowsError(try h.poll())
         XCTAssertThrowsError(try h.tapField())
-        h.now = 30
+        h.now = 50
         XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") }) {
             XCTAssertEqual($0 as? RecoveryOCRReadinessWindow.Failure, .expired)
         }
@@ -1184,14 +1226,14 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
     }
 
     func testSplitInitialReadInputAndEchoRejectExactOrLateInputDeadline() throws {
-        for end in [30.0, 30.001] {
+        for end in [50.0, 51.0] {
             for stage in ["initial-value", "type", "echo"] {
                 let h = Harness(timing: .keyboardSetupThenInput)
                 _ = h.subject
                 h.now = 20
                 try h.wait()
                 h.events.removeAll()
-                h.now = 29.99
+                h.now = 49.99
                 if stage == "initial-value" {
                     XCTAssertThrowsError(try h.subject.perform { h.stage(stage); h.now = end })
                 } else if stage == "type" {
@@ -1221,7 +1263,7 @@ final class NameEntryKeyboardReadinessTests: XCTestCase {
         try h.wait()
         h.events.removeAll()
         XCTAssertThrowsError(try h.subject.typeTextOnce {
-            h.stage("type"); h.now = 11; throw NativeFailure.input
+            h.stage("type"); h.now = 31; throw NativeFailure.input
         }) { XCTAssertTrue($0 is NativeFailure) }
         XCTAssertThrowsError(try h.subject.typeTextOnce { h.stage("unexpected-type") })
         XCTAssertThrowsError(try h.subject.waitForExactValue("Test Home") {

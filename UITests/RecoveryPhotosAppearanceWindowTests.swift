@@ -265,8 +265,8 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         for count in [-1, 2] {
             let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
             XCTAssertThrowsError(try window.captureObservation(ownerCount: { count },
-                uniqueSnapshot: { XCTFail("Ambiguous owner must not resolve"); return self.owner() },
-                children: { $0.children }, attributes: { $0.item })) {
+                uniqueSnapshot: { () -> Node in XCTFail("Ambiguous owner must not resolve"); return self.owner() },
+                children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })) {
                 XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidOwnerCount)
             }
         }
@@ -304,11 +304,11 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         var captures = 0
         let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
         let observed = try window.captureObservation(ownerCount: { 1 },
-            uniqueSnapshot: { captures += 1; return root },
-            children: { $0.children }, attributes: { $0.item })
+            uniqueSnapshot: { () -> Node in captures += 1; return root },
+            children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })
         root.children = [] // Later tree changes cannot change the observed count or label.
         XCTAssertEqual(captures, 1)
-        XCTAssertEqual(observed, .init(imageCount: 1, label: label))
+        XCTAssertEqual(observed, RecoveryPhotosAppearanceWindow.Observation(imageCount: 1, label: label))
     }
 
     func testMultipleMatchingPhotosFailInsteadOfChoosingFirst() {
@@ -347,8 +347,8 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
         var now = 0.0
         let window = RecoveryPhotosAppearanceWindow(clock: { now })
         XCTAssertThrowsError(try window.captureObservation(ownerCount: { now = 90; return 1 },
-            uniqueSnapshot: { XCTFail("Late count cannot start snapshot"); return self.owner() },
-            children: { $0.children }, attributes: { $0.item })) {
+            uniqueSnapshot: { () -> Node in XCTFail("Late count cannot start snapshot"); return self.owner() },
+            children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })) {
             XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired)
         }
     }

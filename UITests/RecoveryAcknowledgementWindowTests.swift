@@ -1,6 +1,64 @@
 import XCTest
 
 final class RecoveryAcknowledgementWindowTests: XCTestCase {
+    func testInstallationCanCompleteAfterMeasuredHostCensusDelay() throws {
+        // The host services the bridge only after its guarded census returns.
+        // Model the measured 103.247666-second census without sleeping or I/O.
+        for phase: RecoveryAcknowledgementWindow.Phase in [.exportCapture, .installation] {
+            var now = 0.0
+            let window = RecoveryAcknowledgementWindow(phase: phase, clock: { now })
+            try window.perform { now += 2 } // Request publication and attachment.
+            var validated = false
+            let complete: () throws -> Void = {
+                try window.wait { _ in
+                    now += 103.247666 // No bridge service during this host census.
+                    return .completed
+                }
+                try window.perform { now += 1; validated = true }
+            }
+            if phase == .installation {
+                try complete()
+                XCTAssertTrue(validated)
+                XCTAssertEqual(try window.remaining(), 73.752334, accuracy: 0.000001)
+            } else {
+                XCTAssertThrowsError(try complete()) {
+                    XCTAssertEqual($0 as? RecoveryAcknowledgementWindow.Failure, .expired)
+                }
+                XCTAssertFalse(validated)
+            }
+        }
+    }
+
+    func testInstallationExactOrLateCompletionCannotAdvance() {
+        for elapsed in [180.0, 180.001] {
+            var now = 0.0
+            let window = RecoveryAcknowledgementWindow(phase: .installation, clock: { now })
+            var validated = false
+            XCTAssertThrowsError(try {
+                try window.wait { _ in now = elapsed; return .completed }
+                try window.perform { validated = true }
+            }()) { XCTAssertEqual($0 as? RecoveryAcknowledgementWindow.Failure, .expired) }
+            XCTAssertFalse(validated)
+        }
+    }
+
+    func testInstallationPublicationAndValidationShareTheSameDeadline() throws {
+        var now = 0.0
+        let window = RecoveryAcknowledgementWindow(phase: .installation, clock: { now })
+        try window.perform { now = 20 }
+        try window.wait { remaining in
+            XCTAssertEqual(remaining, 160)
+            now = 179
+            return .completed
+        }
+        var committed = false
+        XCTAssertThrowsError(try {
+            try window.perform { now = 180 } // ACK validation cannot renew the allowance.
+            committed = true
+        }()) { XCTAssertEqual($0 as? RecoveryAcknowledgementWindow.Failure, .expired) }
+        XCTAssertFalse(committed)
+    }
+
     func testHostedCaptureCompletesWithinOneAllowance() throws {
         var now = 100.0
         let window = RecoveryAcknowledgementWindow(clock: { now })

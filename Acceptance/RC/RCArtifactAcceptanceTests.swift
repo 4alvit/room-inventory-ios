@@ -212,24 +212,46 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         app.cells.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ","))
     }
 
+    private func filesNavigationState(_ folder: String, localTitle: String, initial: Bool,
+                                      _ app: XCUIApplication) throws -> FilesNavigationReadiness.State {
+        let allowance: TimeInterval = initial ? 30 : 10
+        let readiness = FilesNavigationReadiness(timeout: allowance)
+        let began = ProcessInfo.processInfo.systemUptime
+        var selected: FilesNavigationReadiness.State?
+        defer {
+            let capture = readiness.navigationCaptureDiagnostics
+            let record: [String: Any] = [
+                "schema_version": 2, "phase": initial ? "presentation" : "navigation",
+                "allowance_seconds": allowance,
+                "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                "result": selected == nil ? "failed" : "ready",
+                "state": selected.map { String(describing: $0) } as Any? ?? NSNull(),
+                "query_attempts": capture.queryAttempts, "queries_completed": capture.queriesCompleted,
+                "snapshot_attempts": capture.snapshotAttempts, "snapshots_completed": capture.snapshotsCompleted,
+                "last_query_seconds": capture.lastQueryDuration as Any? ?? NSNull(),
+                "last_query_remaining_seconds": capture.lastQueryRemainingAtStart as Any? ?? NSNull(),
+                "last_snapshot_seconds": capture.lastSnapshotDuration as Any? ?? NSNull(),
+                "last_snapshot_remaining_seconds": capture.lastSnapshotRemainingAtStart as Any? ?? NSNull(),
+                "last_picker_count": capture.lastPickerCount as Any? ?? NSNull(),
+                "last_node_count": capture.lastNodeCount, "last_stage": capture.stage
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_RC_FILES_NAVIGATION_V1 \(text)")
+            }
+        }
+        let state = try readiness.waitForState {
+            try readiness.captureNavigationState(folder: folder, localTitle: localTitle, app: app)
+        }
+        selected = state
+        return state
+    }
+
     private func folder(_ create: Bool, _ app: XCUIApplication) throws {
         let local = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
         let folder = "RC-" + runID
         for index in 0..<6 {
-            let w = FilesNavigationReadiness(timeout: index == 0 ? 30 : 10)
-            let state = try w.waitForState {
-                for (name, state) in [(folder, FilesNavigationReadiness.State.targetFolder), (local, .localRoot)] {
-                    let q = self.titleQuery(name, app)
-                    let n = try w.perform { q.count }; try self.require(n <= 1, "Unique Files title")
-                    if n == 1 {
-                        if try w.perform({ q.firstMatch.isHittable }) { return state }
-                    }
-                }
-                if try w.perform({ self.fileRow(local, app).firstMatch.isHittable }) { return .localEntry }
-                if try w.perform({ app.buttons["Browse"].isHittable }) { return .browse }
-                if try w.perform({ app.navigationBars.buttons["Back"].isHittable }) { return .back }
-                return nil
-            }
+            let state = try filesNavigationState(folder, localTitle: local, initial: index == 0, app)
             if state == .targetFolder { try require(!create, "Fresh export folder required"); return }
             if state == .localRoot { break }
             try require(index < 5, "Files navigation action cap")

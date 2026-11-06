@@ -127,18 +127,22 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // PhotoKit verified the original and isolated this owned library before
         // scenario actions. Still reject any unexpected picker representation.
         let photoPredicate = NSPredicate(format: "label BEGINSWITH[c] %@", "Photo,")
-        let photos = app.images.matching(photoPredicate)
-        let photoAppeared = try photosAppearance.waitForProbe {
-            photos.firstMatch.exists
+        let photoOwners = app.scrollViews.matching(identifier: RecoveryPhotosAppearanceWindow.contentIdentifier)
+        let photoObservation = try photosAppearance.waitForObservation {
+            try photosAppearance.captureObservation(owners: photoOwners)
         }
-        try ledger.require("seeded photo appears", photoAppeared)
+        try ledger.require("seeded photo appears", photoObservation != nil)
+        guard let photoObservation else { throw RecoveryPhotosAppearanceWindow.Failure.expired }
         ledger.capture("recovery-photos-picker-before-selection", app: app, test: self)
-        try ledger.require("exactly one seeded photo", actual: String(photos.count), expected: "1")
-        let photoLabel = photos.firstMatch.label
+        try ledger.require("exactly one seeded photo", actual: String(photoObservation.imageCount), expected: "1")
+        let photoLabel = photoObservation.label
+        // Resolve the actual action afresh inside the same exact owner. Native
+        // uniqueness, enabled and hittable checks still gate the single tap.
+        let photos = photoOwners.element.images.matching(photoPredicate)
         ledger.capturePhotosSelection("before", fixtureIsolated: bridge != nil,
                                       app: app)
         do {
-            try tap(photos.firstMatch, app: app)
+            try tap(photos.element, app: app)
         } catch {
             ledger.capturePhotosSelection("after", fixtureIsolated: bridge != nil,
                                           app: app, failure: error)
@@ -565,17 +569,72 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             enabled: { try shareAction.perform { saveToFiles.element }.isEnabled },
             hittable: { try shareAction.perform { saveToFiles.element }.isHittable },
             tap: { try shareAction.perform { saveToFiles.element }.tap() })
-        let saveButtons = app.buttons.matching(identifier: "Save")
-        let saveButton = saveButtons.element
-        try ledger.require("Files save dialog presented", saveButton.waitForExistence(timeout: 10))
+        // Let the existing Files presentation window observe a positive
+        // navigation state before querying the save action. The remote picker
+        // can appear after a short, label-only existence wait has already ended.
         try enterFilesFolder(folder, create: createFolder, app: app)
-        let filename = app.textFields.firstMatch
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        func saveButton(_ observation: FilesNavigationReadiness.SelectionObservation,
+                        window: FilesNavigationReadiness) throws -> XCUIElement {
+            // Bind every native action to the exact owner seen in this probe.
+            // Its descriptive title need not equal the current folder title.
+            try window.perform {
+                pickers.otherElements.matching(identifier: observation.ownerIdentifier)
+                    .navigationBars.matching(identifier: FilesNavigationReadiness.navigationBarIdentifier)
+                    .buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@",
+                                                   "DOCPicker.actionButton", "Save")).element
+            }
+        }
+        let dialog = FilesNavigationReadiness(timeout: 10)
+        let saveReady = try dialog.waitForSelection(
+            observe: { try dialog.captureSelection(folder: folder, pickers: pickers) },
+            enabled: { try saveButton($0, window: dialog).isEnabled },
+            hittable: { try saveButton($0, window: dialog).isHittable })
+        try ledger.require("Files save dialog presented", saveReady)
+        let filename = pickers.textFields.matching(identifier: "DOCPicker.filenameTextField").element
         try tap(filename, app: app)
         let existingName = filename.value as? String ?? ""
         try ledger.require("export filename editable", !existingName.isEmpty)
         filename.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existingName.count) + baseName)
-        let observedName = filename.value as? String ?? ""
+        let observedName: String
+        do {
+            // One observation allowance after the single input. A partial echo
+            // never triggers another interaction or renews this deadline.
+            let began = ProcessInfo.processInfo.systemUptime
+            let echo = FilesNavigationReadiness(timeout: 10)
+            var lastReturned: String?
+            var readsStarted = 0
+            var readsReturned = 0
+            var stage = "waiting"
+            var matched = false
+            defer {
+                let record: [String: Any] = [
+                    "schema_version": 1, "phase": "export_filename_echo", "role": role.rawValue,
+                    "expected": baseName, "last_returned": lastReturned.map { $0 as Any } ?? NSNull(),
+                    "reads_started": readsStarted, "reads_returned": readsReturned,
+                    "stage": stage, "allowance_seconds": 10,
+                    "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                    "result": matched ? "matched" : "failed"
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+                   data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                    print("ROOM_FILES_FILENAME_ECHO_V1 \(text)")
+                }
+            }
+            observedName = try echo.waitForFilenameEcho(expected: baseName, readValue: {
+                stage = "reading_value"
+                readsStarted += 1
+                // Resolve the unique typed field on every fresh value read.
+                let value = pickers.textFields.matching(identifier: "DOCPicker.filenameTextField").element.value as? String
+                lastReturned = value
+                readsReturned += 1
+                stage = "value_returned"
+                return value
+            })
+            matched = true
+            stage = "completed"
+        }
         try ledger.require("unique export base name", actual: observedName, expected: baseName)
         let observedTitle = filesFolderTitles(folder, app: app).element(boundBy: 0).label
         let actionsSuffix = ", Actions Menu"
@@ -586,7 +645,14 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         guard let homeName = ledger.expected["home_name"] else {
             throw RecoveryJourneyFailure.assertion("export return home", "missing", "run-bound home")
         }
-        try tap(saveButton, app: app)
+        // Editing and capture can change the remote hierarchy. Resolve and
+        // admit the exact Save action again, then tap once in that same window.
+        let saving = FilesNavigationReadiness(timeout: 10)
+        try saving.waitAndTapSelection(
+            observe: { try saving.captureSelection(folder: folder, pickers: pickers) },
+            enabled: { try saveButton($0, window: saving).isEnabled },
+            hittable: { try saveButton($0, window: saving).isHittable },
+            tap: { try saveButton($0, window: saving).tap() })
         let returning = ExportReturnReadiness(homeName: homeName)
         var returnSucceeded = false
         do {
@@ -791,29 +857,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 print("ROOM_FILES_NAVIGATION_V1 \(text)")
             }
         }
-        func interactive(_ element: XCUIElement) throws -> Bool {
-            guard try readiness.perform({ element.exists }) else { return false }
-            guard try readiness.perform({ element.isEnabled }) else { return false }
-            return try readiness.perform { element.isHittable }
-        }
-        func folderOpen(_ title: String) throws -> Bool {
-            let titles = filesFolderTitles(title, app: app)
-            let count = try readiness.perform { titles.count }
-            guard count <= 1 else {
-                throw RecoveryJourneyFailure.assertion("unique Files folder title", String(count), "at most one: \(title)")
-            }
-            guard count == 1 else { return false }
-            return try interactive(titles.element(boundBy: 0))
-        }
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
         let state = try readiness.waitForState {
-            // Live queries include the remote document service. app.snapshot()
-            // alone can omit its controls and cannot prove that it is absent.
-            if try folderOpen(folder) { return .targetFolder }
-            if try folderOpen(localTitle) { return .localRoot }
-            if try interactive(self.fileItem(localTitle, app: app)) { return .localEntry }
-            if try interactive(app.buttons["Browse"]) { return .browse }
-            if try interactive(self.filesBackButton(app: app)) { return .back }
-            return nil
+            // Classify one immutable remote picker tree. Separate exists and
+            // property queries can target different presentation states.
+            try readiness.captureNavigationState(folder: folder, localTitle: localTitle, pickers: pickers)
         }
         selected = state
         return state
@@ -852,7 +900,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         var stage = "starting"
         defer {
             let record: [String: Any] = [
-                "schema_version": 1, "phase": "restore_backup", "journey_id": journeyID,
+                "schema_version": 2, "phase": "restore_backup", "journey_id": journeyID,
                 "folder": folder, "filename": filename, "allowance_seconds": 10,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                 "result": tapped ? "tapped" : "failed", "tap_admissions": tapAdmissions,
@@ -860,33 +908,33 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
-                print("ROOM_FILES_SELECTION_V1 \(text)")
+                print("ROOM_FILES_SELECTION_V2 \(text)")
             }
         }
-        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
-        let folders = pickers.otherElements.matching(identifier:
-            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: \(folder)")
-        let fileViews = folders.collectionViews.matching(identifier: "File View")
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
         // The identifier has a stable type suffix; the label also contains
         // presentation-dependent time and size. Every live lookup stays scoped
-        // to the exact run folder and filename. These are sequential checks,
-        // not an atomic hierarchy snapshot.
-        let files = fileViews.cells.matching(identifier: filename + ", roominventory")
-        let target = files.element(boundBy: 0)
-        func count(_ query: XCUIElementQuery, _ name: String) -> Int {
-            stage = name
-            let value = query.count
-            lastCounts[name] = value
-            return value
+        // to the owner observed with the exact current folder and filename.
+        // Snapshot classification and native readiness remain sequential.
+        func target(_ observation: FilesNavigationReadiness.SelectionObservation) throws -> XCUIElement {
+            try selection.perform {
+                pickers.otherElements.matching(identifier: observation.ownerIdentifier)
+                    .collectionViews.matching(identifier: "File View")
+                    .cells.matching(identifier: filename + ", roominventory").element
+            }
         }
-        try selection.waitAndTapFile(
-            pickerCount: { count(pickers, "picker") },
-            folderCount: { count(folders, "folder") },
-            fileViewCount: { count(fileViews, "file_view") },
-            fileCount: { count(files, "file") },
-            enabled: { stage = "enabled"; return target.isEnabled },
-            hittable: { stage = "hittable"; return target.isHittable },
-            tap: { stage = "tap"; tapAdmissions += 1; target.tap() })
+        try selection.waitAndTapSelection(
+            observe: {
+                stage = "snapshot"
+                lastCounts = [:]
+                let observed = try selection.captureSelection(folder: folder, target: .backup(filename: filename),
+                                                               pickers: pickers)
+                lastCounts["complete_snapshot_scope"] = observed == nil ? 0 : 1
+                return observed
+            },
+            enabled: { stage = "enabled"; return try target($0).isEnabled },
+            hittable: { stage = "hittable"; return try target($0).isHittable },
+            tap: { stage = "tap"; tapAdmissions += 1; try target($0).tap() })
         tapped = true
         stage = "completed"
     }

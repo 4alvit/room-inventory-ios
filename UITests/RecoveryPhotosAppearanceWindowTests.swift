@@ -230,4 +230,194 @@ final class RecoveryPhotosAppearanceWindowTests: XCTestCase {
             XCTAssertEqual(calls, 1)
         }
     }
+
+    private final class Node {
+        let item: RecoveryPhotosAppearanceWindow.Item
+        var children: [Node]
+        init(_ kind: RecoveryPhotosAppearanceWindow.ItemKind = .other,
+             identifier: String = "", label: String = "", children: [Node] = []) {
+            item = .init(kind: kind, identifier: identifier, label: label)
+            self.children = children
+        }
+    }
+
+    private func owner(_ children: [Node] = []) -> Node {
+        Node(.scrollView, identifier: RecoveryPhotosAppearanceWindow.contentIdentifier,
+             children: children)
+    }
+
+    private func capture(_ root: Node, window: RecoveryPhotosAppearanceWindow,
+                         count: Int = 1) throws -> RecoveryPhotosAppearanceWindow.Observation? {
+        try window.captureObservation(ownerCount: { count }, uniqueSnapshot: { root },
+                                      children: { $0.children }, attributes: { $0.item })
+    }
+
+    func testMissingPhotosOwnerDoesNotCaptureOrReadAttributes() throws {
+        let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
+        let observed = try window.captureObservation(ownerCount: { 0 },
+            uniqueSnapshot: { XCTFail("Missing owner must not resolve"); return self.owner() },
+            children: { _ in XCTFail("No snapshot children"); return [] },
+            attributes: { node in XCTFail("No attributes"); return node.item })
+        XCTAssertNil(observed)
+    }
+
+    func testInvalidPhotosOwnerCountDoesNotCapture() {
+        for count in [-1, 2] {
+            let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
+            XCTAssertThrowsError(try window.captureObservation(ownerCount: { count },
+                uniqueSnapshot: { () -> Node in XCTFail("Ambiguous owner must not resolve"); return self.owner() },
+                children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })) {
+                XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidOwnerCount)
+            }
+        }
+    }
+
+    func testPhotosSnapshotRequiresExactOwnerTypeAndIdentifier() {
+        for root in [Node(.other, identifier: RecoveryPhotosAppearanceWindow.contentIdentifier),
+                     Node(.scrollView, identifier: "other content")] {
+            XCTAssertThrowsError(try capture(root, window: .init(clock: { 0 }))) {
+                XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidSnapshot)
+            }
+        }
+    }
+
+    func testNestedDuplicatePhotosOwnerIsRejected() {
+        XCTAssertThrowsError(try capture(owner([owner()]), window: .init(clock: { 0 }))) {
+            XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidOwnerCount)
+        }
+    }
+
+    func testEmptyPhotosSnapshotRemainsPending() throws {
+        XCTAssertNil(try capture(owner(), window: .init(clock: { 0 })))
+    }
+
+    func testOnlyMatchingImageTypeQualifiesForPhotosObservation() throws {
+        let root = owner([Node(.other, label: "Photo, November 06"),
+                          Node(.image, label: "Photo On A Rectangle"),
+                          Node(.image, label: "Video, November 06")])
+        XCTAssertNil(try capture(root, window: .init(clock: { 0 })))
+    }
+
+    func testPhotosObservationPreservesExactLabelFromSingleCapture() throws {
+        let label = "pHoTo, November 06, 1:49 AM"
+        let root = owner([Node(children: [Node(.image, label: label)])])
+        var captures = 0
+        let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
+        let observed = try window.captureObservation(ownerCount: { 1 },
+            uniqueSnapshot: { () -> Node in captures += 1; return root },
+            children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })
+        root.children = [] // Later tree changes cannot change the observed count or label.
+        XCTAssertEqual(captures, 1)
+        XCTAssertEqual(observed, RecoveryPhotosAppearanceWindow.Observation(imageCount: 1, label: label))
+    }
+
+    func testMultipleMatchingPhotosFailInsteadOfChoosingFirst() {
+        let root = owner([Node(.image, label: "Photo, first"), Node(.image, label: "Photo, second")])
+        XCTAssertThrowsError(try capture(root, window: .init(clock: { 0 }))) {
+            XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidImageCount)
+        }
+    }
+
+    func testExactPhotosSnapshotNodeLimitIsAccepted() throws {
+        let children = (0..<(RecoveryPhotosAppearanceWindow.snapshotNodeLimit - 1)).map { _ in Node() }
+        XCTAssertNil(try capture(owner(children), window: .init(clock: { 0 })))
+    }
+
+    func testOversizedPhotosSnapshotIsRejectedBeforeTraversingChildren() {
+        let root = owner((0..<RecoveryPhotosAppearanceWindow.snapshotNodeLimit).map { _ in Node() })
+        var attributesRead = 0
+        let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
+        XCTAssertThrowsError(try window.captureObservation(ownerCount: { 1 }, uniqueSnapshot: { root },
+            children: { $0.children }, attributes: { attributesRead += 1; return $0.item })) {
+            XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidSnapshot)
+        }
+        XCTAssertEqual(attributesRead, 1)
+    }
+
+    func testOversizedPhotosSnapshotStringsAreRejected() {
+        for node in [Node(.image, label: "Photo," + String(repeating: "x", count: 1_024)),
+                     Node(identifier: String(repeating: "x", count: 1_025))] {
+            XCTAssertThrowsError(try capture(owner([node]), window: .init(clock: { 0 }))) {
+                XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .invalidSnapshot)
+            }
+        }
+    }
+
+    func testLatePhotosOwnerCountCannotStartSnapshot() {
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        XCTAssertThrowsError(try window.captureObservation(ownerCount: { now = 90; return 1 },
+            uniqueSnapshot: { () -> Node in XCTFail("Late count cannot start snapshot"); return self.owner() },
+            children: { (node: Node) in node.children }, attributes: { (node: Node) in node.item })) {
+            XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired)
+        }
+    }
+
+    func testLatePhotosSnapshotCannotReadItsAttributes() {
+        for elapsed in [90.0, 90.001] {
+            var now = 0.0
+            let window = RecoveryPhotosAppearanceWindow(clock: { now })
+            XCTAssertThrowsError(try window.captureObservation(ownerCount: { 1 },
+                uniqueSnapshot: { now = elapsed; return self.owner([Node(.image, label: "Photo, receipt")]) },
+                children: { _ in XCTFail("Late snapshot cannot be traversed"); return [] },
+                attributes: { node in XCTFail("Late snapshot cannot be read"); return node.item })) {
+                XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired)
+            }
+        }
+    }
+
+    func testPhotosResolverAndCancellationErrorsRemainPrimaryAfterDeadline() {
+        enum ResolverFailure: Error { case disappeared }
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        XCTAssertThrowsError(try window.captureObservation(ownerCount: { 1 },
+            uniqueSnapshot: { () throws -> Node in now = 91; throw ResolverFailure.disappeared },
+            children: { $0.children }, attributes: { $0.item })) {
+            XCTAssertTrue($0 is ResolverFailure)
+        }
+        var cancellationTime = 0.0
+        let canceledWindow = RecoveryPhotosAppearanceWindow(clock: { cancellationTime })
+        XCTAssertThrowsError(try canceledWindow.captureObservation(ownerCount: { 1 },
+            uniqueSnapshot: { () throws -> Node in cancellationTime = 91; throw CancellationError() },
+            children: { $0.children }, attributes: { $0.item })) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+    }
+
+    func testPhotosTraversalCannotReturnObservationAfterDeadline() {
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        let root = owner([Node(.image, label: "Photo, receipt")])
+        XCTAssertThrowsError(try window.captureObservation(ownerCount: { 1 }, uniqueSnapshot: { root },
+            children: { $0.children }, attributes: { node in
+                if node.item.kind == .image { now = 90 }
+                return node.item
+            })) { XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired) }
+    }
+
+    @MainActor
+    func testThrowingPhotosObservationIsNotRetriedOrConvertedToAbsence() {
+        enum SnapshotFailure: Error { case unavailable }
+        let window = RecoveryPhotosAppearanceWindow(clock: { 0 })
+        var calls = 0
+        XCTAssertThrowsError(try window.waitForObservation { () throws -> Int? in
+            calls += 1
+            throw SnapshotFailure.unavailable
+        }) { XCTAssertTrue($0 is SnapshotFailure) }
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "no retry after capture error")], timeout: 0.01)
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testLatePhotosObservationCannotEscapeWaiter() {
+        var now = 0.0
+        let window = RecoveryPhotosAppearanceWindow(clock: { now })
+        var calls = 0
+        XCTAssertThrowsError(try window.waitForObservation { () -> Int? in
+            calls += 1
+            now = 90
+            return 1
+        }) { XCTAssertEqual($0 as? RecoveryPhotosAppearanceWindow.Failure, .expired) }
+        XCTAssertEqual(calls, 1)
+    }
 }

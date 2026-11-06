@@ -201,27 +201,212 @@ def owned_directory_identity(root):
     return info.st_dev, info.st_ino
 
 
+class ScanCostBreakdown:
+    """Fixed, inclusive wall spans around existing operations; never new probes.
+
+    A checkpoint contains cooperative service, which can contain owner checks
+    and a nested log walk. These buckets MUST NOT be added together. Unmeasured
+    Python/control work and timing overhead remain in resource_size_inclusive.
+    No duration here establishes native progress, successful cleanup or budget.
+    """
+    LABELS = frozenset((
+        "walker.root_metadata", "walker.scandir_open", "walker.iterator_enter",
+        "walker.iterator_next", "walker.entry_stat", "walker.iterator_close",
+        "walker.checkpoint_inclusive", "walker.owner_validation_inclusive",
+        "service.disk_usage_output", "service.disk_usage_device", "service.select",
+        "service.read", "service.write", "service.poll",
+        "service.owner_validation_inclusive", "service.log_walk_inclusive"))
+    COUNT_LIMIT = 2**31 - 1
+    SECONDS_LIMIT = 86400.0
+
+    def __init__(self, clock, record):
+        self.clock, self.record = clock, record
+
+    @staticmethod
+    def preserves_primary(error):
+        return (error is not None and not isinstance(
+            error, (_DeviceScanDeferred, _DerivedScanDeferred)))
+
+    def sample(self):
+        value = self.clock()
+        if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 2**53:
+            return value
+        return None
+
+    def increment(self, bucket, key):
+        if bucket[key] < self.COUNT_LIMIT:
+            bucket[key] += 1
+        else:
+            bucket["saturated"] = bucket["capture_incomplete"] = True
+
+    def call(self, label, operation, /, *args, _preserve_error=None, **kwargs):
+        bucket, started, primary = None, None, None
+        try:
+            if label not in self.LABELS:
+                self.record["capture_incomplete"] = True
+            else:
+                buckets = self.record["operations"]
+                if label not in buckets:
+                    buckets[label] = {
+                        "started": 0, "returned": 0, "failed": 0, "exhausted": 0,
+                        "interrupted_before_call": 0, "active": 0, "measured": 0, "missing": 0,
+                        "wall_seconds": {"sum": 0.0, "max": 0.0},
+                        "capture_incomplete": False, "saturated": False,
+                    }
+                bucket = buckets[label]
+                self.increment(bucket, "started")
+                self.increment(bucket, "active")
+                started = self.sample()
+        except BaseException as error:
+            self.record["capture_incomplete"] = True
+            if (not self.preserves_primary(_preserve_error)
+                    and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                # The underlying operation has not been called.
+                if bucket is not None:
+                    bucket["capture_incomplete"] = True
+                    self.increment(bucket, "interrupted_before_call")
+                    self.increment(bucket, "missing")
+                    bucket["active"] = max(0, bucket["active"] - 1)
+                raise
+        try:
+            return operation(*args, **kwargs)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                if bucket is not None:
+                    outcome = ("exhausted" if label == "walker.iterator_next"
+                               and isinstance(primary, StopIteration) else
+                               "failed" if primary is not None else "returned")
+                    self.increment(bucket, outcome)
+                    bucket["active"] = max(0, bucket["active"] - 1)
+                    ended = self.sample()
+                    duration = ended - started if ended is not None and started is not None else None
+                    if duration is None or not 0 <= duration <= self.SECONDS_LIMIT:
+                        self.increment(bucket, "missing")
+                        bucket["capture_incomplete"] = True
+                        self.record["capture_incomplete"] = True
+                    else:
+                        stats = bucket["wall_seconds"]
+                        if stats["sum"] + duration > self.SECONDS_LIMIT:
+                            bucket["saturated"] = bucket["capture_incomplete"] = True
+                        stats["sum"] = min(self.SECONDS_LIMIT, stats["sum"] + duration)
+                        stats["max"] = max(stats["max"], duration)
+                        self.increment(bucket, "measured")
+            except BaseException as error:
+                self.record["capture_incomplete"] = True
+                if bucket is not None:
+                    bucket["capture_incomplete"] = True
+                    self.increment(bucket, "missing")
+                primary_to_preserve = (_preserve_error if label == "walker.iterator_next"
+                                       and isinstance(primary, StopIteration) else primary or _preserve_error)
+                if (not self.preserves_primary(primary_to_preserve)
+                        and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit))):
+                    raise
+
+
+def measured_scan_call(cost, label, operation, /, *args, _preserve_error=None, **kwargs):
+    if cost is None:
+        return operation(*args, **kwargs)
+    return cost.call(label, operation, *args, _preserve_error=_preserve_error, **kwargs)
+
+
+class MeasuredScandir:
+    """Forward the original context protocol, including exception suppression."""
+    def __init__(self, iterator, cost):
+        self.iterator, self.cost = iterator, cost
+
+    def __enter__(self):
+        called, entered = False, False
+        def enter():
+            nonlocal called, entered
+            called = True
+            result = self.iterator.__enter__()
+            entered = True
+            return result
+        try:
+            return measured_scan_call(self.cost, "walker.iterator_enter", enter)
+        except BaseException:
+            if entered:
+                # A timing interruption after __enter__ still releases the
+                # original context once; diagnostics cannot replace it.
+                try:
+                    self.iterator.__exit__(*sys.exc_info())
+                except BaseException:
+                    pass
+            elif not called:
+                # The descriptor was acquired before this timing boundary.
+                # Do not call __exit__ for a context we never entered.
+                try:
+                    self.iterator.close()
+                except BaseException:
+                    pass
+            raise
+
+    def __exit__(self, kind, error, traceback):
+        called = False
+        def close():
+            nonlocal called
+            called = True
+            return self.iterator.__exit__(kind, error, traceback)
+        try:
+            return measured_scan_call(self.cost, "walker.iterator_close", close, _preserve_error=error)
+        except BaseException:
+            if not called:
+                # A new timing-boundary interruption cannot skip normal exit.
+                try:
+                    close()
+                except BaseException:
+                    pass
+            raise
+
+
+def measured_scandir_open(cost, directory):
+    iterator = None
+    def open_iterator():
+        nonlocal iterator
+        iterator = os.scandir(directory)
+        return iterator
+    try:
+        return measured_scan_call(cost, "walker.scandir_open", open_iterator)
+    except BaseException:
+        if iterator is not None:
+            # os.scandir acquired a descriptor before a timing interruption.
+            # No traversal/context entry occurred; release that descriptor.
+            try:
+                iterator.close()
+            except BaseException:
+                pass
+        raise
+
+
 def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
               cap_metric="max_logical_allocated", vanished_child_check=None,
-              vanished_path_check=None, entry_observer=None):
+              vanished_path_check=None, entry_observer=None, cost=None):
     """Bounded lstat traversal. Do not follow symlinks or require native size probes."""
     require(cap_metric in ("max_logical_allocated", "allocated"), "Unknown resource cap metric")
     require(vanished_child_check is None or vanished_path_check is None,
             "Conflicting vanished-child policies", ConfigurationFailure)
     permits_vanished = vanished_child_check is not None or vanished_path_check is not None
+    original_tick = tick
+    tick = lambda: measured_scan_call(cost, "walker.checkpoint_inclusive", original_tick)
+    measure = lambda label, operation, *args, **kwargs: measured_scan_call(
+        cost, label, operation, *args, **kwargs)
     if vanished_child_check is not None:
         tick()
-        vanished_child_check()
+        measure("walker.owner_validation_inclusive", vanished_child_check)
         tick()
-    if not root.exists() and not root.is_symlink():
+    if not measure("walker.root_metadata", root.exists) and not measure("walker.root_metadata", root.is_symlink):
         require(vanished_child_check is None, "Required resource root disappeared", ResourceAccountingFailure)
         return {"logical_bytes": 0, "allocated_bytes": 0, "entries": 0, "cap_metric": cap_metric}
-    require(root.is_dir() and not root.is_symlink(), "Resource root is not an ordinary directory")
+    require(measure("walker.root_metadata", root.is_dir)
+            and not measure("walker.root_metadata", root.is_symlink), "Resource root is not an ordinary directory")
     if entry_observer is not None:
         tick()
-        root_info = root.lstat()
+        root_info = measure("walker.root_metadata", root.lstat)
         tick()
-        entry_observer(root, root_info)
+        measure("walker.owner_validation_inclusive", entry_observer, root, root_info)
         tick()
     pending, logical, allocated, entries = [root], 0, 0, 0
     attempted_entries, vanished_entries, vanished_directories = 0, 0, 0
@@ -250,7 +435,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
 
     if cap_metric == "allocated":
         tick()
-        root_info = root.lstat()
+        root_info = measure("walker.root_metadata", root.lstat)
         require(stat.S_ISDIR(root_info.st_mode), "Resource root is not an ordinary directory")
         allocated = allocation_bytes(root_info)
         # The root can consume blocks even with no children. Keep entries as
@@ -260,7 +445,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
         tick()
         directory = pending.pop()
         try:
-            iterator = os.scandir(directory)
+            iterator = measured_scandir_open(cost, directory)
         except FileNotFoundError as error:
             if (not permits_vanished or error.errno != errno.ENOENT
                     or directory == root or not directory.is_relative_to(root)):
@@ -269,14 +454,19 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
             # Only the scandir open is eligible; iteration/context errors stay strict.
             tick()  # Do not query identity after a late open return.
             if vanished_path_check is not None:
-                vanished_path_check(directory)
+                measure("walker.owner_validation_inclusive", vanished_path_check, directory)
             else:
-                vanished_child_check()
+                measure("walker.owner_validation_inclusive", vanished_child_check)
             tick()
             vanished_directories += 1
             continue  # Retain the directory's already observed allocated bytes.
-        with iterator as children:
-            for entry in children:
+        with MeasuredScandir(iterator, cost) as children:
+            children = iter(children)
+            while True:
+                try:
+                    entry = measure("walker.iterator_next", next, children)
+                except StopIteration:
+                    break
                 tick()
                 path = Path(entry.path)
                 if path in excluded:
@@ -286,7 +476,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                     attempted_entries += 1
                     require(attempted_entries <= max_entries, "Resource entry-count cap exceeded")
                 try:
-                    info = entry.stat(follow_symlinks=False)
+                    info = measure("walker.entry_stat", entry.stat, follow_symlinks=False)
                 except FileNotFoundError as error:
                     if not permits_vanished or error.errno != errno.ENOENT:
                         raise
@@ -294,15 +484,15 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
                     # iterator/context, metadata and cap failures stay strict.
                     tick()  # A late stat return cannot start another filesystem query.
                     if vanished_path_check is not None:
-                        vanished_path_check(path)
+                        measure("walker.owner_validation_inclusive", vanished_path_check, path)
                     else:
-                        vanished_child_check()
+                        measure("walker.owner_validation_inclusive", vanished_child_check)
                     tick()
                     vanished_entries += 1
                     continue
                 if entry_observer is not None:
                     tick()
-                    entry_observer(path, info)
+                    measure("walker.owner_validation_inclusive", entry_observer, path, info)
                     tick()
                 entries += 1
                 require(entries <= max_entries, "Resource entry-count cap exceeded")
@@ -320,7 +510,7 @@ def tree_size(root, cap, tick, *, max_entries=100000, excluded=(), on_cap=None,
               "cap_metric": cap_metric}
     if vanished_child_check is not None:
         tick()  # Iterator closure is a returning boundary under the same deadline.
-        vanished_child_check()
+        measure("walker.owner_validation_inclusive", vanished_child_check)
         tick()
     if permits_vanished:
         result.update(attempted_entries=attempted_entries, vanished_entries=vanished_entries,
@@ -508,6 +698,7 @@ class RecoveryRun:
         self._device_scan_context = None
         self._active_xcresult_producer = None
         self._scan_cost_command = None
+        self._scan_breakdown = None
         self.diagnostic_stage = "unstarted"
         self.ids = {"journey_run_id": grant["journey_run_id"], "source_run_id": str(uuid.uuid4()).upper(), "target_run_id": str(uuid.uuid4()).upper()}
         require(len(set(self.ids.values())) == 3, "UUID collision", ConfigurationFailure)
@@ -972,7 +1163,9 @@ class RecoveryRun:
 
     def resource_size(self, category, root, cap, *, cap_metric="max_logical_allocated", **kwargs):
         bucket, span, cpu_start, primary = None, None, None, None
+        previous_breakdown = self._scan_breakdown
         try:
+            self._scan_breakdown = self.start_scan_breakdown(category)
             cpu_start = self.scan_cpu()
             bucket = self.observe_scan_cost("start", category=category)
             span = self.observe_runtime("scan_start", value=category)
@@ -981,6 +1174,7 @@ class RecoveryRun:
             primary = error
             raise
         finally:
+            self._scan_breakdown = previous_breakdown
             preserve = primary is not None and not isinstance(
                 primary, (_DeviceScanDeferred, _DerivedScanDeferred))
             try:
@@ -997,6 +1191,37 @@ class RecoveryRun:
                 if not preserve and isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
                     raise
 
+    def start_scan_breakdown(self, category):
+        """Attach fixed metadata only; all measured operations already exist."""
+        try:
+            target = self._scan_cost_command if self._scan_cost_command is not None else self.record
+            if "resource_scan_breakdown" not in target:
+                target["resource_scan_breakdown"] = {
+                    "schema_version": 1,
+                    "scope": "resource_size_calls_only",
+                    "attribution": "inclusive_named_spans_do_not_sum_nested_buckets",
+                    "hierarchy": {
+                        "resource_size_inclusive": "contains all buckets and uninstrumented control work",
+                        "walker.checkpoint_inclusive": "contains service.* and nested log-walk buckets",
+                        "service.log_walk_inclusive": "contains nested walker.* buckets",
+                        "service.owner_validation_inclusive": "contains existing identity checks",
+                    },
+                    "categories": {}, "capture_incomplete": False,
+                }
+            aggregate = target["resource_scan_breakdown"]
+            if category not in SCAN_CATEGORIES:
+                aggregate["capture_incomplete"] = True
+                return None
+            record = aggregate["categories"].setdefault(category, {"operations": {}, "capture_incomplete": False})
+            return ScanCostBreakdown(self.clock, record)
+        except BaseException as error:
+            if isinstance(error, (DeadlineFailure, KeyboardInterrupt, SystemExit)):
+                raise
+            return None
+
+    def scan_operation(self, label, operation, *args, **kwargs):
+        return measured_scan_call(self._scan_breakdown, label, operation, *args, **kwargs)
+
     def _resource_size(self, category, root, cap, span, *, cap_metric, **kwargs):
         try:
             require("vanished_path_check" not in kwargs and "entry_observer" not in kwargs,
@@ -1007,7 +1232,7 @@ class RecoveryRun:
             if check_result_roots:
                 require(root == (self.output if category == "output" else self.output / "original.xcresult"),
                         "Unexpected xcresult traversal root", ConfigurationFailure)
-                self.validate_xcresult_resource_roots(producer)
+                self.scan_operation("service.owner_validation_inclusive", self.validate_xcresult_resource_roots, producer)
             if producer is not None:
                 require("vanished_child_check" not in kwargs,
                         "Xcresult validation cannot be overridden", ConfigurationFailure)
@@ -1041,9 +1266,10 @@ class RecoveryRun:
                 self._device_scan_context = binding
             try:
                 result = tree_size(root, cap, checkpoint, cap_metric=cap_metric, **kwargs,
+                                   cost=self._scan_breakdown,
                                    on_cap=lambda *data: self.record_resource_cap(category, *data, cap_metric=cap_metric))
                 if check_result_roots:
-                    self.validate_xcresult_resource_roots(producer)
+                    self.scan_operation("service.owner_validation_inclusive", self.validate_xcresult_resource_roots, producer)
             finally:
                 if derived_binding is not None:
                     self._derived_scan_context = None
@@ -1270,7 +1496,7 @@ class RecoveryRun:
             require(self._derived_scan_service is service_derived_scan and not service_busy,
                     "Invalid or reentrant scan service", ConfigurationFailure)
             if device_scan:
-                require_device_owner()
+                self.scan_operation("service.owner_validation_inclusive", require_device_owner)
                 device_checkpoints += 1
                 checkpoints, last = device_checkpoints, device_last
             else:
@@ -1285,12 +1511,12 @@ class RecoveryRun:
                 observe(record, "quantum_started")
                 # The outer loop checked this floor before each read batch.
                 # Repeat it here without recursively entering the resource guard.
-                free = self.disk_usage(self.output.parent).free
+                free = self.scan_operation("service.disk_usage_output", self.disk_usage, self.output.parent).free
                 self.tick()
-                free = min(free, self.disk_usage(self.device_base).free)
+                free = min(free, self.scan_operation("service.disk_usage_device", self.disk_usage, self.device_base).free)
                 self.tick()
                 require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
-                ready = selector.select(0)
+                ready = self.scan_operation("service.select", selector.select, 0)
                 self.tick()
                 require(len(ready) <= 2, "Unexpected scan service readiness count")
                 seen, drained = set(), False
@@ -1302,7 +1528,7 @@ class RecoveryRun:
                             "Unexpected scan service pipe identity", ConfigurationFailure)
                     seen.add(index)
                     try:
-                        data = os.read(key.fileobj.fileno(), 65536)
+                        data = self.scan_operation("service.read", os.read, key.fileobj.fileno(), 65536)
                     except BlockingIOError:
                         observe(record, "would_block", index=index)
                         self.tick()
@@ -1315,21 +1541,23 @@ class RecoveryRun:
                         self.observe_runtime("stdout_eof" if index == 0 else "stderr_eof", record)
                         continue
                     require(len(buffers[index]) + len(data) <= 16 * MIB, "Command stream cap exceeded: " + name)
-                    written = streams[index].write(data)
+                    written = self.scan_operation("service.write", streams[index].write, data)
                     self.tick()
                     require(written == len(data), "Incomplete command log write: " + name)
                     buffers[index].extend(data)
                     drained = True
                 self.tick()
-                polled = process.poll()
+                polled = self.scan_operation("service.poll", process.poll)
                 observe(record, "poll_return")
                 self.observe_runtime("poll", record, polled)
                 self.tick()
                 if drained:
                     # Validate newly persisted logs with the plain deadline tick.
                     # Preserve the active DerivedData span and cap accounting.
-                    tree_size(logs, LOG_CAP, self.tick, max_entries=256,
-                              on_cap=lambda *data: self.record_resource_cap("logs", *data))
+                    self.scan_operation("service.log_walk_inclusive", tree_size,
+                                        logs, LOG_CAP, self.tick, max_entries=256,
+                                        cost=self._scan_breakdown,
+                                        on_cap=lambda *data: self.record_resource_cap("logs", *data))
                     self.tick()
                 if device_scan:
                     device_checkpoints, device_last = 0, self.clock()
@@ -1340,12 +1568,12 @@ class RecoveryRun:
                 if (device_scan or derived_identity is not None) and all(pipe_eof) and polled is not None:
                     require(type(polled) is int and polled in allowed_codes, "Command failed: " + name)
                     if device_scan:
-                        require_device_owner()
+                        self.scan_operation("service.owner_validation_inclusive", require_device_owner)
                         self.tick()  # The allowed exit AND EOF must be observed in time.
                         if allow_scan_handoff:
                             raise device_deferred
                     elif derived_identity is not None:
-                        require_derived_owner()
+                        self.scan_operation("service.owner_validation_inclusive", require_derived_owner)
                         self.tick()
                         if allow_scan_handoff:
                             raise derived_deferred

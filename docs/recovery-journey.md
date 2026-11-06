@@ -1607,12 +1607,20 @@ second before the deadline and was interrupted by the enclosing waiter.
 Visible controls did not establish timely accessibility-query completion.
 This regression is tracked in [issue #22](https://github.com/4alvit/room-inventory-ios/issues/22).
 
-Navigation now captures the owned `XCUIApplication` once per probe and counts
-every exact, typed `Browse View (Picker)` in that immutable application tree.
-The complete bounded discovery must find exactly one picker before its existing
-attributes and descendants are classified. There is no first-match or first-window
-fallback. A missing picker or incomplete captured state remains pending;
-ambiguous pickers, owners, bars or exact titles fail.
+In PR run `42167432555`, 55 application-root captures completed without establishing
+a navigation state; the final capture contained only 15 nodes and no picker. Current video shows On My
+iPhone, Save and Inventory-package before the cutoff, and the session records
+that Files view appearing 8.38 seconds before the deadline. A successful snapshot
+of the application root therefore did not establish coverage of the remote picker.
+The last capture took about 0.18 seconds; that value does not describe every capture.
+
+Navigation now evaluates the owned application's exact, typed
+`Browse View (Picker)` query once per probe using
+`allElementsBoundByAccessibilityElement`. Its returned array is checked locally:
+zero matches remain pending, multiple matches fail, and exactly one match is
+snapshotted through that same accessibility-bound element. There is no indexed
+re-query, first-match fallback or error-to-absence conversion. An incomplete
+captured state remains pending; ambiguous owners, bars or exact titles fail.
 The local provider's remembered title is not the current folder: current local
 location comes from the uniquely owned bar's direct exact title. Target folder,
 local root, local entry, Browse and Back preserve that priority. Only typed,
@@ -1622,25 +1630,29 @@ still applies before every navigation action. Folder observation itself needs
 no tap or live property query on its title.
 
 The original 30-second presentation and 10-second subsequent-navigation windows
-are unchanged. Both application discovery and picker classification are limited
-to 4,096 nodes; capture, local traversal and waiter return share the same original
+are unchanged. The picker classifier retains its 4,096-node limit; the query,
+bound-element snapshot, local traversal and waiter return share the original
 deadline. The next probe is scheduled 0.1 seconds after the previous probe returns,
-so native queries do not overlap. Capture errors still propagate, including errors
-returned after the deadline. Late results cannot admit a state, and a missing state
-never implies Back. No extra sleep, timeout increase or host accounting change
-is included. The existing bounded navigation diagnostic also records capture
-attempt/completion counts, the last capture duration and remaining allowance,
-the last local picker/node counts and stage, without additional AX queries.
+so probes do not overlap. Query and snapshot errors still propagate, including
+errors returned after the deadline. Late results cannot admit a state, and a
+missing state never implies Back. No extra sleep, timeout increase or host
+accounting change is included. The bounded `ROOM_FILES_NAVIGATION_V1` diagnostic
+uses schema version 2 with separate query and snapshot attempt/completion counts,
+last durations and remaining allowances, plus the last picker/node counts and
+stage. It makes no additional AX calls.
 
-The traversal limits do not bound native capture time, transferred hierarchy size
-or framework memory. An application snapshot may be larger than a picker snapshot,
-and remote subtree inclusion and timely completion still require hosted validation.
-This removes the separate count/resolution pair; it does not claim to repair the
-system Files service or eliminate all timing failures. Synthetic tests preserve
-state ordering, exact hierarchy, disabled controls, duplicate rejection, native
-errors and deadlines, including duplicates outside the first picker subtree.
+Query resolution and snapshot capture remain two separate native operations.
+The element can disappear between them; that native failure is retained. The
+local node limit does not bound native call time, returned-array allocation,
+transferred hierarchy size or framework memory. Avoiding indexed re-resolution
+is not a guarantee of faster completion or an atomic UI observation. Successful
+remote capture and the complete journey still require fresh hosted validation.
+Synthetic tests preserve the selected identity, missing/duplicate handling,
+state ordering, exact hierarchy, native errors and the original deadline.
 
-Apple documents [snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
-as returning the element attributes and descendant hierarchy. This is the
-boundary used here; live element properties are not repeatedly sampled to
-construct one classification.
+Apple documents
+[accessibility-bound query results](https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/allelementsboundbyaccessibilityelement)
+as immediately evaluated results bound to their accessibility elements.
+[Snapshot capture](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding)
+returns the selected element's attributes and descendant hierarchy. Live element
+properties are not repeatedly sampled to construct one classification.

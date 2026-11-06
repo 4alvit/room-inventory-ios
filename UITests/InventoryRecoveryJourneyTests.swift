@@ -847,14 +847,17 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         defer {
             let capture = readiness.navigationCaptureDiagnostics
             let record: [String: Any] = [
-                "schema_version": 1, "phase": initial ? "presentation" : "navigation",
+                "schema_version": 2, "phase": initial ? "presentation" : "navigation",
                 "allowance_seconds": allowance,
                 "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
                 "result": selected == nil ? "failed" : "ready",
                 "state": selected.map { String(describing: $0) } as Any? ?? NSNull(),
-                "capture_attempts": capture.attempts, "captures_completed": capture.completed,
-                "last_capture_seconds": capture.lastDuration as Any? ?? NSNull(),
-                "last_capture_remaining_seconds": capture.lastRemainingAtStart as Any? ?? NSNull(),
+                "query_attempts": capture.queryAttempts, "queries_completed": capture.queriesCompleted,
+                "snapshot_attempts": capture.snapshotAttempts, "snapshots_completed": capture.snapshotsCompleted,
+                "last_query_seconds": capture.lastQueryDuration as Any? ?? NSNull(),
+                "last_query_remaining_seconds": capture.lastQueryRemainingAtStart as Any? ?? NSNull(),
+                "last_snapshot_seconds": capture.lastSnapshotDuration as Any? ?? NSNull(),
+                "last_snapshot_remaining_seconds": capture.lastSnapshotRemainingAtStart as Any? ?? NSNull(),
                 "last_picker_count": capture.lastPickerCount as Any? ?? NSNull(),
                 "last_node_count": capture.lastNodeCount, "last_stage": capture.stage
             ]
@@ -864,8 +867,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             }
         }
         let state = try readiness.waitForState {
-            // Discover the unique remote picker and classify its state within
-            // one immutable capture of this owned application.
+            // Resolve exact remote picker matches once, then classify a snapshot
+            // of the sole accessibility-bound result without an indexed re-query.
             try readiness.captureNavigationState(folder: folder, localTitle: localTitle, app: app)
         }
         selected = state

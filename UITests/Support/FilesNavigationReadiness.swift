@@ -5,6 +5,10 @@ import XCTest
 /// A missing state remains pending; it never implies that Back is available.
 @MainActor
 final class FilesNavigationReadiness {
+    /// Fixed allowance for system Files-provider observations and action admission.
+    /// Generic explicit windows keep their existing deadline and maximum.
+    static let systemProviderAllowance: TimeInterval = 30
+
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
     enum TitleKind { case application, navigationBar, text, button, other, collectionView, cell, unrelated }
     struct TitleItem {
@@ -41,6 +45,14 @@ final class FilesNavigationReadiness {
         var stage = "not_started"
     }
     private(set) var navigationCaptureDiagnostics = NavigationCaptureDiagnostics()
+    enum TitleCaptureStage: String {
+        case notStarted = "not_started"
+        case nativeSnapshot = "native_snapshot"
+        case nativeReturned = "native_returned"
+        case localValidation = "local_validation"
+        case completed
+    }
+    private(set) var titleCaptureStage = TitleCaptureStage.notStarted
     enum SelectionTarget { case save; case backup(filename: String) }
     enum Failure: Error, Equatable, CustomStringConvertible {
         case expired, cancelled, interrupted, alreadyWaiting, invalidAllowance, invalidClock, invalidTitleCount
@@ -342,9 +354,17 @@ final class FilesNavigationReadiness {
     func captureTargetFolderTitleCount<Node>(title: String, uniqueSnapshot: () throws -> Node,
                                              children: (Node) -> [Node],
                                              attributes: (Node) -> TitleItem) throws -> Int {
-        let root = try perform(uniqueSnapshot)
-        return try targetFolderTitleCount(title: title, root: root,
-                                          children: children, attributes: attributes)
+        let root = try perform {
+            titleCaptureStage = .nativeSnapshot
+            let captured = try uniqueSnapshot()
+            titleCaptureStage = .nativeReturned
+            return captured
+        }
+        titleCaptureStage = .localValidation
+        let count = try targetFolderTitleCount(title: title, root: root,
+                                               children: children, attributes: attributes)
+        titleCaptureStage = .completed
+        return count
     }
 
     /// Inspect only the captured owner's direct children. A button's nested text

@@ -2061,4 +2061,144 @@ final class FilesNavigationReadinessTests: XCTestCase {
         XCTAssertEqual(nested, .interrupted)
         XCTAssertEqual(taps, 1)
     }
+
+    @MainActor
+    func testSystemProviderAllowanceKeepsGenericTenSecondsAndThirtySecondCap() throws {
+        XCTAssertEqual(FilesNavigationReadiness.systemProviderAllowance, 30)
+        let provider = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { 0 })
+        XCTAssertEqual(try provider.remaining(), 30)
+        XCTAssertEqual(try FilesNavigationReadiness(timeout: 10, clock: { 0 }).remaining(), 10)
+        XCTAssertEqual(try FilesNavigationReadiness(clock: { 0 }).remaining(), 30)
+        XCTAssertThrowsError(try FilesNavigationReadiness(timeout: 31, clock: { 0 }).remaining()) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidAllowance)
+        }
+    }
+
+    @MainActor
+    func testProviderCreatedFolderCanCrossTenSecondsWithoutAnotherSnapshot() throws {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+        var snapshots = 0
+        XCTAssertTrue(try window.waitForCreatedFolderObservation(titleCount: {
+            try window.captureTargetFolderTitleCount(title: "Run folder",
+                uniqueSnapshot: { () throws -> TitleNode in
+                    snapshots += 1
+                    now = 12
+                    return .owner(children: [TitleNode(.button, "Run folder, Actions Menu")])
+                }, children: { $0.children }, attributes: { $0.item })
+        }))
+        XCTAssertEqual(snapshots, 1)
+        XCTAssertEqual(try window.remaining(), 18)
+        XCTAssertEqual(window.titleCaptureStage, .completed)
+    }
+
+    @MainActor
+    func testProviderSnapshotExactOrLateReturnRetainsStageWithoutTraversal() {
+        for finish in [30.0, 31.0] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+            var snapshots = 0
+            XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+                uniqueSnapshot: { () throws -> TitleNode in
+                    snapshots += 1
+                    now = finish
+                    return .owner(children: [TitleNode(.text, "Run folder")])
+                }, children: { _ in XCTFail("Late snapshot traversed"); return [] },
+                attributes: { node in XCTFail("Late snapshot inspected"); return node.item })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+            XCTAssertEqual(window.titleCaptureStage, .nativeReturned)
+            XCTAssertThrowsError(try window.perform { snapshots += 1 }) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+            XCTAssertEqual(snapshots, 1)
+        }
+    }
+
+    @MainActor
+    func testProviderLocalValidationReportsItsOwnExpiryStage() {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+        XCTAssertThrowsError(try window.captureTargetFolderTitleCount(title: "Run folder",
+            uniqueSnapshot: { () throws -> TitleNode in .owner(children: [TitleNode(.text, "Run folder")]) },
+            children: { _ in XCTFail("Expired owner inspection continued"); return [] },
+            attributes: { node in now = 30; return node.item })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+        }
+        XCTAssertEqual(window.titleCaptureStage, .localValidation)
+    }
+
+    @MainActor
+    func testProviderFilenameEchoKeepsOriginalThirtySecondDeadline() throws {
+        for finish in [29.0, 30.0, 31.0] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+            var reads = 0
+            let read: () throws -> String? = {
+                reads += 1
+                now = reads == 1 ? 12 : finish
+                return reads == 1 ? "export-pre" : "export-prefix"
+            }
+            if finish < 30 {
+                XCTAssertEqual(try window.waitForFilenameEcho(expected: "export-prefix", readValue: read), "export-prefix")
+                XCTAssertEqual(try window.remaining(), 1)
+            } else {
+                XCTAssertThrowsError(try window.waitForFilenameEcho(expected: "export-prefix", readValue: read)) {
+                    XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+                }
+                XCTAssertThrowsError(try window.perform { reads += 1 })
+            }
+            XCTAssertEqual(reads, 2)
+        }
+    }
+
+    @MainActor
+    func testProviderSelectionCrossesTenSecondsAndTapsOnlyOnce() throws {
+        var now = 0.0
+        let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+        var observations = 0
+        var taps = 0
+        let observe: () throws -> FilesNavigationReadiness.SelectionObservation? = {
+            observations += 1
+            now = 12
+            return .init(ownerIdentifier: "current-owner")
+        }
+        try window.waitAndTapSelection(observe: observe,
+            enabled: { observation in XCTAssertEqual(observation.ownerIdentifier, "current-owner"); now = 13; return true },
+            hittable: { observation in XCTAssertEqual(observation.ownerIdentifier, "current-owner"); now = 14; return true },
+            tap: { observation in XCTAssertEqual(observation.ownerIdentifier, "current-owner"); now = 15; taps += 1 })
+        XCTAssertEqual(observations, 1)
+        XCTAssertEqual(taps, 1)
+        XCTAssertEqual(try window.remaining(), 15)
+        XCTAssertThrowsError(try window.waitAndTapSelection(observe: observe,
+            enabled: { _ in XCTFail("Repeated readiness"); return true },
+            hittable: { _ in XCTFail("Repeated readiness"); return true },
+            tap: { _ in taps += 1 })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+        }
+        XCTAssertEqual(observations, 1)
+        XCTAssertEqual(taps, 1)
+    }
+
+    @MainActor
+    func testProviderSelectionAtOrAfterThirtyCannotTapOrRenew() {
+        for finish in [30.0, 31.0] {
+            var now = 0.0
+            let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })
+            var observations = 0
+            var taps = 0
+            XCTAssertThrowsError(try window.waitAndTapSelection(
+                observe: { observations += 1; now = 12; return .init(ownerIdentifier: "current-owner") },
+                enabled: { _ in true },
+                hittable: { _ in now = finish; return true },
+                tap: { _ in taps += 1 })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+            XCTAssertThrowsError(try window.perform { observations += 1 }) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+            XCTAssertEqual(observations, 1)
+            XCTAssertEqual(taps, 0)
+        }
+    }
 }

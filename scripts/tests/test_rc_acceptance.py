@@ -465,6 +465,172 @@ class InstallationWindow(unittest.TestCase):
             self.assertEqual(calls,[])
             self.assertEqual(run.commands,[])
 
+class CleanupAdmission(unittest.TestCase):
+    @contextmanager
+    def fixture(self, durations, mode='exit_on_term'):
+        # Keep Run, bounded_capture and kill_owned real. Only the clock and
+        # operating-system seams are inert; no process or signal is created.
+        import rc_acceptance_process as P
+        now=[0.0]
+        seen={'parents':[],'processes':[],'probes':[],'signals':[],'waits':[],'sleeps':[]}
+        real_cleanup=P.kill_owned
+        def spawn(argv, **kwargs):
+            duration=durations[len(seen['processes'])]
+            process=Mock(pid=43000+len(seen['processes']),returncode=None)
+            process.terminated=False
+            def poll():
+                now[0]+=duration
+                if mode=='already_reaped':process.returncode=0;return 0
+                return None
+            def wait(timeout):
+                seen['waits'].append((process.pid,timeout))
+                if mode=='stalled_reap':now[0]+=148
+                if process.terminated:process.returncode=-15;return -15
+                raise P.subprocess.TimeoutExpired(argv,timeout)
+            process.poll.side_effect=poll
+            process.wait.side_effect=wait
+            seen['processes'].append(process)
+            return process
+        def killpg(pid, sig):
+            process=next(p for p in seen['processes'] if p.pid==pid)
+            if sig==0:
+                seen['probes'].append(pid)
+                if mode=='permission':raise PermissionError(P.errno.EPERM,'fixture')
+                if process.returncode is not None:raise ProcessLookupError(P.errno.ESRCH,'fixture')
+            else:
+                seen['signals'].append((pid,sig,now[0]))
+                if mode=='exit_on_term':process.terminated=True
+        def sleep(seconds):
+            seen['sleeps'].append(seconds);now[0]+=seconds
+        def cleanup(process, deadline, *, state):
+            seen['parents'].append(deadline)
+            return real_cleanup(process,deadline,state=state,clock=lambda:now[0],sleep=sleep,killpg=killpg)
+        selector=Mock();selector.get_map.return_value={}
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(P.time,'monotonic',side_effect=lambda:now[0]), \
+                patch.object(P.subprocess,'Popen',side_effect=spawn), \
+                patch.object(P.selectors,'DefaultSelector',return_value=selector), \
+                patch.object(P.os,'set_blocking'), \
+                patch.object(P,'kill_owned',side_effect=cleanup):
+            run=R.Run(d,Path(d)/'out')
+            yield P,run,now,seen
+
+    def test_late_work_gets_one_cleanup_window_inside_original_parent(self):
+        with self.fixture([95]) as (P,run,now,seen):
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline exceeded'):
+                run.command(['inert'],'late',cap=90)
+            record=run.commands[0]
+            self.assertEqual(record['timeout_seconds'],90)
+            self.assertEqual(seen['parents'],[1800])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],99)
+            self.assertEqual([s[1] for s in seen['signals']],[P.signal.SIGTERM])
+            self.assertTrue(record['cleanup']['success'])
+            self.assertTrue(record['cleanup']['leader_reaped'])
+            self.assertEqual(record['cleanup']['group_state'],'absent')
+            self.assertEqual(run.end,1800)
+            self.assertIn('work deadline exceeded',record['error'])
+
+    def test_default_capture_keeps_historical_work_relative_cleanup_deadline(self):
+        with self.fixture([95]) as (P,run,now,seen):
+            record={}
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline exceeded'):
+                P.bounded_capture(['inert'],timeout=90,receipt=record)
+            self.assertEqual(seen['parents'],[94])
+            self.assertEqual(seen['signals'],[])
+            self.assertEqual(seen['probes'],[])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],94)
+            self.assertEqual(record['cleanup']['group_state'],'unverified')
+            self.assertFalse(record['cleanup']['leader_reaped'])
+
+    def test_term_kill_and_repeated_probes_do_not_renew_four_seconds(self):
+        with self.fixture([95],mode='stubborn') as (P,run,now,seen):
+            with self.assertRaises(P.CaptureFailure):run.command(['inert'],'late',cap=90)
+            record=run.commands[0]
+            self.assertEqual([s[1] for s in seen['signals']],[P.signal.SIGTERM,P.signal.SIGKILL])
+            self.assertGreater(len(seen['probes']),2)
+            self.assertEqual(seen['parents'],[1800])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],99)
+            self.assertAlmostEqual(now[0],99)
+            self.assertFalse(record['cleanup']['success'])
+            self.assertTrue(record['cleanup']['budget_exhausted'])
+
+    def test_nearer_parent_clips_cleanup_without_extending_it(self):
+        with self.fixture([95],mode='stubborn') as (P,run,now,seen):
+            run.end=97
+            with self.assertRaises(P.CaptureFailure):run.command(['inert'],'late',cap=90)
+            record=run.commands[0]
+            self.assertEqual(record['timeout_seconds'],90)
+            self.assertEqual(seen['parents'],[97])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],97)
+            self.assertAlmostEqual(now[0],97)
+            self.assertEqual(run.end,97)
+            self.assertTrue(all(s[2]<97 for s in seen['signals']))
+
+    def test_expired_parent_cannot_admit_a_signal_or_a_new_cleanup_window(self):
+        with self.fixture([95]) as (P,run,now,seen):
+            run.end=95
+            with self.assertRaises(P.CaptureFailure):run.command(['inert'],'late',cap=90)
+            record=run.commands[0]
+            self.assertEqual(seen['parents'],[95])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],95)
+            self.assertEqual(seen['waits'],[])
+            self.assertEqual(seen['probes'],[])
+            self.assertEqual(seen['signals'],[])
+            self.assertFalse(record['cleanup']['success'])
+            self.assertTrue(record['cleanup']['budget_exhausted'])
+
+    def test_device_cleanup_commands_share_the_first_ninety_second_parent(self):
+        with self.fixture([15,15]) as (P,run,now,seen):
+            for name in ['first','second']:
+                with self.assertRaises(P.CaptureFailure):
+                    run.command(['inert'],name,cap=10,cleanup=True)
+            self.assertEqual(seen['parents'],[90,90])
+            self.assertEqual(run.cleanup_end,90)
+            self.assertEqual(run.end,1800)
+            self.assertEqual([r['timeout_seconds'] for r in run.commands],[10,10])
+            self.assertEqual([r['cleanup_state']['cleanup_deadline_monotonic'] for r in run.commands],[19,34])
+            self.assertTrue(all(r['cleanup']['success'] for r in run.commands))
+
+    def test_late_reaped_leader_is_never_signaled(self):
+        with self.fixture([95],mode='already_reaped') as (P,run,now,seen):
+            with self.assertRaisesRegex(P.CaptureFailure,'completed after work deadline'):
+                run.command(['inert'],'late',cap=90)
+            cleanup=run.commands[0]['cleanup']
+            self.assertEqual(seen['signals'],[])
+            self.assertEqual(seen['waits'],[])
+            self.assertEqual(cleanup['returncode'],0)
+            self.assertTrue(cleanup['leader_reaped'])
+            self.assertEqual(cleanup['group_state'],'absent')
+            self.assertTrue(cleanup['success'])
+
+    def test_permission_error_remains_sticky_and_blocks_signaling(self):
+        with self.fixture([95],mode='permission') as (P,run,now,seen):
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline exceeded'):
+                run.command(['inert'],'late',cap=90)
+            cleanup=run.commands[0]['cleanup']
+            self.assertEqual(seen['signals'],[])
+            self.assertEqual(cleanup['group_state'],'unknown')
+            self.assertFalse(cleanup['success'])
+            self.assertTrue(cleanup['errors'])
+            self.assertTrue(all(e['operation']=='group_probe' and e['errno']==P.errno.EPERM for e in cleanup['errors']))
+            self.assertAlmostEqual(now[0],99)
+
+    def test_synchronous_reap_stall_is_not_reported_as_hard_bounded_or_closed(self):
+        with self.fixture([95],mode='stalled_reap') as (P,run,now,seen):
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline exceeded'):
+                run.command(['inert'],'late',cap=90)
+            record=run.commands[0];cleanup=record['cleanup']
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],99)
+            self.assertEqual(cleanup['elapsed_seconds'],148)
+            self.assertEqual(record['elapsed_seconds'],243)
+            self.assertEqual(seen['signals'],[])
+            self.assertEqual(seen['probes'],[])
+            self.assertEqual(cleanup['group_state'],'unverified')
+            self.assertFalse(cleanup['leader_reaped'])
+            self.assertIsNone(cleanup['returncode'])
+            self.assertFalse(cleanup['success'])
+            self.assertTrue(cleanup['budget_exhausted'])
+
 class ProcessEvidence(unittest.TestCase):
     def test_failed_child_retains_bounded_streams_and_is_reaped(self):
         from rc_acceptance_process import bounded_capture,CaptureFailure

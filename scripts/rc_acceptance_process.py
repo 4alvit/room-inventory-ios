@@ -98,12 +98,17 @@ class CaptureFailure(RuntimeError):
     pass
 
 
-def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None):
-    """One isolated process, bounded pipes/work/cleanup; preserve primary errors."""
+def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None, cleanup_parent_deadline=None):
+    """One isolated process with cooperative deadlines; preserve primary errors.
+
+    An explicit absolute parent deadline lets cleanup retain one four-second
+    window after late work. It never extends that parent or renews cleanup.
+    Other callers retain the original combined work-plus-cleanup deadline.
+    """
     record = {} if receipt is None else receipt
     start = time.monotonic()
     work_end = start + timeout
-    end = work_end + 4
+    end = work_end + 4 if cleanup_parent_deadline is None else cleanup_parent_deadline
     process = None
     selector = selectors.DefaultSelector()
     output = {'stdout': bytearray(), 'stderr': bytearray()}

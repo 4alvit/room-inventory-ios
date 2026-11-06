@@ -1,5 +1,6 @@
 """No network, Xcode or Simulator: adversarial acceptance-input fixtures only."""
 import copy
+from contextlib import contextmanager
 import importlib.util
 import io
 import json
@@ -10,7 +11,7 @@ import stat
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 import zipfile
 
@@ -388,6 +389,81 @@ class OwnedDeviceCleanup(unittest.TestCase):
             self.assertEqual(result['error'],'AcceptanceError: original install failure')
             self.assertEqual(result['cleanup_errors'],['AcceptanceError: initial census failure; final state unproved'])
 
+
+class InstallationWindow(unittest.TestCase):
+    @contextmanager
+    def fixture(self, durations, start=0):
+        # Exercise the real command admission and capture deadlines without
+        # starting simctl; process/pipe cleanup behavior has separate fixtures.
+        import rc_acceptance_process as P
+        now=[0.0];calls=[]
+        def spawn(argv, **kwargs):
+            duration=durations[len(calls)]
+            process=Mock(pid=1000+len(calls),returncode=None)
+            def poll():
+                now[0]+=duration;process.returncode=0;return 0
+            process.poll.side_effect=poll
+            calls.append(list(argv))
+            return process
+        selector=Mock();selector.get_map.return_value={}
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(P.time,'monotonic',side_effect=lambda:now[0]), \
+                patch.object(P.subprocess,'Popen',side_effect=spawn), \
+                patch.object(P.selectors,'DefaultSelector',return_value=selector), \
+                patch.object(P.os,'set_blocking'), \
+                patch.object(P,'kill_owned',return_value={'success':True}):
+            run=R.Run(d,Path(d)/'out');run.device=ID;now[0]=start
+            yield run,now,calls
+
+    def test_aut_can_cross_sixty_seconds_then_runner_keeps_its_cap(self):
+        for duration in [72,89.999]:
+            with self.subTest(duration=duration),self.fixture([duration,1]) as (run,now,calls):
+                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app'],
+                                        ['xcrun','simctl','install',ID,'standalone-runner.app']])
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],[90,60])
+                self.assertTrue(all(c['cleanup_reserved_seconds']==4 for c in run.commands))
+                self.assertEqual(run.end,1800)
+                self.assertIsNone(run.cleanup_end)
+
+    def test_aut_at_or_after_ninety_never_installs_runner_or_retries(self):
+        from rc_acceptance_process import CaptureFailure
+        for duration in [90,91]:
+            with self.subTest(duration=duration),self.fixture([duration]) as (run,now,calls):
+                with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
+                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                self.assertEqual(len(calls),1)
+                self.assertEqual(run.commands[0]['timeout_seconds'],90)
+                self.assertEqual(run.commands[0]['elapsed_seconds'],duration)
+
+    def test_runner_at_sixty_still_fails_without_retry(self):
+        from rc_acceptance_process import CaptureFailure
+        with self.fixture([72,60]) as (run,now,calls):
+            with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
+                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual(len(calls),2)
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[90,60])
+
+    def test_parent_deadline_clips_both_installs_without_renewal(self):
+        with self.fixture([20,5],start=1770) as (run,now,calls):
+            R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[26,6])
+            self.assertEqual(now[0],1795)
+            self.assertEqual(run.end,1800)
+            self.assertIsNone(run.cleanup_end)
+
+    def test_parent_expiry_never_admits_another_install(self):
+        from rc_acceptance_process import CaptureFailure
+        with self.fixture([26],start=1770) as (run,now,calls):
+            with self.assertRaises(CaptureFailure):
+                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual(len(calls),1)
+            self.assertEqual(run.commands[0]['timeout_seconds'],26)
+        with self.fixture([],start=1796) as (run,now,calls):
+            with self.assertRaisesRegex(R.AcceptanceError,'Overall acceptance deadline'):
+                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            self.assertEqual(calls,[])
+            self.assertEqual(run.commands,[])
 
 class ProcessEvidence(unittest.TestCase):
     def test_failed_child_retains_bounded_streams_and_is_reaped(self):

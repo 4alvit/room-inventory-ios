@@ -26,6 +26,7 @@ from urllib.parse import unquote
 from rc_acceptance_process import bounded_capture
 
 MIB = 1024 * 1024
+AUT_INSTALL_SECONDS = 90
 REPO = '4alvit/room-inventory-ios'
 BUNDLE = 'com.alvit.roominventory'
 RUNNER = 'com.alvit.roominventory.rcacceptance.xctrunner'
@@ -242,6 +243,10 @@ def validate_created_device(before, after, device_id, name, device_type):
             and current[0].get('deviceTypeIdentifier')==device_type
             and current[0].get('state')=='Shutdown', 'Created device identity mismatch')
     return current[0]
+
+def install_artifacts(run, aut, runner):
+    run.sim('install',run.device,aut,cap=AUT_INSTALL_SECONDS)
+    run.sim('install',run.device,runner,cap=60)
 
 class Run:
     def __init__(self, root, out):
@@ -512,7 +517,7 @@ def execute(args):
         require(time.monotonic()<boot_end,'Boot budget expired')
         run.sim('bootstatus',run.device,'-b',cap=boot_end-time.monotonic())
         require(time.monotonic()<boot_end,'Boot status returned late')
-        run.sim('install',run.device,aut,cap=60);run.sim('install',run.device,runner,cap=60)
+        install_artifacts(run,aut,runner)
         installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
         save(run.out/'installed-before.json',inventory(installed))
         run.command(['xcodebuild','test-without-building','-xctestrun',plan,'-destination','platform=iOS Simulator,id='+run.device,

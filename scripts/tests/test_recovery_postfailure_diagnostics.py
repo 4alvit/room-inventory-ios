@@ -295,7 +295,7 @@ class PostfailureTests(unittest.TestCase):
                  ({"elapsed_seconds": -1}, {}, "command_order"),
                  ({"start_elapsed": -1}, {}, "command_order"),
                  ({"elapsed_seconds": 101}, {}, "command_order"),
-                 ({}, {"elapsed_seconds": 1800.01}, "command_order"),
+                 ({}, {"elapsed_seconds": 1980.01}, "command_order"),
                  ({"end_deadline_elapsed": 237.882}, {}, "source_interval"),
                  ({"end_deadline_elapsed": 200}, {}, "source_interval"),
                  ({"end_deadline_elapsed": 537.8821}, {}, "source_interval")]
@@ -410,7 +410,7 @@ class AdapterIntegrationTests(HostedCase):
         self.runner.execute.side_effect = lambda: sequence.append("execute") or 124
         def diagnose(discovery, runner, context, anchor, outer_end, *, execute_returned):
             self.assertTrue(execute_returned)
-            self.assertEqual(outer_end, 2200)
+            self.assertEqual(outer_end, 2380)
             self.assertEqual(context["primary_error"]["message"], "original")
             sequence.append("diagnose")
             context["controller_native_log"] = {"status": "UNAVAILABLE"}

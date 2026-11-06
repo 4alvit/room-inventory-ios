@@ -151,7 +151,7 @@ jobs:
     name: Recovery journey
     needs: source-identity
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 48
     permissions:
       contents: read
     env:
@@ -170,8 +170,8 @@ jobs:
           python-version: '3.12'
       - name: Run one bounded hosted recovery journey
         id: recovery
-        timeout-minutes: 36
-        run: python3 scripts/recovery_hosted.py --profile-sha256 49488a5d44145e3eb9bb42c598f905d4ba8bfa1efe9bb6627e5b1202eb0aabba
+        timeout-minutes: 39
+        run: python3 scripts/recovery_hosted.py --profile-sha256 4289c2732781da59c963a8a377198f339fafe0e2beb41509f0018b545f6858d2
       - name: Preserve small recovery failure diagnostic
         if: ${{ always() && steps.recovery.outcome != 'success' }}
         timeout-minutes: 1

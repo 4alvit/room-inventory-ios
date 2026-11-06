@@ -176,7 +176,7 @@ class ExceptionOriginIntegrationTests(fixtures.ControllerCase):
         timer_values = [call.args[1] for call in self.timers.call_args_list]
         # Phase-bound preparation precedes the native cap; successful cleanup
         # still precedes separate accounting and the existing receipt arm.
-        self.assertEqual(timer_values, [116, 116, 86, 0, 90, 90, 90, 90, 90, 90, 0, 120, 120, 0, 1800, 0])
+        self.assertEqual(timer_values, [116, 116, 86, 0, 90, 90, 90, 90, 90, 90, 0, 120, 120, 0, 1980, 0])
         self.assertEqual(self.handlers.call_args_list[-1].args, (signal.SIGALRM, self.previous_handler))
 
     def test_loop_failure_keeps_original_exception_and_owned_cleanup(self):

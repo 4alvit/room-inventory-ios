@@ -599,7 +599,7 @@ class IntegrationTests(HostedCase):
         self.package.assert_called_once()
         self.assertIsNone(self.package.call_args.args[2]["controller_exit_code"])
 
-    def test_controller_is_refused_when_discovery_exit_leaves_less_than_1980_seconds(self):
+    def test_controller_is_refused_when_discovery_exit_leaves_less_than_2160_seconds(self):
         self.fake_execution()
         original_exit = hosted.Alarm.__exit__
         def exit_with_scheduling_delay(alarm, *args):
@@ -613,7 +613,7 @@ class IntegrationTests(HostedCase):
         self.runner_class.assert_not_called()
         self.package.assert_called_once()
 
-    def test_exact_1980_seconds_remaining_allows_controller(self):
+    def test_exact_2160_seconds_remaining_allows_controller(self):
         self.fake_execution()
         original_exit = hosted.Alarm.__exit__
         def exit_at_boundary(alarm, *args):
@@ -1054,7 +1054,7 @@ class CommandTests(HostedCase):
             "start": 187.25, "work_deadline": 216.0, "command_deadline": 220.0,
             "requested_cap": 70, "finish": 215.25})
         self.assertEqual(discovery.alarm.end, 220.0)
-        self.assertEqual(2200.0 - discovery.alarm.end, 1980.0)
+        self.assertEqual(2380.0 - discovery.alarm.end, 2160.0)
         self.cleanup.assert_called_once()
         self.assertEqual(self.popen.call_count, 2)
 

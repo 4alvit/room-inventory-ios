@@ -15,6 +15,21 @@ struct RecoveryOCRReadinessWindow {
     private let end: TimeInterval
     private let validAllowance: Bool
 
+    static let coldKeyboardSetupAllowance: TimeInterval = 90
+
+    /// Only cold keyboard setup uses this allowance; generic callers retain 30s maximum.
+    static func coldKeyboardSetup(
+        clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) -> Self {
+        Self(coldKeyboardSetupClock: clock)
+    }
+
+    private init(coldKeyboardSetupClock clock: @escaping () -> TimeInterval) {
+        self.clock = clock
+        validAllowance = true
+        end = clock() + Self.coldKeyboardSetupAllowance
+    }
+
     init(timeout: TimeInterval = 10,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.clock = clock

@@ -17,9 +17,9 @@
     "workflow_dispatch"
   ],
   "discovery_seconds": 120,
-  "recovery_seconds": 1800,
+  "recovery_seconds": 1980,
   "retention_seconds": 180,
-  "job_timeout_minutes": 45,
+  "job_timeout_minutes": 48,
   "admission_free_bytes": 25769803776,
   "abort_free_bytes": 8589934592,
   "device_cap_bytes": 8589934592,

@@ -2,7 +2,7 @@ import XCTest
 
 /// Only for a newly presented, empty NameEntrySheet, which focuses its own field.
 /// The exact keyboard introduction, readiness, one native input and its echo
-/// use bounded setup (30 seconds), then one ten-second input/echo window.
+/// use bounded cold setup (90 seconds), then one thirty-second input/echo window.
 /// Late introduction handling shares the same input deadline and Continue allowance.
 /// The field itself is never tapped.
 @MainActor

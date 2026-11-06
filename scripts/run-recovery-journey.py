@@ -27,8 +27,8 @@ import time
 import uuid
 
 GIB, MIB = 2**30, 2**20
-OUTER_SECONDS, CLEANUP_SECONDS = 1800, 60
-PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 840, "collect": 240}
+OUTER_SECONDS, CLEANUP_SECONDS = 1980, 60
+PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 1020, "collect": 240}
 ADMISSION_BYTES, ABORT_BYTES = 24 * GIB, 8 * GIB
 DEVICE_CAP, DERIVED_CAP, OUTPUT_CAP = 8 * GIB, 4 * GIB, GIB
 XCRESULT_CAP, ATTACHMENT_CAP, LOG_CAP = 192 * MIB, 128 * MIB, 64 * MIB
@@ -180,7 +180,7 @@ def validate_grant(grant, *, now, script_root):
     try:
         start, end = [dt.datetime.fromisoformat(grant[key].replace("Z", "+00:00")) for key in ("not_before", "expires_at")]
         require(start.tzinfo is not None and end.tzinfo is not None, "Grant times must have timezones", ConfigurationFailure)
-        require(start <= now and (end - now).total_seconds() >= OUTER_SECONDS, "Grant inactive or less than 1800 seconds remain", ConfigurationFailure)
+        require(start <= now and (end - now).total_seconds() >= OUTER_SECONDS, "Grant inactive or less than 1980 seconds remain", ConfigurationFailure)
     except (ValueError, TypeError, AttributeError) as error:
         raise ConfigurationFailure("Invalid grant times") from error
     return grant
@@ -2090,15 +2090,15 @@ class RecoveryRun:
         self.xcresult = self.output / "original.xcresult"
         test_error = None
         try:
-            # The test's explicit 720s allowance stays below Xcode's 780s
-            # maximum and this phase/command's 840s cap. Native launch and
+            # The test's explicit 900s allowance stays below Xcode's 960s
+            # maximum and this phase/command's 1020s cap. Native launch and
             # finalization still share the same absolute phase deadline.
             self.command(["xcodebuild", "test-without-building", "-xctestrun", self.xctestrun,
                           "-destination", "platform=iOS Simulator,id=" + self.device_id,
                           "-resultBundlePath", self.xcresult, "-only-testing:" + CASE,
                           "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                           "-test-timeouts-enabled", "YES",
-                          "-maximum-test-execution-time-allowance", "780"], "ui-test", cap=840,
+                          "-maximum-test-execution-time-allowance", "960"], "ui-test", cap=1020,
                          on_poll=self.collector.poll_bridge, xcresult_producer=True)
         except BaseException as error:
             test_error = error

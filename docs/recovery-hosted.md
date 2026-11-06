@@ -112,7 +112,7 @@ not establish hosted boot performance. The single boot-status command allows up
 to 300 seconds, including its existing four-second process-cleanup reserve, so
 the former 86-second work limit does not preempt a several-minute first boot.
 This allowance remains clipped to the effective 660-second startup deadline;
-the 1,800-second outer deadline, disk limits and mandatory terminal accounting/cleanup remain unchanged.
+the 1,980-second outer deadline, disk limits and mandatory terminal accounting/cleanup remain unchanged.
 The current test and collection reserves are described below.
 This is a bounded cold-start allowance, not evidence that a particular silent
 boot failure was caused by first-boot initialization. A timeout still fails the
@@ -266,11 +266,14 @@ the controller's boot-readiness check.
 
 ## Time and storage
 
-The adapter reserves at most 120 seconds for preflight, 1,800 seconds for the
+The adapter reserves at most 120 seconds for preflight, 1,980 seconds for the
 recovery controller and 180 seconds for retention. The controller keeps
-its own final 60-second cleanup reserve. The adapter step is capped at 36 minutes,
-upload at 5 minutes and the whole job at 45 minutes, leaving room for checkout and
-Python setup. Each boundary fails rather than beginning an unbounded retry.
+its own final 60-second cleanup reserve. The adapter step is capped at 39 minutes,
+upload at 5 minutes and the whole job at 48 minutes, leaving room for checkout and
+Python setup. The 2,280-second adapter envelope leaves 60 seconds inside the
+39-minute step, and the 48-minute job preserves nine minutes beyond that step
+for setup and uploads. The controller grant spans 2,040 seconds, retaining its
+60-second issuance margin. Each boundary fails rather than beginning an unbounded retry.
 
 The single full `xcrun simctl list --json` inventory command has a nominal
 90-second cap: at most 86 seconds of work and the existing four seconds reserved
@@ -298,7 +301,7 @@ seconds, remaining preflight commands share at most 26 seconds of work and four
 of cleanup; at elapsed 113 seconds another command cannot start. A successful
 command or receipt does not renew the discovery window. Before constructing the
 controller the adapter still
-requires at least 1,980 seconds remaining in the overall 2,100-second envelope,
+requires at least 2,160 seconds remaining in the overall 2,280-second envelope,
 preserving the full controller and retention budgets. Slow discovery fails
 instead of borrowing either reserve.
 
@@ -575,13 +578,13 @@ not complete system logging or successful recovery. `native_cause` remains
 causation. Native stack sampling is not included: a delayed PID-based sampler
 whose cleanup cannot be proved could otherwise inspect a reused PID.
 
-The hosted Recovery journey allows 720 seconds for its single XCTest, with a
-780-second native maximum inside the 840-second controller test phase. Device
+The hosted Recovery journey allows 900 seconds for its single XCTest, with a
+960-second native maximum inside the 1,020-second controller test phase. Device
 preparation is clipped to 660 seconds from controller start to reserve the full
 test and 240-second collection phases plus the unchanged 60-second cleanup
-reserve within 1,800 seconds. Each installation/export acknowledgement has one
-60-second monotonic window covering request publication, waiting, evidence and
-validation; late reads and non-completed waiters fail without advancing a barrier.
+reserve within 1,980 seconds. Installation acknowledgement has one
+180-second monotonic window; each export/capture acknowledgement keeps 60 seconds.
+Both cover request publication, waiting, evidence and validation; late reads and non-completed waiters fail without advancing a barrier.
 These bounds are calibrated against observed hosted latency, and do not replace
 full successful Recovery acceptance.
 
@@ -619,7 +622,7 @@ turn an incomplete run into a successful one.
 The optional observation has a single 14-second absolute deadline, including
 preparation, its one ten-second `controller-native-log` command, process cleanup
 and parsing. It starts only when that whole allowance and the original
-180-second retention reserve fit inside the unchanged 2,100-second adapter
+180-second retention reserve fit inside the unchanged 2,280-second adapter
 envelope. No controller or native-command deadline is increased. A missing
 process-group proof, insufficient time, interrupted query or malformed response
 leaves an explicit unavailable summary while preserving the original failure.

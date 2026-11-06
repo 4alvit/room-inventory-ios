@@ -26,6 +26,7 @@ from urllib.parse import unquote
 from rc_acceptance_process import bounded_capture
 
 MIB = 1024 * 1024
+AUT_INSTALL_SECONDS = 90
 REPO = '4alvit/room-inventory-ios'
 BUNDLE = 'com.alvit.roominventory'
 RUNNER = 'com.alvit.roominventory.rcacceptance.xctrunner'
@@ -243,12 +244,17 @@ def validate_created_device(before, after, device_id, name, device_type):
             and current[0].get('state')=='Shutdown', 'Created device identity mismatch')
     return current[0]
 
+def install_artifacts(run, aut, runner):
+    run.sim('install',run.device,aut,cap=AUT_INSTALL_SECONDS)
+    run.sim('install',run.device,runner,cap=60)
+
 class Run:
     def __init__(self, root, out):
         self.root,self.out=Path(root),Path(out)
         self.out.mkdir(parents=True,exist_ok=False)
         (self.out/'operations').mkdir()
         self.end=time.monotonic()+1800; self.commands=[]; self.device=None; self.cleanup_end=None
+        self.owned_device=None; self.device_cleanup=None
     def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False):
         if cleanup and self.cleanup_end is None:self.cleanup_end=time.monotonic()+90
         remaining=(self.cleanup_end if cleanup else self.end)-time.monotonic()
@@ -267,15 +273,62 @@ class Run:
         expected=Path.home()/'Library/Developer/CoreSimulator/Devices'/self.device/'data/Containers'
         require(p.is_absolute() and p.resolve()==p and p.is_relative_to(expected),'Container outside exact device')
         return p
+    def claim_created_device(self, before, after, device_id, name, device_type):
+        created=validate_created_device(before,after,device_id,name,device_type)
+        require(self.device==device_id and str(uuid.UUID(device_id)).upper()==device_id,
+                'Created device differs from owned UUID')
+        ownership={'udid':device_id,'name':name,'runtime':RUNTIME,'device_type':device_type,
+                   'absent_before':True}
+        # Preserve validated identity before any boot or installation side effect.
+        save(self.out/'owned-device.json',ownership)
+        self.owned_device=ownership
+        return created
     def close_device(self):
-        if self.device:
+        if not self.device:return
+        report={'device_uuid':self.device,'state':'unproved','shutdown_requested':False,'errors':[]}
+        self.device_cleanup=report
+        def failed(stage,error):
+            report['errors'].append(stage+': '+type(error).__name__+': '+str(error))
+        try:
+            owned=self.owned_device
+            require(owned is not None and owned['udid']==self.device and owned['absent_before'] is True,
+                    'Validated device ownership missing or changed')
+            require(loads(regular(self.out/'owned-device.json',MIB))==owned,
+                    'Persisted device ownership changed')
+        except Exception as error:
+            failed('ownership',error)
+            raise AcceptanceError('; '.join(report['errors'])) from None
+        def state(devices):
+            matches=[(runtime,d) for runtime,group in devices['devices'].items()
+                     for d in group if d['udid']==owned['udid']]
+            require(len(matches)==1,'Owned device missing or duplicated')
+            runtime,device=matches[0]
+            require(runtime==owned['runtime'] and device.get('name')==owned['name']
+                    and device.get('deviceTypeIdentifier')==owned['device_type'],
+                    'Owned device identity changed')
+            return device.get('state')
+        may_shutdown=True; already_shutdown=False
+        try:
             before=loads(self.sim('list','devices','--json',cleanup=True))
-            known=[d for group in before['devices'].values() for d in group if d['udid']==self.device]
-            require(len(known)==1,'Owned device missing before shutdown')
-            if known[0]['state']!='Shutdown':self.sim('shutdown',self.device,cap=30,cleanup=True)
+        except Exception as error:
+            failed('initial census',error)
+        else:
+            try:already_shutdown=state(before)=='Shutdown'
+            except Exception as error:
+                failed('initial identity',error);may_shutdown=False
+        if may_shutdown and not already_shutdown:
+            # A request may be rejected by Run.command before any child is admitted.
+            report['shutdown_requested']=True
+            try:self.sim('shutdown',owned['udid'],cap=30,cleanup=True)
+            except Exception as error:failed('shutdown',error)
+        # Verification is independent of the initial census and shutdown outcome.
+        # Run.command retains the one cleanup deadline; no stage renews it.
+        try:
             devices=loads(self.sim('list','devices','--json',cleanup=True))
-            matches=[d for group in devices['devices'].values() for d in group if d['udid']==self.device]
-            require(len(matches)==1 and matches[0]['state']=='Shutdown','Owned device shutdown unproved')
+            require(state(devices)=='Shutdown','Owned device shutdown unproved')
+            report['state']='Shutdown'
+        except Exception as error:failed('final verification',error)
+        if report['errors']:raise AcceptanceError('; '.join(report['errors']))
 
 # The publication engine is reused only through this bodyless-GET transport.
 def readonly_client(rc, run, gh_path):
@@ -458,13 +511,13 @@ def execute(args):
         require(str(uuid.UUID(created)).upper()==created,'Invalid created UUID')
         require(created not in {d['udid'] for group in previous_devices['devices'].values() for d in group}, 'Refusing ownership of a pre-existing device')
         run.device=created;result['device_uuid']=run.device
-        result['created_device']=validate_created_device(previous_devices,loads(run.sim('list','devices','--json')),created,name,DEVICES[args.device])
+        result['created_device']=run.claim_created_device(previous_devices,loads(run.sim('list','devices','--json')),created,name,DEVICES[args.device])
         boot_end=time.monotonic()+180
         run.sim('boot',run.device,cap=boot_end-time.monotonic())
         require(time.monotonic()<boot_end,'Boot budget expired')
         run.sim('bootstatus',run.device,'-b',cap=boot_end-time.monotonic())
         require(time.monotonic()<boot_end,'Boot status returned late')
-        run.sim('install',run.device,aut,cap=60);run.sim('install',run.device,runner,cap=60)
+        install_artifacts(run,aut,runner)
         installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
         save(run.out/'installed-before.json',inventory(installed))
         run.command(['xcodebuild','test-without-building','-xctestrun',plan,'-destination','platform=iOS Simulator,id='+run.device,
@@ -521,7 +574,7 @@ def execute(args):
                 shutil.copytree(origin,run.out/'ui-evidence')
                 same_installed(before,inventory(run.out/'ui-evidence',count_limit=128,byte_limit=64*MIB))
             except Exception as e:result['failure_evidence_error']=type(e).__name__+': '+str(e)
-        result['cleanup_errors']=cleanup_errors;result['operations']=run.commands
+        result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
         if cleanup_errors:result['status']='FAILED'
         save(run.out/'result.json',result)
     if primary:raise primary

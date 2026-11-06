@@ -179,9 +179,20 @@ it and checks that it is not running. It performs no inventory or Photos action.
 Only then does it atomically publish one `installation-request.json` in its own
 fresh journey bridge directory. It binds the three run IDs, owned Simulator UDID, expected AUT
 and runner bundle IDs, phase and fresh nonce. Its strict request-hash ACK shares
-one 60-second monotonic deadline starting before request publication with the
+one installation-only 180-second monotonic deadline starting before request publication with the
 wait and acknowledgement validation. Late observations cannot authorize success;
-the XCTest and controller deadlines remain active and are never renewed.
+the six export-capture barriers retain their 60-second windows, and the XCTest
+and controller deadlines remain active and are never renewed.
+
+In run `42174123340`, the host's exclusive installation-ACK evidence was written
+about 81.5 seconds after the request attachment, after the former 60-second window.
+The controller services bridge requests after guarded resource accounting; a
+device census in that UI command took 103.25 seconds. The installation allowance
+therefore includes room for that measured host work and subsequent validation,
+without skipping a census, weakening ACK identity checks or retrying the handshake.
+The retained evidence does not locate the exact runner-ACK publication time or
+attribute the whole delay to one census. The finite allowance is not a guarantee
+of hosted filesystem latency, and it does not extend the 720-second test case.
 
 All runner publications (installation, Photos seed/isolation and numbered export
 requests) write a complete exclusive temporary file in the same directory, then
@@ -193,7 +204,8 @@ This avoids the former hard-link-then-unlink sequence: removing the temporary
 link could change the published inode's link count and `ctime` during a strict
 collector read, even when its bytes, size and modification time were unchanged.
 The collector still rejects every observed identity, content or metadata change
-during a read. Request/acknowledgement hashes, ordering and deadlines are unchanged.
+during a read. Request/acknowledgement hashes, ordering and the phase-specific
+deadlines remain enforced.
 
 The host's existing guarded callback searches only the owned Simulator's
 `data/Containers/Data/Application` directory, with at most 2,000 entries and

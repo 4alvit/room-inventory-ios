@@ -75,7 +75,7 @@ final class RecoveryJourneyBridge {
             "runner_bundle_id": "com.alvit.roominventory.uitests.xctrunner"
         ]
         let requestData = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-        let window = RecoveryAcknowledgementWindow()
+        let window = RecoveryAcknowledgementWindow(phase: .installation)
         try window.perform { try Self.publish(requestData, at: requestURL, nonce: nonce) }
         try window.perform { Self.attach(requestData, name: "recovery-installation-request.json", test: test) }
         try waitForAcknowledgement(request: request, requestData: requestData,

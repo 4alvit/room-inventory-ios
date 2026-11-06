@@ -352,7 +352,7 @@ def native_sequence(run,aut,result):
     run.sim('bootstatus',created,'-b',cap=boot_end-time.monotonic());R.require(time.monotonic()<boot_end,'Boot status returned late')
     run.snapshot('after-boot')
     R.require(run.observations_safe(),'Observation child unproved before install')
-    run.sim('install',created,aut,cap=60)
+    run.sim('install',created,aut,cap=300)
     result['install_completed']=True
 
 

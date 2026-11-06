@@ -208,7 +208,7 @@ class NativeSequence(unittest.TestCase):
         f=self.Fake();result={};D.native_sequence(f,Path('/app'),result)
         commands=[x for x in f.calls if isinstance(x[0],tuple)]
         self.assertEqual([x[0][0] for x in commands],['list','list','create','list','boot','bootstatus','install'])
-        self.assertEqual(commands[-1][1],{'cap':60});self.assertTrue(result['install_completed'])
+        self.assertEqual(commands[-1][1],{'cap':300});self.assertTrue(result['install_completed'])
         self.assertLessEqual(commands[-2][1]['cap'],600)
     def test_install_error_not_retried_and_no_success(self):
         f=self.Fake(True);result={}
@@ -228,7 +228,7 @@ class NativeSequence(unittest.TestCase):
         commands=[x for x in f.calls if isinstance(x[0],tuple)]
         self.assertEqual(commands[-3][1],{'cap':600})
         self.assertEqual(commands[-2][1],{'cap':596})
-        self.assertEqual(commands[-1][1],{'cap':60})
+        self.assertEqual(commands[-1][1],{'cap':300})
         self.assertEqual(sum(x[0][0]=='install' for x in commands),1)
         self.assertTrue(result['install_completed'])
     def test_bootstatus_at_shared_deadline_cannot_authorize_install(self):
@@ -250,6 +250,33 @@ class NativeSequence(unittest.TestCase):
             self.assertEqual(D.HEARTBEAT_RESERVE,D.R.MIB)
             self.assertEqual(D.TELEMETRY_CAP,8*D.R.MIB)
             self.assertEqual(json.loads((out/'heartbeat-result.json').read_text())['samples'],900)
+    def test_install_allowance_clips_to_parent_and_exhaustion_never_reopens_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=D.DiagnosticRun(tmp,Path(tmp)/'out');r.end=400
+            with patch.object(D,'bounded_capture',return_value=b'') as capture:
+                with patch.object(D.time,'monotonic',return_value=50):
+                    r.command(['fixed-install'],'install',cap=300)
+                self.assertEqual(capture.call_args.kwargs['timeout'],300)
+                with patch.object(D.time,'monotonic',return_value=350):
+                    r.command(['fixed-install'],'install',cap=300)
+                self.assertEqual(capture.call_args.kwargs['timeout'],46)
+                with patch.object(D.time,'monotonic',return_value=396):
+                    with self.assertRaisesRegex(D.R.AcceptanceError,'Overall acceptance deadline'):
+                        r.command(['fixed-install'],'install',cap=300)
+                self.assertEqual(capture.call_count,2)
+                self.assertEqual(r.end,400)
+                self.assertIsNone(r.cleanup_end)
+    def test_natural_observer_deadline_is_reported_without_renewal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'rc-install-diagnostic/diagnostic';out.mkdir(parents=True)
+            with patch.dict(os.environ,environment(tmp),clear=True),patch.object(D.time,'monotonic',side_effect=[0,900]),patch.object(D.time,'sleep') as sleep,patch.object(D,'bounded_capture',side_effect=AssertionError('observer must not spawn')):
+                D.heartbeat(out,ID,900)
+            row=json.loads((out/'heartbeat-result.json').read_text())
+            self.assertEqual(row['samples'],0)
+            self.assertEqual(row['stop_reason'],'fixed_deadline')
+            self.assertFalse((out/'observer-stop.json').exists())
+            self.assertEqual((out/'heartbeat.jsonl').read_bytes(),b'')
+            sleep.assert_not_called()
     def test_preexisting_device_never_owned_or_booted(self):
         f=self.Fake();original=f.sim
         def sim(*a,**kw):

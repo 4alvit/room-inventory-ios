@@ -66,9 +66,14 @@ variant follows an earlier diagnostic that expired at 180 seconds and a successf
 main run whose readiness query occurred about 387 seconds after boot began and
 reported the device already booted. The actual readiness time was not recorded;
 600 seconds is an experiment, not a required production timeout. Only timely
-successful bootstatus permits the one install. The 1,800-second work budget,
-60-second install, 90-second cleanup reserve and 35-minute job are unchanged;
-the production installed-RC boot window remains 180 seconds. No sleeps are used to
+successful bootstatus permits the one install. This variant changes only that
+single diagnostic AUT install allowance from 60 to 300 seconds, still clipped to
+the original remaining work budget. The prior controlled run obtained positive
+bootstatus within 167 seconds, then its install and a separate device census timed
+out without output; it established neither a natural installation completion time
+nor an install-specific cause. The 1,800-second work budget, 90-second cleanup
+reserve and 35-minute job are unchanged. Production installed-RC allowances remain
+180 seconds for boot and 60 seconds for install. No sleeps are used to
 settle Simulator state; no retry, reset, runtime removal, remount or signing change
 is performed. The existing list-first cleanup remains observable, including its
 inability to reach shutdown if the first list fails. Issue33's proposed fallback
@@ -80,7 +85,11 @@ load and free-space samples at one-second measurement intervals for at most
 MiB of the unchanged 8 MiB telemetry ceiling is reserved for bounded heartbeat
 rows and final/stop records. Its final join is also
 clipped to any existing cleanup deadline. It launches no subprocesses. Coverage
-is best effort and never renewed: device operations plus overhead can outlast it. The parent owns bounded
+is best effort and never renewed: device operations plus overhead can outlast it.
+A natural `fixed_deadline` heartbeat stop (including the fixed row cap) means
+incomplete observation coverage, not evidence that later work or cleanup completed.
+The final result must retain that limitation even if a native command succeeds.
+The parent owns bounded
 process snapshots, two runtime-registry/mount snapshots and one scoped native-log
 query. These bypass normal raw-stream file persistence; only sanitized fixed
 categories, UUID/build/mount-device correlations and numeric fields are retained.

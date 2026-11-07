@@ -17,6 +17,7 @@ INPUTS = (
     'Acceptance/RC/RCArtifactAcceptanceTests.swift',
     'UITests/Support/FilesNavigationReadiness.swift',
     'scripts/tests/fixtures/rc-backup-selection.swift',
+    'UITests/InventoryRecoveryJourneyTests.swift',
 )
 
 
@@ -25,7 +26,7 @@ def digest(raw):
 
 
 def materialize(destination, inputs):
-    source, helper, fixture = (inputs[path].decode('utf-8') for path in INPUTS)
+    source, helper, fixture, recovery = (inputs[path].decode('utf-8') for path in INPUTS)
     start = '    private func selectBackup('
     end = '\n    private func checkpoint('
     marker = '    // RC_SELECT_BACKUP_BODY'
@@ -92,9 +93,45 @@ def materialize(destination, inputs):
     folder_method = source[folder_first:folder_last]
     folder_substitutions = {'XCUIApplication': 'FixtureApp', 'XCUIElement': 'FixtureFolderElement'}
     folder_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: folder_substitutions[m[0]], folder_method)
+    # Execute the exact query constructors from both native suites. Do not
+    # reconstruct a similar predicate that could hide a call-site regression.
+    picker_sites = [
+        ('rc_folder', source, 'beginFolderCreation', 'folder'),
+        ('rc_filename', source, 'observeExportedFilename', 'export'),
+        ('rc_backup', source, 'selectBackup', 'checkpoint'),
+        ('recovery_export', recovery, 'saveExport', 'enterFilesFolder'),
+        ('recovery_backup', recovery, 'selectRestoreBackup', 'restoreConfirmationButton'),
+    ]
+    picker_expressions = {}
+    for name, native_source, first_name, next_name in picker_sites:
+        begin = '    private func ' + first_name + '('
+        end = '\n    private func ' + next_name + '('
+        if native_source.count(begin) != 1 or native_source.count(end) != 1:
+            raise ValueError('Picker method boundary changed: ' + name)
+        section = native_source[native_source.index(begin):native_source.index(end)]
+        expressions = re.findall(r'^ +(?:let pickers = )?(app\.otherElements\.matching\([^\n]+\))$', section, re.M)
+        if len(expressions) != 1:
+            raise ValueError('Exact picker constructor changed: ' + name)
+        picker_expressions[name] = expressions[0]
+    if recovery.count('let pickers = ') != 2 or source.count('let pickers = ') != 4:
+        raise ValueError('Picker constructor inventory changed')
+    picker_marker = '    // PICKER_CONSTRUCTORS'
+    if fixture.count(picker_marker) != 1:
+        raise ValueError('Picker fixture boundary changed')
+    picker_body = '\n'.join('            ' + value + ',' for value in picker_expressions.values())
+    tail_start = '            try journal(status: "complete")\n        } catch {'
+    tail_end = '\n    }\n\n    private func require('
+    tail_marker = '    // RC_FAILURE_JOURNAL_TAIL'
+    if source.count(tail_start) != 1 or source.count(tail_end) != 1 or fixture.count(tail_marker) != 1:
+        raise ValueError('Journal success/catch boundary changed')
+    journal_tail = source[source.index(tail_start):source.index(tail_end)]
+    if journal_tail.count('FileHandle.standardOutput') != 1:
+        raise ValueError('Failure marker transport changed')
+    journal_body = journal_tail.replace('FileHandle.standardOutput', 'FixtureSampleOutput.standardOutput')
     tests = (fixture.replace(marker, body).replace(echo_marker, echo_body)
              .replace(record_marker, record_body).replace(presentation_marker, presentation_body)
-             .replace(action_marker, action_method).replace(folder_marker, folder_body))
+             .replace(action_marker, action_method).replace(folder_marker, folder_body)
+             .replace(picker_marker, picker_body).replace(tail_marker, journal_body))
     cases = re.findall(r'    func (test\w+)\(', fixture)
     if not cases or len(cases) != len(set(cases)):
         raise ValueError('Expected fixture case identities are missing or ambiguous')
@@ -107,6 +144,10 @@ def materialize(destination, inputs):
     (directory / 'Readiness.swift').write_text(helper)
     (directory / 'RCBackupSelectionRegressionTests.swift').write_text(tests)
     return {
+        'picker_constructor_expressions': picker_expressions,
+        'picker_constructor_sha256': {name: digest(value.encode()) for name, value in picker_expressions.items()},
+        'failure_journal_tail_sha256': digest(journal_tail.encode()),
+        'failure_marker_transport_substitution': 'FileHandle.standardOutput -> FixtureSampleOutput.standardOutput',
         'method_sha256': digest(method.encode()),
         'filename_echo_method_sha256': digest(echo_method.encode()),
         'open_record_method_sha256': digest(record_method.encode()),

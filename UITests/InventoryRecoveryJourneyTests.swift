@@ -570,7 +570,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // navigation state before querying the save action. The remote picker
         // can appear after a short, label-only existence wait has already ended.
         try enterFilesFolder(folder, create: createFolder, app: app)
-        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
         func saveButton(_ observation: FilesNavigationReadiness.SelectionObservation,
                         window: FilesNavigationReadiness) throws -> XCUIElement {
             // Bind every native action to the exact owner seen in this probe.
@@ -914,7 +914,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 print("ROOM_FILES_SELECTION_V2 \(text)")
             }
         }
-        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
         // The identifier has a stable type suffix; the label also contains
         // presentation-dependent time and size. Every live lookup stays scoped
         // to the owner observed with the exact current folder and filename.

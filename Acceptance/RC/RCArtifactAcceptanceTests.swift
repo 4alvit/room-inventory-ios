@@ -102,8 +102,9 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             // is still alive. This marker can only request failure diagnostics.
             try? FileHandle.standardOutput.write(contentsOf:
                 Data(("ROOM_RC_SAMPLE_V1 " + runID + "\n").utf8))
-            try? capture("failure", app)
+            // Persist the original failure before screenshot/AX diagnostics can block.
             try? journal(status: "failed", failure: String(describing: error))
+            try? capture("failure", app)
             throw error
         }
     }
@@ -279,7 +280,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
 
     private func beginFolderCreation(_ app: XCUIApplication, isPad: Bool) throws {
         let action = FilesNavigationReadiness(timeout: 10)
-        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
         try performBoundTap(action, matchingElements: { () throws -> [XCUIElement] in
             let owners = try action.perform { pickers.allElementsBoundByAccessibilityElement }
             guard owners.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
@@ -444,7 +445,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             stage = "resolving_picker"
             readsStarted += 1
             let pickers = try echo.perform {
-                app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+                app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
                     .allElementsBoundByAccessibilityElement
             }
             guard pickers.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
@@ -518,7 +519,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
     private func selectBackup(_ app: XCUIApplication) throws {
         try select("Restore a backup", app); try folder(false, app)
         let w = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
-        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        let pickers = app.otherElements.matching(NSPredicate(format: "identifier == %@", FilesNavigationReadiness.pickerIdentifier))
         let filename = "backup-" + runID + ".roominventory"
         var boundFile: XCUIElement?
         func file() throws -> XCUIElement {

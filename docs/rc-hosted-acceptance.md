@@ -337,3 +337,22 @@ boundaries and records `folder_creation_method_sha256`. It exercises the actual
 body against owned/wrong-owner, sidebar, ambiguous, unready, stale-identity,
 cancellation, and late-return transports. The existing PR harness job invokes
 this entrypoint; no extra workflow or native producer is introduced.
+
+
+### Exact picker identity and failure journal ordering
+
+RC folder creation, filename observation and backup selection query the Files
+picker with the exact `identifier == "Browse View (Picker)"` predicate. Recovery
+uses the same exact predicate at its export and restore call sites. This excludes
+label, value and placeholder aliases while retaining the existing unique-owner,
+snapshot, readiness and deadline checks. No alert/title queries or time limits
+change. The existing host command extracts all five actual constructor expressions
+and checks exact identity, alias exclusion and missing/duplicate results.
+
+The RC failure handler attempts to persist the failed journey before screenshot
+and AX capture. A slow or failed diagnostic capture therefore cannot prevent an
+already successful journal write. Both writes remain best effort; a journal error
+does not prevent capture, and the original failure is rethrown. The actual extracted
+success/catch tail is exercised with capture delay/errors and a journal error;
+successful completion still writes only the complete journal. This improves failure
+evidence and does not establish the cause of any previous restore-alert failure.

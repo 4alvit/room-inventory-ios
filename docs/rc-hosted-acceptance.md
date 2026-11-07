@@ -90,6 +90,20 @@ PID, process start time and executable path before and after sampling. Ambiguous
 missing or changed identity leaves the diagnostic incomplete. These observations
 are not an atomic process-identity guarantee, and PID equality alone is insufficient.
 
+After the authoritative installed-app inventory and before starting Xcode, the
+controller prepares the owned-device record, canonical executable path, executable
+file identity and installed-before inventory digest. Failure-time collection
+compares the live controller ownership and a fresh no-follow executable file
+identity with this context; it does not repeat JSON reads or path resolution.
+The two live process reads still establish PID, start time and exact executable
+path around sampling. Unavailable preparation leaves diagnostics incomplete and
+does not prevent the ordinary test. Passing runs create no diagnostic directory
+or process. Preparation uses the original parent deadline; filesystem calls and
+identity checks are not guaranteed to return promptly. In run `42351855857`, about
+5.06 seconds elapsed before the first process read, leaving it a 0.94-second work
+grant. Individual filesystem timings were not recorded, so this change reduces
+failure-path work without claiming to explain or repair the Room-row idle failure.
+
 The fixed `sample` command observes one second at ten-millisecond intervals,
 with a two-MiB captured-stream cap. Its two process reads and sample share at most
 ten seconds, including owned-child cleanup, clipped to the original 720-second

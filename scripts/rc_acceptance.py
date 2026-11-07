@@ -338,6 +338,29 @@ class FailureSample:
         self.run,self.installed=run,Path(installed)
         self.marker=('ROOM_RC_SAMPLE_V1 '+run_id).encode('ascii')
         self.pending=b'';self.discarding=False;self.seen=False;self.report=None
+        self.prepared=None
+        started=time.monotonic()
+        try:
+            require(started<run.end,'Sample preparation parent deadline')
+            owned=run.owned_device
+            require(owned is not None and owned['udid']==run.device and owned['absent_before'] is True
+                    and loads(regular(run.out/'owned-device.json',MIB))==owned,'Sample device ownership changed')
+            root=Path.home()/'Library/Developer/CoreSimulator/Devices'/run.device/'data/Containers/Bundle/Application'
+            executable=self.installed/'RoomInventory'
+            require(self.installed.is_absolute() and self.installed.resolve()==self.installed
+                    and self.installed.is_relative_to(root),'Sample executable outside verified installed app')
+            identity=executable.lstat()
+            require(stat.S_ISREG(identity.st_mode),'Sample executable is not a regular file')
+            installed_before=digest(regular(run.out/'installed-before.json',16*MIB))
+            require(time.monotonic()<run.end,'Sample preparation parent deadline')
+            self.prepared=(dict(owned),executable,self.file_identity(identity),installed_before)
+        except CancellationRequested:raise
+        except Exception:pass  # Unavailable diagnostics never prevent the ordinary test.
+        self.preparation_seconds=time.monotonic()-started
+
+    @staticmethod
+    def file_identity(value):
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
 
     def feed(self, chunk, work_end):
         if self.seen:return
@@ -357,19 +380,17 @@ class FailureSample:
     def collect(self, work_end):
         run=self.run;started=time.monotonic();deadline=min(work_end,run.end,started+10)
         self.report={'status':'partial','allowance_seconds':10,'operations':[],
+                     'preparation_seconds':self.preparation_seconds,
                      'measurement':'sample transiently suspends threads; this failed run cannot become acceptance.'}
         if deadline-started<=4:
             self.report['status']='skipped_no_parent_time';return
         out=run.out/'failure-diagnostics'/'live-aut';out.mkdir(parents=True,exist_ok=False)
         try:
-            owned=run.owned_device
-            require(owned is not None and owned['udid']==run.device and owned['absent_before'] is True
-                    and loads(regular(run.out/'owned-device.json',MIB))==owned,'Sample device ownership changed')
-            root=Path.home()/'Library/Developer/CoreSimulator/Devices'/run.device/'data/Containers/Bundle/Application'
-            executable=self.installed/'RoomInventory'
-            require(self.installed.is_absolute() and self.installed.resolve()==self.installed
-                    and self.installed.is_relative_to(root) and not executable.is_symlink()
-                    and executable.is_file(),'Sample executable outside verified installed app')
+            require(self.prepared is not None,'Sample context unavailable')
+            owned,executable,identity,installed_before=self.prepared
+            require(run.owned_device==owned and run.device==owned['udid'],'Sample device ownership changed')
+            require(self.file_identity(executable.lstat())==identity,'Sample executable identity changed')
+            self.report['installed_before_sha256']=installed_before
 
             def capture(name,argv,cap,limit,*,keep=False):
                 remaining=deadline-time.monotonic()

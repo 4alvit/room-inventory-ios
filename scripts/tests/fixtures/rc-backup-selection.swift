@@ -9,6 +9,41 @@ private final class SelectionFixture {
     static var current: SelectionFixture!
     let runID = "D13A8615-B837-4BC1-A532-8D0196B26F6F"
     var now = 0.0
+    var realClock = false
+    var readinessDepth = 0
+    var nativeTapReadinessDepths: [Int] = []
+    var afterReservation: (() -> Void)?
+    var folderMode = false
+    var folderWindows: [TimeInterval] = []
+    var folderQueries: [String] = []
+    var folderPickerIDs = [701]
+    var folderBarsByPicker = [701: [901]]
+    var folderBarIdentifiers = [901: "FullDocumentManagerViewControllerNavigationBar"]
+    // Direct New Folder is a positive semantic hypothesis, not an extracted AX
+    // identity. The retained iPad counterexample is the sidebar More action.
+    var folderControls: [Int: [FolderControl]] = [
+        701: [.init(id: 801, identifier: "New Folder", label: "New Folder"),
+              .init(id: 802, identifier: "SidebarMore", label: "More")],
+        901: [.init(id: 803, identifier: "OverflowBarButtonItem", label: "More"),
+              .init(id: 805, identifier: "SidebarMore", label: "More")]
+    ]
+    var folderDisabled = Set<Int>()
+    var folderUnhittable = Set<Int>()
+    var folderMenuMatches = [804]
+    var folderMenuOpen = false
+    var folderTapSeconds = 0.0
+    var beforeFolderQuery: ((String) -> Void)?
+    var beforeFolderEnabled: ((Int) -> Void)?
+    var beforeFolderHittable: ((Int) -> Void)?
+    var beforeFolderTap: ((Int) -> Void)?
+    struct FolderControl {
+        let id: Int
+        let identifier: String
+        let label: String
+    }
+    func folderQuery(_ scope: String) {
+        folderQueries.append(scope); beforeFolderQuery?(scope)
+    }
     var presentationMode = false
     var presentationWindows: [TimeInterval] = []
     var shareMatches = [401]
@@ -99,6 +134,8 @@ private final class FixtureElement {
     let id: Int
     init(_ f: SelectionFixture, _ scope: String, _ id: Int = 0) { self.f=f; self.scope=scope; self.id=id }
     var otherElements: FixtureQuery { .init(f, "owner") }
+    var buttons: FixtureFolderQuery { .init(f, "controls", parent: id) }
+    var navigationBars: FixtureFolderQuery { .init(f, "bars", parent: id) }
     var collectionViews: FixtureQuery { .init(f, "list") }
     var cells: FixtureQuery { .init(f, "file") }
     var textFields: FixtureQuery { .init(f, "filename") }
@@ -138,6 +175,10 @@ private final class FixtureQuery {
     var allElementsBoundByAccessibilityElement: [FixtureElement] {
         if scope == "picker" {
             XCTAssertEqual(identifier, Readiness.pickerIdentifier)
+            if f.folderMode {
+                f.folderQuery("picker")
+                return f.folderPickerIDs.map { FixtureElement(f, scope, $0) }
+            }
             f.filenameQueries += 1; f.beforeFilenameQuery?()
             return f.filenamePickerMatches.map { FixtureElement(f, scope, $0) }
         }
@@ -147,6 +188,55 @@ private final class FixtureQuery {
         }
         f.resolves += 1; f.beforeResolve?()
         return f.matches.map { FixtureElement(f, scope, $0) }
+    }
+}
+
+@MainActor
+private final class FixtureFolderElement {
+    let f: SelectionFixture
+    let id: Int
+    let identifier: String
+    let label: String
+    init(_ f: SelectionFixture, _ id: Int, identifier: String = "", label: String = "") {
+        self.f=f; self.id=id; self.identifier=identifier; self.label=label
+    }
+    var buttons: FixtureFolderQuery { .init(f, "controls", parent: id) }
+    var isEnabled: Bool {
+        f.gates.append("enabled:\(id)"); f.beforeFolderEnabled?(id)
+        return !f.folderDisabled.contains(id)
+    }
+    var isHittable: Bool {
+        f.gates.append("hittable:\(id)"); f.beforeFolderHittable?(id)
+        return !f.folderUnhittable.contains(id)
+    }
+    func tap() {
+        f.nativeTapReadinessDepths.append(f.readinessDepth); f.taps.append(id)
+        if identifier == "OverflowBarButtonItem" && label == "More" { f.folderMenuOpen=true }
+        f.now += f.folderTapSeconds; f.beforeFolderTap?(id)
+    }
+}
+
+@MainActor
+private final class FixtureFolderQuery {
+    let f: SelectionFixture
+    let scope: String
+    let parent: Int
+    var identifier: String?
+    var predicate: NSPredicate?
+    init(_ f: SelectionFixture, _ scope: String, parent: Int) { self.f=f; self.scope=scope; self.parent=parent }
+    func matching(identifier: String) -> FixtureFolderQuery { self.identifier=identifier; return self }
+    func matching(_ predicate: NSPredicate) -> FixtureFolderQuery { self.predicate=predicate; return self }
+    var allElementsBoundByAccessibilityElement: [FixtureFolderElement] {
+        f.folderQuery("\(scope):\(parent)")
+        if scope == "bars" {
+            return (f.folderBarsByPicker[parent] ?? []).filter { f.folderBarIdentifiers[$0] == identifier }
+                .map { FixtureFolderElement(f, $0) }
+        }
+        XCTAssertEqual(scope, "controls")
+        return (f.folderControls[parent] ?? []).filter { item in
+            if let identifier { return item.identifier == identifier || item.label == identifier }
+            return predicate?.evaluate(with: ["identifier": item.identifier, "label": item.label]) == true
+        }.map { FixtureFolderElement(f, $0.id, identifier: $0.identifier, label: $0.label) }
     }
 }
 
@@ -166,7 +256,7 @@ private final class FixtureRecordElement {
     }
     // Matches XCUIElement.tap's nonthrowing Swift signature. The transport
     // adapter below can inject a native action error after this single event.
-    func tap() { f.taps.append(id); f.now += f.recordTapSeconds; f.beforeRecordTap?() }
+    func tap() { f.nativeTapReadinessDepths.append(f.readinessDepth); f.taps.append(id); f.now += f.recordTapSeconds; f.beforeRecordTap?() }
 }
 
 @MainActor
@@ -199,14 +289,20 @@ private final class FixturePresentationElement {
     let id: Int
     init(_ f: SelectionFixture, _ scope: String, _ id: Int) { self.f=f; self.scope=scope; self.id=id }
     var isEnabled: Bool {
+        if scope == "folder-menu" { f.gates.append("enabled:\(id)"); f.beforeFolderEnabled?(id); return !f.folderDisabled.contains(id) }
         if scope == "save" { f.beforeSaveEnabled?(); return f.saveEnabled }
         f.beforeEnabled?(); return f.shareEnabled
     }
     var isHittable: Bool {
+        if scope == "folder-menu" { f.gates.append("hittable:\(id)"); f.beforeFolderHittable?(id); return !f.folderUnhittable.contains(id) }
         if scope == "save" { f.beforeSaveHittable?(); return f.saveHittable }
         f.beforeHittable?(); return f.shareHittable
     }
-    func tap() { f.taps.append(id); f.now += f.shareTapSeconds; f.beforeShareTap?() }
+    func tap() {
+        f.nativeTapReadinessDepths.append(f.readinessDepth); f.taps.append(id)
+        if scope == "folder-menu" { f.now += f.folderTapSeconds; f.beforeFolderTap?(id) }
+        else { f.now += f.shareTapSeconds; f.beforeShareTap?() }
+    }
 }
 
 @MainActor
@@ -218,6 +314,10 @@ private final class FixturePresentationQuery {
     init(_ f: SelectionFixture, _ scope: String) { self.f=f; self.scope=scope }
     func matching(_ predicate: NSPredicate) -> FixturePresentationQuery { self.predicate=predicate; return self }
     var allElementsBoundByAccessibilityElement: [FixturePresentationElement] {
+        if scope == "folder-menu" {
+            XCTAssertEqual(identifier, "New Folder"); f.folderQuery("menu")
+            return (f.folderMenuOpen ? f.folderMenuMatches : []).map { FixturePresentationElement(f, scope, $0) }
+        }
         XCTAssertEqual(scope, "share")
         f.shareResolves += 1; f.beforeShareResolve?()
         guard predicate?.evaluate(with: ["identifier": f.shareIdentifier, "label": f.shareLabel]) == true else { return [] }
@@ -237,7 +337,7 @@ private final class FixtureButtonQueries {
     init(_ f: SelectionFixture) { self.f=f }
     func matching(_ predicate: NSPredicate) -> FixtureRecordQuery { FixtureRecordQuery(f, "record").matching(predicate) }
     func matching(identifier: String) -> FixturePresentationQuery {
-        let q=FixturePresentationQuery(f, "save"); q.identifier=identifier; return q
+        let q=FixturePresentationQuery(f, f.folderMode ? "folder-menu" : "save"); q.identifier=identifier; return q
     }
 }
 
@@ -261,23 +361,39 @@ private final class FilesNavigationReadiness {
     typealias SelectionTarget = Readiness.SelectionTarget
     static var systemProviderAllowance: TimeInterval { Readiness.systemProviderAllowance }
     static var pickerIdentifier: String { Readiness.pickerIdentifier }
+    static var navigationBarIdentifier: String { Readiness.navigationBarIdentifier }
     let native: Readiness
     let f: SelectionFixture
     init(timeout: TimeInterval) {
         f=SelectionFixture.current!
         let clock=f
-        native=Readiness(timeout: timeout, clock: { clock.now })
+        native=Readiness(timeout: timeout, clock: { clock.realClock ? ProcessInfo.processInfo.systemUptime : clock.now })
         f.activeWindow=native; if timeout == 20 { f.recordWindows.append(timeout) }
         if f.presentationMode { f.presentationWindows.append(timeout) }
+        if f.folderMode { f.folderWindows.append(timeout) }
     }
-    func perform<T>(_ op: () throws -> T) throws -> T { try native.perform(op) }
+    func perform<T>(_ op: () throws -> T) throws -> T {
+        try native.perform {
+            let before=self.f.taps.count
+            let value=try op()
+            if self.f.taps.count > before, let error=self.f.tapError { self.f.now=30; throw error }
+            return value
+        }
+    }
     func waitAndTapBoundElement<Element>(matchingElements: @escaping () throws -> [Element],
         enabled: @escaping (Element) throws -> Bool, hittable: @escaping (Element) throws -> Bool,
         tap: @escaping (Element) throws -> Void) throws {
-        try native.waitAndTapBoundElement(matchingElements: matchingElements, enabled: enabled, hittable: hittable, tap: { element in
-            try tap(element)
-            if let error = self.f.tapError { self.f.now=30; throw error }
-        })
+        f.readinessDepth += 1
+        do {
+            try native.waitAndTapBoundElement(matchingElements: matchingElements, enabled: enabled, hittable: hittable, tap: { element in
+                let before=self.f.taps.count
+                try tap(element)
+                // Old-path A/B transport only: a reservation is not a native tap.
+                if self.f.taps.count > before, let error=self.f.tapError { self.f.now=30; throw error }
+            })
+        } catch { f.readinessDepth -= 1; throw error }
+        f.readinessDepth -= 1
+        f.afterReservation?()
     }
     func waitForTargetFolder(titleCount: @escaping () throws -> Int,
         enabled: @escaping () throws -> Bool, hittable: @escaping () throws -> Bool) throws -> Bool {
@@ -319,6 +435,14 @@ private final class RCBody {
     // RC_FILENAME_ECHO_BODY
     // RC_OPEN_RECORD_BODY
     // RC_EXPORT_DESTINATION_BODY
+    // RC_BOUND_ACTION_BODY
+    // RC_FOLDER_CREATION_BODY
+    func create(_ f: SelectionFixture, pad: Bool) throws { f.folderMode=true; try beginFolderCreation(FixtureApp(f), isPad: pad) }
+    func bound(_ f: SelectionFixture, _ window: FilesNavigationReadiness, action: @escaping (Int) throws -> Void) throws {
+        try performBoundTap(window, matchingElements: { f.recordResolves += 1; return f.recordMatches },
+            enabled: { _ in f.beforeEnabled?(); return true }, hittable: { _ in f.beforeHittable?(); return true },
+            tap: { identity in f.nativeTapReadinessDepths.append(f.readinessDepth); f.taps.append(identity); try action(identity) })
+    }
     func present(_ f: SelectionFixture) throws { f.presentationMode=true; try openExportDestination(FixtureApp(f)) }
     func open(_ f: SelectionFixture) throws { try openRecord(f.recordName, FixtureApp(f)) }
     func echo(_ f: SelectionFixture, _ expected: String) throws -> String {
@@ -687,6 +811,277 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
             XCTAssertThrowsError(try RCBody(f).present(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
             XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.saveQueries, 0)
         }
+    }
+
+    @MainActor
+    func testRecordAndShareNativeActionsOccurAfterReadinessWaiterReturns() throws {
+        let record=fixture(); try RCBody(record).open(record)
+        XCTAssertEqual(record.nativeTapReadinessDepths, [0]); XCTAssertEqual(record.recordResolves, 1)
+        let share=fixture(); try RCBody(share).present(share)
+        XCTAssertEqual(share.nativeTapReadinessDepths, [0]); XCTAssertEqual(share.shareResolves, 1)
+    }
+    @MainActor
+    func testCancellationBetweenReservationAndNativeActionNeverTaps() {
+        for share in [false,true] {
+            let f=fixture(); f.afterReservation={f.activeWindow?.cancel()}
+            XCTAssertThrowsError(try share ? RCBody(f).present(f) : RCBody(f).open(f)) {
+                XCTAssertEqual($0 as? Readiness.Failure, .cancelled)
+            }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.navigationQueries+f.saveQueries, 0)
+        }
+    }
+    @MainActor
+    func testDeadlineBetweenReservationAndNativeActionNeverTaps() {
+        for share in [false,true] {
+            let f=fixture(); f.afterReservation={f.now=share ? 30 : 20}
+            XCTAssertThrowsError(try share ? RCBody(f).present(f) : RCBody(f).open(f)) {
+                XCTAssertEqual($0 as? Readiness.Failure, .expired)
+            }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.navigationQueries+f.saveQueries, 0)
+        }
+    }
+    @MainActor
+    func testReservationRetainsSameIdentityWithoutAnotherResolution() throws {
+        let f=fixture(); f.afterReservation={f.recordMatches=[999]}
+        try RCBody(f).open(f)
+        XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.recordResolves, 1)
+    }
+    @MainActor
+    func testReentryAtReservationOrNativeActionCannotConsumeAnotherAction() {
+        for beforeAction in [true,false] {
+            let f=fixture(); let window=FilesNavigationReadiness(timeout: 20); let body=RCBody(f)
+            let again: () -> Void = {
+                do {
+                    try body.bound(f, window, action: { _ in XCTFail("second native action") })
+                    XCTFail("reentry must fail")
+                } catch { XCTAssertEqual(error as? Readiness.Failure, .selectionAlreadyStarted) }
+            }
+            if beforeAction { f.afterReservation=again }
+            XCTAssertThrowsError(try body.bound(f, window, action: { _ in if !beforeAction { again() } })) {
+                XCTAssertEqual($0 as? Readiness.Failure, .selectionAlreadyStarted)
+            }
+            XCTAssertEqual(f.recordResolves, 1); XCTAssertEqual(f.taps.count, beforeAction ? 0 : 1)
+        }
+    }
+    @MainActor
+    func testCompletedNativeActionCannotBeRepeatedUsingSameWindow() throws {
+        let f=fixture(); let window=FilesNavigationReadiness(timeout: 20); let body=RCBody(f)
+        try body.bound(f, window, action: { _ in })
+        XCTAssertThrowsError(try body.bound(f, window, action: { _ in XCTFail("second native action") })) {
+            XCTAssertEqual($0 as? Readiness.Failure, .selectionAlreadyStarted)
+        }
+        XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.recordResolves, 1)
+    }
+    @MainActor
+    func testOutsideActionPreservesThrownTransportErrorWhenLateAndCancelled() {
+        enum TransportFailure: Error { case expected }
+        let f=fixture(); let window=FilesNavigationReadiness(timeout: 20)
+        XCTAssertThrowsError(try RCBody(f).bound(f, window, action: { _ in
+            f.now=20; window.native.cancel(); throw TransportFailure.expected
+        })) { XCTAssertTrue($0 is TransportFailure) }
+        XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.nativeTapReadinessDepths, [0])
+    }
+    @MainActor
+    func testActualNestedWaiterABPreservesLateFailureWithoutArtificialInterruption() {
+        // Real host XCTest waiters with a0.25s outer and1s completion signal.
+        // The wide separation avoids racing XCTest's watchdog scheduling.
+        for outside in [false,true] {
+            let f=fixture(); f.realClock=true
+            let window=FilesNavigationReadiness(timeout: 0.25)
+            let began=ProcessInfo.processInfo.systemUptime
+            var nested: XCTWaiter.Result?
+            let action: (Int) throws -> Void = { _ in
+                let completed=XCTestExpectation(description: "surrogate native synchronization")
+                let timer=Timer(timeInterval: 1, repeats: false) { _ in completed.fulfill() }
+                RunLoop.main.add(timer, forMode: .default)
+                defer { timer.invalidate() }
+                nested=XCTWaiter.wait(for: [completed], timeout: 2)
+            }
+            if outside {
+                XCTAssertThrowsError(try RCBody(f).bound(f, window, action: action)) {
+                    XCTAssertEqual($0 as? Readiness.Failure, .expired)
+                }
+                XCTAssertEqual(nested, .completed); XCTAssertEqual(f.nativeTapReadinessDepths, [0])
+            } else {
+                XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: { [201] },
+                    enabled: { _ in true }, hittable: { _ in true }, tap: { id in
+                        f.nativeTapReadinessDepths.append(f.readinessDepth); f.taps.append(id); try action(id)
+                    })) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+                XCTAssertEqual(nested, .interrupted); XCTAssertEqual(f.nativeTapReadinessDepths, [1])
+            }
+            print("ROOM_RC_WAITER_AB outside=\(outside) nested=\(nested?.rawValue ?? -1) elapsed=\(ProcessInfo.processInfo.systemUptime-began) taps=\(f.taps.count)")
+            XCTAssertEqual(f.taps, [201])
+        }
+    }
+    @MainActor
+    func testOutsideNativeNestedWaiterCompletesWithinOriginalWindow() throws {
+        let f=fixture(); f.realClock=true
+        let window=FilesNavigationReadiness(timeout: 1)
+        var nested: XCTWaiter.Result?
+        try RCBody(f).bound(f, window, action: { _ in
+            let completed=XCTestExpectation(description: "timely native synchronization")
+            let timer=Timer(timeInterval: 0.01, repeats: false) { _ in completed.fulfill() }
+            RunLoop.main.add(timer, forMode: .default)
+            defer { timer.invalidate() }
+            nested=XCTWaiter.wait(for: [completed], timeout: 0.5)
+        })
+        XCTAssertEqual(nested, .completed); XCTAssertEqual(f.nativeTapReadinessDepths, [0]); XCTAssertEqual(f.taps, [201])
+        XCTAssertGreaterThan(try window.native.remaining(), 0)
+    }
+
+    @MainActor
+    func testPadFolderCreationUsesDirectOwnedActionAndNeverSidebarMore() throws {
+        let f=fixture(); try RCBody(f).create(f, pad: true)
+        XCTAssertEqual(f.taps, [801]); XCTAssertEqual(f.nativeTapReadinessDepths, [0])
+        XCTAssertEqual(f.folderQueries, ["picker", "controls:701"])
+        XCTAssertEqual(f.folderWindows, [10]); XCTAssertFalse(f.folderMenuOpen)
+    }
+    @MainActor
+    func testPhoneFolderCreationUsesContentOverflowThenExactMenu() throws {
+        let f=fixture(); try RCBody(f).create(f, pad: false)
+        XCTAssertEqual(f.taps, [803,804]); XCTAssertEqual(f.nativeTapReadinessDepths, [0,0])
+        XCTAssertEqual(f.folderQueries, ["picker", "bars:701", "controls:901", "menu"])
+        XCTAssertEqual(f.folderWindows, [10,10])
+    }
+    @MainActor
+    func testPadMissingDirectActionNeverFallsBackToGlobalOrSidebarControls() {
+        let f=fixture(); f.folderControls[701]?.removeFirst(); f.folderMenuOpen=true
+        f.beforeFolderQuery={ _ in f.now += 2 }
+        XCTAssertThrowsError(try RCBody(f).create(f, pad: true)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+        XCTAssertTrue(f.taps.isEmpty); XCTAssertFalse(f.folderQueries.contains("menu")); XCTAssertEqual(f.folderWindows,[10])
+    }
+    @MainActor
+    func testPadUnreadyDirectActionNeverFallsBackToMore() {
+        for disabled in [true,false] {
+            let f=fixture(); if disabled { f.folderDisabled=[801] } else { f.folderUnhittable=[801] }
+            f.beforeFolderQuery={ _ in f.now += 2 }
+            XCTAssertThrowsError(try RCBody(f).create(f, pad: true)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertFalse(f.folderQueries.contains("menu")); XCTAssertFalse(f.folderMenuOpen)
+        }
+    }
+    @MainActor
+    func testFolderCreationRejectsDuplicatePickersAndDirectActions() {
+        for owner in [true,false] {
+            let f=fixture()
+            if owner { f.folderPickerIDs=[701,702] }
+            else { f.folderControls[701]?.append(.init(id: 806,identifier: "New Folder",label: "New Folder")) }
+            XCTAssertThrowsError(try RCBody(f).create(f, pad: true)) { XCTAssertEqual($0 as? Readiness.Failure, .invalidSelectionCount) }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertTrue(f.gates.isEmpty)
+        }
+    }
+    @MainActor
+    func testFolderCreationCannotUseActionFromAnotherPicker() {
+        let f=fixture(); f.folderPickerIDs=[702]; f.beforeFolderQuery={ _ in f.now += 2 }
+        XCTAssertThrowsError(try RCBody(f).create(f, pad: true)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+        XCTAssertTrue(f.taps.isEmpty); XCTAssertFalse(f.folderQueries.contains("controls:701"))
+    }
+    @MainActor
+    func testPhoneWrongBarOrSidebarMoreCannotAuthorizeMenu() {
+        for wrongBar in [true,false] {
+            let f=fixture()
+            if wrongBar { f.folderBarIdentifiers[901]="SidebarNavigationBar" }
+            else { f.folderControls[901]?.removeFirst() }
+            f.beforeFolderQuery={ _ in f.now += 1 }
+            XCTAssertThrowsError(try RCBody(f).create(f, pad: false)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertFalse(f.folderQueries.contains("menu")); XCTAssertEqual(f.folderWindows,[10])
+        }
+    }
+    @MainActor
+    func testPhoneRequiresBothExactOverflowIdentifierAndLabel() {
+        for wrongIdentifier in [true,false] {
+            let f=fixture()
+            f.folderControls[901]=[.init(id: 803,identifier: wrongIdentifier ? "Other" : "OverflowBarButtonItem",
+                                        label: wrongIdentifier ? "More" : "More Actions")]
+            f.beforeFolderQuery={ _ in f.now += 1 }
+            XCTAssertThrowsError(try RCBody(f).create(f, pad: false)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertFalse(f.folderMenuOpen)
+        }
+    }
+    @MainActor
+    func testPhoneDuplicateContentBarsOrOverflowActionsFailClosed() {
+        for bar in [true,false] {
+            let f=fixture()
+            if bar { f.folderBarsByPicker[701]=[901,902];f.folderBarIdentifiers[902]=Readiness.navigationBarIdentifier }
+            else { f.folderControls[901]?.append(.init(id:806,identifier:"OverflowBarButtonItem",label:"More")) }
+            XCTAssertThrowsError(try RCBody(f).create(f,pad:false)) { XCTAssertEqual($0 as? Readiness.Failure,.invalidSelectionCount) }
+            XCTAssertTrue(f.taps.isEmpty);XCTAssertFalse(f.folderQueries.contains("menu"))
+        }
+    }
+    @MainActor
+    func testFolderScopeQueriesReturningAtDeadlineNeverReachLiveGate() {
+        for scope in ["picker","controls:701","bars:701","controls:901"] {
+            let f=fixture();f.beforeFolderQuery={ if $0==scope { f.now=10 } }
+            XCTAssertThrowsError(try RCBody(f).create(f,pad:scope=="picker" || scope=="controls:701")) {
+                XCTAssertEqual($0 as? Readiness.Failure,.expired)
+            }
+            XCTAssertTrue(f.taps.isEmpty);XCTAssertTrue(f.gates.isEmpty)
+        }
+    }
+    @MainActor
+    func testFolderLiveGateReturningAtDeadlineNeverTaps() {
+        for enabled in [true,false] {
+            let f=fixture()
+            if enabled { f.beforeFolderEnabled={ _ in f.now=10 } }
+            else { f.beforeFolderHittable={ _ in f.now=10 } }
+            XCTAssertThrowsError(try RCBody(f).create(f,pad:true)) { XCTAssertEqual($0 as? Readiness.Failure,.expired) }
+            XCTAssertTrue(f.taps.isEmpty)
+        }
+    }
+    @MainActor
+    func testFolderLateNativeActionFailsWithoutNextRouteOrMenu() {
+        for pad in [true,false] {
+            let f=fixture();f.folderTapSeconds=10
+            XCTAssertThrowsError(try RCBody(f).create(f,pad:pad)) { XCTAssertEqual($0 as? Readiness.Failure,.expired) }
+            XCTAssertEqual(f.taps,pad ? [801] : [803]);XCTAssertEqual(f.folderWindows,[10])
+            XCTAssertFalse(f.folderQueries.contains("menu"));XCTAssertEqual(f.nativeTapReadinessDepths,[0])
+        }
+    }
+    @MainActor
+    func testFolderCancelledOrExpiredAfterReservationNeverTaps() {
+        for cancelled in [true,false] {
+            let f=fixture();f.afterReservation={ if cancelled { f.activeWindow?.cancel() } else { f.now=10 } }
+            XCTAssertThrowsError(try RCBody(f).create(f,pad:true)) {
+                XCTAssertEqual($0 as? Readiness.Failure,cancelled ? .cancelled : .expired)
+            }
+            XCTAssertTrue(f.taps.isEmpty)
+        }
+    }
+    @MainActor
+    func testFolderFreshProbeBindsReplacementIdentityOnlyOnceReady() throws {
+        let f=fixture();f.folderDisabled=[801];var probes=0
+        f.beforeFolderQuery={ scope in
+            if scope=="controls:701" { probes += 1;if probes==2 { f.folderControls[701]=[.init(id:807,identifier:"New Folder",label:"New Folder")] } }
+        }
+        try RCBody(f).create(f,pad:true)
+        XCTAssertEqual(f.taps,[807]);XCTAssertEqual(f.gates,["enabled:801","enabled:807","hittable:807"])
+    }
+    @MainActor
+    func testFolderDisappearingUnreadyIdentityCannotBeReused() {
+        let f=fixture();f.folderDisabled=[801];var probes=0
+        f.beforeFolderQuery={ scope in
+            if scope=="controls:701" { probes += 1;if probes==2 { f.folderControls[701]=[];f.now=9 };if probes==3 { f.now=10 } }
+        }
+        XCTAssertThrowsError(try RCBody(f).create(f,pad:true)) { XCTAssertEqual($0 as? Readiness.Failure,.expired) }
+        XCTAssertTrue(f.taps.isEmpty);XCTAssertEqual(f.gates,["enabled:801"])
+    }
+    @MainActor
+    func testFolderReservationKeepsExactBoundIdentityWithoutRequery() throws {
+        let f=fixture();f.afterReservation={ f.folderControls[701]=[.init(id:807,identifier:"New Folder",label:"New Folder")] }
+        try RCBody(f).create(f,pad:true)
+        XCTAssertEqual(f.taps,[801]);XCTAssertEqual(f.folderQueries,["picker","controls:701"])
+    }
+    @MainActor
+    func testFolderNativeErrorRemainsPrimaryAndNeverStartsPhoneMenu() {
+        enum NativeFailure: Error { case expected }
+        let f=fixture();f.tapError=NativeFailure.expected;f.beforeFolderTap={ _ in f.activeWindow?.cancel() }
+        XCTAssertThrowsError(try RCBody(f).create(f,pad:false)) { XCTAssertTrue($0 is NativeFailure) }
+        XCTAssertEqual(f.taps,[803]);XCTAssertEqual(f.folderWindows,[10]);XCTAssertFalse(f.folderQueries.contains("menu"))
+    }
+    @MainActor
+    func testPhoneDuplicateNewFolderMenuCannotProduceSecondTap() {
+        let f=fixture();f.folderMenuMatches=[804,808]
+        XCTAssertThrowsError(try RCBody(f).create(f,pad:false)) { XCTAssertEqual($0 as? Readiness.Failure,.invalidSelectionCount) }
+        XCTAssertEqual(f.taps,[803]);XCTAssertEqual(f.folderWindows,[10,10])
     }
 
 }

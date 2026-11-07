@@ -52,7 +52,7 @@ def materialize(destination, inputs):
     echo_method = source[echo_first:echo_last]
     echo_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], echo_method)
     record_start = '    private func openRecord('
-    record_end = '\n    private func openItem('
+    record_end = '\n    private func performBoundTap<Element>('
     record_marker = '    // RC_OPEN_RECORD_BODY'
     if source.count(record_start) != 1 or source.count(record_end) != 1 or fixture.count(record_marker) != 1:
         raise ValueError('Record transition or fixture boundary changed')
@@ -72,8 +72,29 @@ def materialize(destination, inputs):
         raise ValueError('Export destination boundary order changed')
     presentation_method = source[presentation_first:presentation_last]
     presentation_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], presentation_method)
+    action_start = '    private func performBoundTap<Element>('
+    action_end = '\n    private func openItem('
+    action_marker = '    // RC_BOUND_ACTION_BODY'
+    if source.count(action_start) != 1 or source.count(action_end) != 1 or fixture.count(action_marker) != 1:
+        raise ValueError('Bound action method or fixture boundary changed')
+    action_first, action_last = source.index(action_start), source.index(action_end)
+    if action_last <= action_first:
+        raise ValueError('Bound action method boundary order changed')
+    action_method = source[action_first:action_last]
+    folder_start = '    private func beginFolderCreation('
+    folder_end = '\n    private func folder('
+    folder_marker = '    // RC_FOLDER_CREATION_BODY'
+    if source.count(folder_start) != 1 or source.count(folder_end) != 1 or fixture.count(folder_marker) != 1:
+        raise ValueError('Folder creation route or fixture boundary changed')
+    folder_first, folder_last = source.index(folder_start), source.index(folder_end)
+    if folder_last <= folder_first:
+        raise ValueError('Folder creation route boundary order changed')
+    folder_method = source[folder_first:folder_last]
+    folder_substitutions = {'XCUIApplication': 'FixtureApp', 'XCUIElement': 'FixtureFolderElement'}
+    folder_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: folder_substitutions[m[0]], folder_method)
     tests = (fixture.replace(marker, body).replace(echo_marker, echo_body)
-             .replace(record_marker, record_body).replace(presentation_marker, presentation_body))
+             .replace(record_marker, record_body).replace(presentation_marker, presentation_body)
+             .replace(action_marker, action_method).replace(folder_marker, folder_body))
     cases = re.findall(r'    func (test\w+)\(', fixture)
     if not cases or len(cases) != len(set(cases)):
         raise ValueError('Expected fixture case identities are missing or ambiguous')
@@ -90,6 +111,9 @@ def materialize(destination, inputs):
         'filename_echo_method_sha256': digest(echo_method.encode()),
         'open_record_method_sha256': digest(record_method.encode()),
         'export_destination_method_sha256': digest(presentation_method.encode()),
+        'bound_action_method_sha256': digest(action_method.encode()),
+        'folder_creation_method_sha256': digest(folder_method.encode()),
+        'folder_transport_type_substitutions': folder_substitutions,
         'transport_type_substitutions': substitutions,
         'shared_class_rename': 'FilesNavigationReadiness -> Readiness',
         'generated_sources': {p.name: digest(p.read_bytes()) for p in directory.iterdir()},

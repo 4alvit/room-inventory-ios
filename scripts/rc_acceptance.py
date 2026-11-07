@@ -643,7 +643,7 @@ class FailureSample:
             self.report['installed_before_sha256']=installed_before
 
             def capture(name,argv,cap,limit,*,keep=False):
-                remaining=deadline-time.monotonic()
+                admitted=time.monotonic();remaining=deadline-admitted
                 require(remaining>4,'Sample diagnostic deadline')
                 record={};self.report['operations'].append({'name':name,'receipt':record})
                 failure=None
@@ -651,7 +651,8 @@ class FailureSample:
                     raw=bounded_capture(argv,cwd=run.root,env={**os.environ,'LC_ALL':'C'},
                         timeout=min(cap,remaining-4),limit=limit,receipt=record,
                         stdout_path=out/(name+'.stdout') if keep else None,
-                        stderr_path=out/(name+'.stderr'),cleanup_parent_deadline=deadline)
+                        stderr_path=out/(name+'.stderr'),cleanup_parent_deadline=deadline,
+                        work_deadline=min(admitted+cap,deadline-4))
                 except BaseException as error:
                     failure=error;raise
                 finally:
@@ -665,6 +666,17 @@ class FailureSample:
                         and clean.get('errors')==[],'Sample diagnostic closure unproved')
                 return raw
 
+            # Read the owned Simulator's log store while it is still running.
+            # The original RC emits only fixed focus events in this category;
+            # this is not proof that input was delivered or a binding updated.
+            predicate='process == "RoomInventory" AND subsystem == "com.alvit.roominventory" AND category == "NameEntryFocus"'
+            self.report['focus_log']={'status':'started',
+                'scope':'Owned-device fixed focus events only; empty or missing logs prove no cause.'}
+            capture('focus-log',['xcrun','simctl','spawn',owned['udid'],'/usr/bin/log','show',
+                '--last','10m','--style','json','--info','--predicate',predicate],2,256*1024,keep=True)
+            self.report['focus_log']['status']='collected'
+            # Log capture spends the same ten seconds as the optional stack;
+            # an exhausted or unproved capture cannot authorize more children.
             fields=['/bin/ps','-axww','-o','pid=,lstart=,comm=']
             before=exact_aut_process(capture('identity-before',fields,2,MIB),executable)
             self.report['before']=before

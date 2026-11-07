@@ -587,7 +587,10 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             return observation
         }, enabled: { _ in try file().isEnabled }, hittable: { _ in try file().isHittable },
            tap: { _ in try file().tap() })
-        try ready(app.alerts.matching(identifier: "Replace the current inventory?"))
+        // Selection and its positive restore alert share the same provider window.
+        let alert = app.alerts.matching(identifier: "Replace the current inventory?")
+        _ = try w.waitForTargetFolder(titleCount: { alert.count },
+            enabled: { alert.firstMatch.isEnabled }, hittable: { alert.firstMatch.isHittable })
     }
 
     private func checkpoint(_ name: String, _ app: XCUIApplication) throws {

@@ -92,6 +92,20 @@ private final class SelectionFixture {
     var gates: [String] = []
     var taps: [Int] = []
     var confirmations = 0
+    var selectionWindows: [TimeInterval] = []
+    var selectionTapSeconds = 0.0
+    var beforeSelectionTap: (() -> Void)?
+    var alertIdentifier = "Replace the current inventory?"
+    var alertCount = 1
+    var alertQueries = 0
+    var alertResolutions = 0
+    var alertGates: [String] = []
+    var alertEnabled = true
+    var alertHittable = true
+    var beforeAlertCount: (() -> Void)?
+    var beforeAlertEnabled: (() -> Void)?
+    var beforeAlertHittable: (() -> Void)?
+    var alertError: Error?
     var nodes: [Node] = []
     var matches = [1]
     var beforeSnapshot: (() -> Void)?
@@ -148,12 +162,23 @@ private final class FixtureElement {
         return f.filenameValues.isEmpty ? nil : f.filenameValues.removeFirst()
     }
     var isEnabled: Bool {
+        if scope == "alert" {
+            f.alertGates.append("enabled"); f.beforeAlertEnabled?(); return f.alertEnabled
+        }
         f.gates.append("enabled:\(id)"); f.beforeEnabled?()
         return !(f.disabledFirst && f.resolves == 1)
     }
-    var isHittable: Bool { f.gates.append("hittable:\(id)"); f.beforeHittable?(); return true }
+    var isHittable: Bool {
+        if scope == "alert" {
+            f.alertGates.append("hittable"); f.beforeAlertHittable?()
+            if f.alertHittable { f.confirmations += 1 }
+            return f.alertHittable
+        }
+        f.gates.append("hittable:\(id)"); f.beforeHittable?(); return true
+    }
     func tap() throws {
         f.taps.append(id)
+        if scope == "file" { f.now += f.selectionTapSeconds; f.beforeSelectionTap?() }
         if let error=f.tapError { f.now=30; throw error }
     }
 }
@@ -174,6 +199,15 @@ private final class FixtureQuery {
         if scope == "owner" { f.resolvedOwners.append(identifier) }
         if scope == "file" { f.resolvedFiles.append(identifier) }
         return self
+    }
+    var count: Int {
+        XCTAssertEqual(scope, "alert")
+        f.alertQueries += 1; f.beforeAlertCount?()
+        return identifier == f.alertIdentifier ? f.alertCount : 0
+    }
+    var firstMatch: FixtureElement {
+        XCTAssertEqual(scope, "alert"); f.alertResolutions += 1
+        return FixtureElement(f, scope, 601)
     }
     var element: FixtureElement {
         f.uniqueScopes.append(scope)
@@ -377,6 +411,7 @@ private final class FilesNavigationReadiness {
         let clock=f
         native=Readiness(timeout: timeout, clock: { clock.realClock ? ProcessInfo.processInfo.systemUptime : clock.now })
         f.activeWindow=native
+        f.selectionWindows.append(timeout)
         if f.presentationMode { f.presentationWindows.append(timeout) }
         if f.folderMode { f.folderWindows.append(timeout) }
     }
@@ -414,7 +449,13 @@ private final class FilesNavigationReadiness {
     }
     func waitForTargetFolder(titleCount: @escaping () throws -> Int,
         enabled: @escaping () throws -> Bool, hittable: @escaping () throws -> Bool) throws -> Bool {
-        try native.waitForTargetFolder(titleCount: titleCount, enabled: enabled, hittable: hittable)
+        try native.waitForTargetFolder(titleCount: {
+            let count = try titleCount()
+            // Transport fault at the actual count callback, including late error.
+            // This does not model catching every XCTest assertion/ObjC exception.
+            if let error = self.f.alertError { throw error }
+            return count
+        }, enabled: enabled, hittable: hittable)
     }
     func waitForFilenameEcho(expected: String, readValue: @escaping () throws -> String?) throws -> String {
         f.filenameWindows.append(Self.systemProviderAllowance)
@@ -456,11 +497,6 @@ private final class RCBody {
     init(_ f: SelectionFixture) { runID=f.runID }
     func select(_ label: String, _ app: FixtureApp) throws { XCTAssertEqual(label, "Restore a backup") }
     func folder(_ create: Bool, _ app: FixtureApp) throws { XCTAssertFalse(create) }
-    func ready(_ query: FixtureQuery) throws {
-        XCTAssertEqual(query.scope, "alert")
-        XCTAssertEqual(query.identifier, "Replace the current inventory?")
-        query.f.confirmations += 1
-    }
     // RC_SELECT_BACKUP_BODY
     // RC_FILENAME_ECHO_BODY
     // RC_OPEN_RECORD_BODY
@@ -641,6 +677,90 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
         XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertTrue($0 is NativeError) }
         XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.resolves, 1); XCTAssertEqual(f.confirmations, 0)
     }
+    @MainActor
+    func testRestoreAlertUsesOriginalThirtySecondSelectionWindow() throws {
+        let f=fixture(); f.selectionTapSeconds=1.151
+        f.beforeAlertCount={ f.now=15 }
+        try RCBody(f).run(f)
+        XCTAssertEqual(f.selectionWindows, [30]); XCTAssertEqual(f.taps, [1])
+        XCTAssertEqual(f.alertQueries, 1); XCTAssertEqual(f.alertGates, ["enabled", "hittable"])
+        XCTAssertEqual(f.alertResolutions, 2); XCTAssertEqual(f.confirmations, 1)
+    }
+    @MainActor
+    func testSlowSelectionDebitsRestoreAlertInsteadOfRenewingDeadline() throws {
+        let f=fixture(); f.selectionTapSeconds=24
+        f.beforeAlertCount={ f.now += 5 }; f.beforeAlertEnabled={ f.now += 0.4 }; f.beforeAlertHittable={ f.now += 0.5 }
+        try RCBody(f).run(f)
+        XCTAssertEqual(f.now, 29.9, accuracy: 0.001); XCTAssertEqual(f.selectionWindows, [30])
+        XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 1)
+    }
+    @MainActor
+    func testExpiredSelectionCannotStartRestoreAlertQuery() {
+        for elapsed in [30.0, 31.0] {
+            let f=fixture(); f.selectionTapSeconds=elapsed
+            XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 0); XCTAssertTrue(f.alertGates.isEmpty)
+            XCTAssertEqual(f.selectionWindows, [30])
+        }
+    }
+    @MainActor
+    func testLateRestoreAlertQueryOrGatesFailWithinSameDeadline() {
+        for stage in 0..<3 {
+            let f=fixture(); f.selectionTapSeconds=29
+            if stage == 0 { f.beforeAlertCount={ f.now=30 } }
+            if stage == 1 { f.beforeAlertEnabled={ f.now=30 } }
+            if stage == 2 { f.beforeAlertHittable={ f.now=30 } }
+            XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 1)
+            XCTAssertEqual(f.alertGates.count, stage); XCTAssertEqual(f.selectionWindows, [30])
+        }
+    }
+    @MainActor
+    func testWrongOrMissingRestoreAlertNeverRenewsOrRetaps() {
+        for wrong in [true, false] {
+            let f=fixture(); f.selectionTapSeconds=27
+            if wrong { f.alertIdentifier="Different alert" } else { f.alertCount=0 }
+            f.beforeAlertCount={ f.now += 2 }
+            XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 2); XCTAssertTrue(f.alertGates.isEmpty)
+            XCTAssertEqual(f.selectionWindows, [30])
+        }
+    }
+    @MainActor
+    func testAmbiguousRestoreAlertRejectsWithoutLiveGates() {
+        let f=fixture(); f.alertCount=2
+        XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertEqual($0 as? Readiness.Failure, .invalidTitleCount) }
+        XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 1); XCTAssertTrue(f.alertGates.isEmpty)
+    }
+    @MainActor
+    func testRestoreAlertDisabledOrUnhittableNeedsFreshPositiveProbe() throws {
+        for disabled in [true, false] {
+            let f=fixture()
+            f.beforeAlertCount={ f.now += 1; f.alertEnabled = !disabled || f.alertQueries > 1; f.alertHittable = disabled || f.alertQueries > 1 }
+            try RCBody(f).run(f)
+            XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 2); XCTAssertEqual(f.confirmations, 1)
+            XCTAssertEqual(f.alertGates, disabled ? ["enabled", "enabled", "hittable"] : ["enabled", "hittable", "enabled", "hittable"])
+        }
+    }
+    @MainActor
+    func testRestoreAlertNativeTransportErrorPrecedesLateTimeout() {
+        enum NativeError: Error { case expected }
+        let f=fixture(); f.alertError=NativeError.expected; f.beforeAlertCount={ f.now=31 }
+        XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertTrue($0 is NativeError) }
+        XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, 1); XCTAssertTrue(f.alertGates.isEmpty)
+    }
+    @MainActor
+    func testRestoreAlertCancellationCannotRenewOrRetap() {
+        for beforeAlert in [true, false] {
+            let f=fixture()
+            if beforeAlert { f.beforeSelectionTap={ f.activeWindow?.cancel() } }
+            else { f.beforeAlertCount={ f.activeWindow?.cancel() } }
+            XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertEqual($0 as? Readiness.Failure, .cancelled) }
+            XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.alertQueries, beforeAlert ? 0 : 1)
+            XCTAssertTrue(f.alertGates.isEmpty); XCTAssertEqual(f.selectionWindows, [30])
+        }
+    }
+
     @MainActor
     func testFilenameImmediateExactEchoUsesOneUniqueBoundRead() throws {
         let f=fixture(); f.filenameValues=["csv-"+f.runID]

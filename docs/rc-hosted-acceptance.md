@@ -83,8 +83,8 @@ that unresolved boundary and does not claim to repair it.
 
 For a native-test failure, the runner first writes one journey-ID-bound marker
 before its screenshot/AX calls and before terminating the app. Only that marker
-can trigger a live AUT sample; a passing test performs no extra process lookup
-or sampling. The controller identifies exactly one process whose executable
+can trigger live AUT diagnostics; a passing test performs no extra log read,
+process lookup or sampling. The controller identifies exactly one process whose executable
 path is the verified installed app inside the owned Simulator, then compares
 PID, process start time and executable path before and after sampling. Ambiguous,
 missing or changed identity leaves the diagnostic incomplete. These observations
@@ -104,8 +104,30 @@ identity checks are not guaranteed to return promptly. In run `42351855857`, abo
 grant. Individual filesystem timings were not recorded, so this change reduces
 failure-path work without claiming to explain or repair the Room-row idle failure.
 
+Before the optional process sample, the failure marker admits one log read from
+that exact owned Simulator: `simctl spawn <owned UUID> /usr/bin/log show`, scoped
+to process `RoomInventory`, subsystem `com.alvit.roominventory` and category
+`NameEntryFocus`, with the existing ten-minute historical range. The read has a
+two-second work cap and 256-KiB stream cap inside the same ten-second diagnostic
+window. Its absolute work deadline is fixed before capture entry; each child
+retains four seconds for cleanup within that original window. No stream,
+Simulator boot, app relaunch, retry or success-path log query is added.
+
+The original RC already logs fixed begin/end-editing and initial-focus result
+messages in this category, without input text. It does not log `editingChanged`
+or SwiftUI `configure` chronology. A captured or empty log therefore cannot prove
+text delivery, a binding overwrite or the cause of the first-name failure.
+The native event-completion callback is not proof of delivered text: retained
+earlier input stages also contain the same descendant-focus note and delayed
+exact echoes. The unchanged thirty-second input/echo policy remains authoritative.
+`focus-log.stdout` and its receipt are retained in `failure-diagnostics/live-aut/`.
+A failed, late or unclosed log read stops the diagnostic; a successful read may
+leave insufficient time for the optional stack. Partial coverage remains explicit
+and never changes the original native failure or any acceptance requirement.
+The separate post-shutdown host service-log collector remains unchanged.
+
 The fixed `sample` command observes one second at ten-millisecond intervals,
-with a two-MiB captured-stream cap. Its two process reads and sample share at most
+with a two-MiB captured-stream cap. The focus-log read, two process reads and sample share at most
 ten seconds, including owned-child cleanup, clipped to the original 720-second
 test command and 1,800-second work deadline. They never consume or extend the
 90-second device-cleanup reserve. The existing upload retains partial receipts
@@ -366,3 +388,23 @@ successful completion still writes only the complete journal. This improves fail
 evidence and does not establish the cause of any previous restore-alert failure.
 
 The export destination transition emits one bounded `ROOM_RC_EXPORT_DESTINATION_V1` JSON record when its method returns or throws, before outer failure capture. It reports query attempts/returns, last returned cardinalities and enabled/hittable results, stage, tap invocation/return and completion. All UI values come from existing reads; diagnostics add no UI query, retry or allowance. Elapsed time and the derived nonnegative remaining estimate are observation metadata, not proof of timely acceptance. A stalled native call can still prevent the defer from running; native errors and the original 30-second deadline remain authoritative.
+
+## Backup selection and restore-alert allocation
+
+The backup picker selection and its following restore confirmation now share the
+same absolute 30-second system-provider window. The exact backup snapshot, unique
+live file and one tap remain unchanged. After that tap, the same window checks the
+exact `Replace the current inventory?` alert count, enabled state and hittability.
+It does not create the former additional ten-second `ready` window, repeat the
+file action, change the selector, or alter generic readiness and parent budgets.
+The maximum sequential allocation decreases from 30 + 10 to 30 seconds.
+
+In the retained iPad run `42385135164`, selection used about 1.151 seconds of its
+30-second window before the old ten-second alert observer began. Reusing the
+remaining allowance is an explicit phase policy; it does not establish why the
+native count query stalled or prove the alert would have qualified by 30 seconds.
+Every query and live gate must still return in time; missing or unready results
+remain pending, ambiguity fails, and cancellation/native errors and late returns
+remain failures. Native calls are cooperative and can outlast a deadline; a late
+result cannot pass. The existing actual-method host fixture exercises this full
+selection-to-alert path with the unchanged readiness helper and injected transport.

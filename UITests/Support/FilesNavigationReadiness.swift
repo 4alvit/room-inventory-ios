@@ -89,13 +89,26 @@ final class FilesNavigationReadiness {
     private var selectionStarted = false
     private var tapConsumed = false
 
-    init(timeout: TimeInterval = 30,
-         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    /// Explicit allowance for one RC record transition. Generic callers and
+    /// Files-provider windows retain their existing maximum of 30 seconds.
+    static func recordTransition(
+        clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) -> FilesNavigationReadiness {
+        FilesNavigationReadiness(timeout: 40, maximum: 40, clock: clock)
+    }
+
+    convenience init(timeout: TimeInterval = 30,
+                     clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.init(timeout: timeout, maximum: 30, clock: clock)
+    }
+
+    private init(timeout: TimeInterval, maximum: TimeInterval,
+                 clock: @escaping () -> TimeInterval) {
         self.clock = clock
         let start = clock()
         lastTime = start
         end = start + timeout
-        if !timeout.isFinite || timeout <= 0 || timeout > 30 {
+        if !timeout.isFinite || timeout <= 0 || timeout > maximum {
             failure = Failure.invalidAllowance
         } else if !start.isFinite || !end.isFinite {
             failure = Failure.invalidClock

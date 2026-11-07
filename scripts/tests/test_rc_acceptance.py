@@ -711,7 +711,7 @@ class FailureDiagnostics(unittest.TestCase):
                 result={'status':'PASS' if primary is None else 'FAILED','error':'original failure'}
                 collector=Mock(side_effect=OSError('private collector failure'))
                 namespace=dict(R.__dict__,run=run,result=result,primary=primary,cleanup_errors=[],run_id=ID,
-                               failed_index=None,collect_failure_diagnostics=collector)
+                               failed_index=None,failure_sample=None,collect_failure_diagnostics=collector)
                 with patch('builtins.print') as output:exec(code,namespace)
                 run.close_device.assert_called_once()
                 run.container.assert_not_called()
@@ -890,6 +890,153 @@ class CleanupAdmission(unittest.TestCase):
             self.assertFalse(cleanup['success'])
             self.assertTrue(cleanup['budget_exhausted'])
 
+class LiveFailureSample(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, rows=None, changed=False, failed=None, unclosed=None, advance=None):
+        with tempfile.TemporaryDirectory() as d:
+            home=Path(d).resolve();run=R.Run(home,home/'out');run.device=ID
+            run.owned_device={'udid':ID,'absent_before':True}
+            R.save(run.out/'owned-device.json',run.owned_device)
+            installed=home/'Library/Developer/CoreSimulator/Devices'/ID/'data/Containers/Bundle/Application'/ID/'RoomInventory.app'
+            installed.mkdir(parents=True);(installed/'RoomInventory').write_bytes(b'exact installed executable')
+            sampler=R.FailureSample(run,ID,installed);now=[0.0];calls=[];run.end=1800
+            def capture(argv,**kwargs):
+                name=['identity-before','sample','identity-after'][len(calls)]
+                calls.append((argv,kwargs));now[0]+=(advance or {}).get(name,1 if name=='sample' else .1)
+                receipt=kwargs['receipt'];receipt.update(returncode=0,cleanup={'success':name!=unclosed,
+                    'group_state':'unknown' if name==unclosed else 'absent','leader_reaped':True,'errors':[]})
+                if name==failed:raise R.AcceptanceError('private diagnostic exception')
+                if name=='sample':raw=b'bounded stack fixture'
+                else:
+                    pid=124 if changed and name=='identity-after' else 123
+                    raw=(rows if rows is not None else f'{pid} Sat Nov 7 06:04:52 2026 {installed}/RoomInventory\n').encode()
+                if kwargs.get('stdout_path'):kwargs['stdout_path'].write_bytes(raw)
+                kwargs['stderr_path'].write_bytes(b'')
+                return raw
+            with patch.object(R.Path,'home',return_value=home),patch.object(R.time,'monotonic',side_effect=lambda:now[0]), \
+                    patch.object(R,'bounded_capture',side_effect=capture):
+                yield sampler,run,now,calls
+
+    def test_chunked_exact_nonce_triggers_once_before_cleanup(self):
+        with self.fixture() as (s,run,now,calls):
+            s.feed(b'ordinary stdout\nROOM_RC_SAMPLE_V1 '+ID[:8].encode(),720)
+            self.assertFalse(s.seen);self.assertEqual(calls,[])
+            s.feed(ID[8:].encode()+b'\n',720)
+            s.feed(s.marker+b'\n',720)
+            self.assertEqual(s.report['status'],'collected');self.assertEqual(len(calls),3)
+            self.assertEqual(calls[1][0],['/usr/bin/sample','123','1','10','-mayDie','-file','/dev/stdout'])
+            self.assertEqual(calls[0][0],['/bin/ps','-axww','-o','pid=,lstart=,comm='])
+            self.assertEqual(calls[1][1]['limit'],2*R.MIB)
+            self.assertTrue(all(k['cleanup_parent_deadline']==10 for _,k in calls))
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+            self.assertEqual((run.out/'failure-diagnostics/live-aut/sample.stdout').read_bytes(),b'bounded stack fixture')
+            self.assertFalse((run.out/'failure-diagnostics/live-aut/identity-before.stdout').exists())
+
+    def test_success_wrong_nonce_and_embedded_or_overlong_markers_do_nothing(self):
+        with self.fixture() as (s,run,now,calls):
+            for data in [b'normal successful test\n',b'ROOM_RC_SAMPLE_V1 '+str(uuid.uuid4()).upper().encode()+b'\n',
+                         b'prefix '+s.marker+b'\n',b'x'*300,s.marker+b'\n']:
+                s.feed(data,720)
+            self.assertFalse(s.seen);self.assertEqual(calls,[])
+            self.assertFalse((run.out/'failure-diagnostics').exists())
+
+    def test_no_remaining_time_never_admits_diagnostic(self):
+        with self.fixture() as (s,run,now,calls):
+            s.feed(s.marker+b'\n',4)
+            self.assertEqual(s.report['status'],'skipped_no_parent_time');self.assertEqual(calls,[])
+
+    def test_missing_ambiguous_foreign_or_malformed_identity_never_samples(self):
+        with self.fixture() as (s,run,now,calls):
+            exe=s.installed/'RoomInventory'
+            line=f'123 Sat Nov 7 06:04:52 2026 {exe}\n'
+        for rows in ['',line+line,line.replace(str(exe),'/foreign/RoomInventory'),line.replace('06:04:52','invalid')]:
+            with self.subTest(rows=rows),self.fixture(rows=rows) as (s,run,now,calls):
+                # Each fixture has a different owned root; no matching foreign path can be sampled.
+                s.feed(s.marker+b'\n',720)
+                self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),1)
+
+    def test_identity_parser_rejects_duplicate_and_bad_start_for_current_path(self):
+        path=Path('/owned/RoomInventory.app/RoomInventory')
+        line=f'123 Sat Nov 7 06:04:52 2026 {path}\n'
+        self.assertEqual(R.exact_aut_process(line.encode(),path)['pid'],123)
+        for raw in [line+line,line.replace('06:04:52','invalid'),line.replace('123','true',1)]:
+            with self.assertRaises(R.AcceptanceError):R.exact_aut_process(raw.encode(),path)
+
+    def test_replaced_identity_unclosed_child_and_native_error_remain_partial(self):
+        for mode in ['changed','failed','unclosed']:
+            options={'changed':True} if mode=='changed' else {mode:'sample'}
+            with self.subTest(mode=mode),self.fixture(**options) as (s,run,now,calls):
+                s.feed(s.marker+b'\n',720);before=len(calls);s.feed(s.marker+b'\n',720)
+                self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),before)
+                self.assertEqual(before,3 if mode=='changed' else 2)
+                self.assertNotIn('private diagnostic exception',json.dumps(s.report))
+
+    def test_late_sample_has_no_post_lookup_or_new_budget(self):
+        with self.fixture(advance={'sample':10}) as (s,run,now,calls):
+            s.feed(s.marker+b'\n',8)
+            self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),2)
+            self.assertTrue(all(k['cleanup_parent_deadline']==8 for _,k in calls))
+
+    def test_changed_ownership_or_symlink_prevents_process_lookup(self):
+        for mode in ['owner','symlink']:
+            with self.subTest(mode=mode),self.fixture() as (s,run,now,calls):
+                if mode=='owner':run.owned_device['udid']=str(uuid.uuid4()).upper()
+                else:
+                    exe=s.installed/'RoomInventory';exe.unlink();exe.symlink_to('/foreign')
+                s.feed(s.marker+b'\n',720)
+                self.assertEqual(s.report['status'],'partial');self.assertEqual(calls,[])
+
+    def test_cancellation_is_not_swallowed_as_a_best_effort_diagnostic_error(self):
+        with self.fixture() as (s,run,now,calls):
+            with patch.object(R,'bounded_capture',side_effect=R.CancellationRequested('Cancellation requested')):
+                with self.assertRaises(R.CancellationRequested):s.feed(s.marker+b'\n',720)
+            self.assertTrue(s.seen)
+            self.assertEqual(s.report['status'],'partial')
+
+    def test_cancellation_during_final_report_save_propagates_after_closed_children(self):
+        with self.fixture() as (s,run,now,calls):
+            save=R.save
+            def persist(path,value):
+                if path.name=='result.json':raise R.CancellationRequested('Cancellation requested')
+                return save(path,value)
+            with patch.object(R,'save',side_effect=persist):
+                with self.assertRaises(R.CancellationRequested):s.feed(s.marker+b'\n',720)
+            self.assertEqual(len(calls),3);self.assertTrue(s.seen)
+            self.assertTrue(all(row['receipt']['cleanup']['success'] for row in s.report['operations']))
+
+    def test_post_cleanup_collector_does_not_swallow_cancellation(self):
+        with FailureDiagnostics().fixture(failure=R.CancellationRequested('Cancellation requested')) as (run,now,calls):
+            with self.assertRaises(R.CancellationRequested):R.collect_failure_diagnostics(run,1)
+            self.assertEqual(len(calls),1)
+
+    def test_marker_precedes_failure_capture_and_never_authorizes_acceptance(self):
+        swift=(SCRIPTS.parent/'Acceptance/RC/RCArtifactAcceptanceTests.swift').read_text()
+        marker=swift.index('ROOM_RC_SAMPLE_V1 ')
+        self.assertLess(marker,swift.index('try? capture("failure", app)'))
+        self.assertGreater(marker,swift.index('} catch {'))
+        source=(SCRIPTS/'rc_acceptance.py').read_text()
+        self.assertIn('on_stdout=failure_sample.feed',source)
+        self.assertLess(source.index("require(not failure_sample.seen,'Native failure marker received')"),
+                        source.index("save(run.out/'installed-after.json'"))
+
+    def test_actual_zero_exit_boundary_rejects_previously_marked_failure(self):
+        # Execute the production admission/command/postcondition statements;
+        # no download, native process or Simulator is involved.
+        source=(SCRIPTS/'rc_acceptance.py').read_text();tree=ast.parse(source)
+        execute=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='execute')
+        body=next(n for n in execute.body if isinstance(n,ast.Try)).body
+        index=next(i for i,n in enumerate(body) if isinstance(n,ast.Assign)
+                   and any(isinstance(t,ast.Name) and t.id=='failure_sample' for t in n.targets))
+        module=ast.fix_missing_locations(ast.Module(body=body[index:index+3],type_ignores=[]))
+        run=Mock(device=ID,out=Path('/inert'));run.command.return_value=b''
+        sample=Mock(seen=True)
+        scope={'FailureSample':lambda *a:sample,'run':run,'run_id':ID,'installed':Path('/inert/app'),
+               'plan':Path('/inert/plan'),'TARGET':R.TARGET,'METHOD':R.METHOD,'MIB':R.MIB,'require':R.require}
+        with self.assertRaisesRegex(R.AcceptanceError,'Native failure marker received'):
+            exec(compile(module,'actual-execute-native-boundary','exec'),scope)
+        run.command.assert_called_once()
+        self.assertEqual(run.command.call_args.kwargs['cap'],720)
+
 class ProcessEvidence(unittest.TestCase):
     def test_failed_child_retains_bounded_streams_and_is_reaped(self):
         from rc_acceptance_process import bounded_capture,CaptureFailure
@@ -901,5 +1048,32 @@ class ProcessEvidence(unittest.TestCase):
             self.assertIn(b'before failure',o.read_bytes());self.assertIn(b'cause',e.read_bytes())
             self.assertTrue(receipt['cleanup']['success']);self.assertTrue(receipt['cleanup']['leader_reaped'])
             self.assertEqual(receipt['cleanup']['group_state'],'absent')
+
+    def test_stdout_observer_is_optional_and_cannot_hide_native_nonzero_exit(self):
+        from rc_acceptance_process import bounded_capture,CaptureFailure
+        chunks=[];receipt={}
+        with self.assertRaises(CaptureFailure):
+            bounded_capture([sys.executable,'-c','import sys; print("marker",flush=True); print("not callback",file=sys.stderr); sys.exit(2)'],
+                timeout=3,limit=1024,receipt=receipt,on_stdout=lambda chunk,end:chunks.append((chunk,end)))
+        self.assertEqual(b''.join(chunk for chunk,_ in chunks),b'marker\n')
+        self.assertEqual(receipt['returncode'],2);self.assertTrue(receipt['cleanup']['success'])
+
+    def test_stdout_callback_cannot_renew_deadline_and_child_is_closed(self):
+        # Use the existing real-helper/owned-cleanup fixture, not host scheduling
+        # or destructive signals to an actual process, for the late callback.
+        with CleanupAdmission().fixture([0]) as (P,run,now,seen):
+            selector=P.selectors.DefaultSelector.return_value
+            key=Mock(data='stdout',fd=111,fileobj=Mock())
+            selector.get_map.return_value={'stdout':key};selector.select.return_value=[(key,None)]
+            calls=[]
+            def callback(chunk,deadline):calls.append((chunk,deadline));now[0]=95
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline'):
+                with patch.object(P.os,'read',return_value=b'marker\n'):
+                    run.command(['inert'],'test-installed-rc',cap=90,on_stdout=callback)
+            self.assertEqual(calls,[(b'marker\n',90)])
+            receipt=run.commands[0]
+            self.assertTrue(receipt['cleanup']['success']);self.assertTrue(receipt['cleanup']['leader_reaped'])
+            self.assertEqual(receipt['cleanup']['group_state'],'absent')
+            self.assertEqual(seen['parents'],[1800]);self.assertEqual(run.end,1800)
 
 if __name__=='__main__':unittest.main(verbosity=2)

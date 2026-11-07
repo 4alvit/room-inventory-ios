@@ -98,6 +98,10 @@ final class RCArtifactAcceptanceTests: XCTestCase {
             try journal(status: "complete")
         } catch {
             // The original failure remains authoritative even if evidence capture fails.
+            // Signal before potentially slow screenshot/AX calls, while the AUT
+            // is still alive. This marker can only request failure diagnostics.
+            try? FileHandle.standardOutput.write(contentsOf:
+                Data(("ROOM_RC_SAMPLE_V1 " + runID + "\n").utf8))
             try? capture("failure", app)
             try? journal(status: "failed", failure: String(describing: error))
             throw error

@@ -391,6 +391,37 @@ snapshot. A cap failure alone does not establish physical disk exhaustion. For
 an earlier failure without a crossing observation, the last complete sample or
 last build-log line cannot identify the missing entry, exact size or cause.
 
+### Bridge service during an unfinished census
+
+An owned device or DerivedData walk can exceed the numbered export barrier's
+60-second acknowledgement window. During the active UI command, returning scan
+checkpoints therefore also service a pending numbered bridge request after the
+installation handshake has been accepted. The callback remains on the same
+thread, binds the current collector, child process and scan owner, and cannot
+recursively invoke itself or start another full census. Ordinary callbacks and
+the installation handshake keep their existing scheduling.
+
+The callback's guard still checks the original deadline and both free-disk
+floors on every call. It freshly checks affected output, xcresult, attachment
+and log caps before entering the callback, retaining the existing two-second
+completion cadence for subsequent guarded reads and writes within that callback.
+The collector's file identities, byte limits, nonce, request hashes and exclusive
+ACK publication remain unchanged; the final fsync is followed by the same guard
+before the ACK becomes visible.
+
+The suspended whole-device/DerivedData census is **incomplete**, not a fresh
+cached total or an acceptance result. Its walk resumes without resetting byte
+accounting. A subsequent cap crossing, metadata error, changed owner or
+cancellation still fails the run even if an ACK was already delivered. Only a
+completed, persisted full census advances `last_resource_check`; terminal
+acceptance still requires the existing final full accounting and owned-process
+cleanup. No resource ceiling, barrier allowance or command deadline increases.
+A single blocking filesystem call can still delay all work until it returns.
+The UI command's `bridge_scan_service` receipt records at most six sequence
+numbers, started/finished elapsed times, state and the incomplete census category.
+It contains no request payloads or paths. A completed callback record proves
+service during a walk, not successful completion of that walk or the journey.
+
 ## Resource scan cost breakdown
 
 `resource_scan_cost` retains its existing inclusive scan wall time and SELF CPU

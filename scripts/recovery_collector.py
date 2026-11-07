@@ -658,6 +658,16 @@ class Collector:
         validate_photos_isolation(value, expected, fixture, self.photos_seed, self.photos_seed_sha)
         self.photos_isolated = True
 
+    def has_pending_bridge_request(self):
+        """Scheduling hint only; poll_bridge still validates every byte and owner.
+
+        The controller brackets this fixed-path lookup with its original deadline
+        and owned-process checks. Installation keeps its existing outer callback.
+        """
+        if self.installation_state != "accepted" or len(self.barriers) >= 6:
+            return False
+        return os.path.lexists(self.bridge / f"request-{len(self.barriers) + 1:02d}.json")
+
     def poll_bridge(self):
         if self.installation_state in ("waiting", "binding"):
             return self._poll_installation()

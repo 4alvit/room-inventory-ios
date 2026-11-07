@@ -689,6 +689,8 @@ class RecoveryRun:
         self._offline_collection_attempted = False
         self.groups = []
         self.last_resource_check = float("-inf")
+        self._resource_census = None
+        self._bridge_scan_guard = None
         self.last_samples = []
         self.resource_cap_observed = False
         self.cleanup_mode = False
@@ -1316,39 +1318,89 @@ class RecoveryRun:
             self.validate_offline_collection()
         free = min(self.disk_usage(self.output.parent).free, self.disk_usage(self.device_base).free)
         require(free >= ABORT_BYTES, "Free disk fell below 8 GiB")
+        if self._bridge_scan_guard is not None:
+            require(not force and not full_resources, "Full census requested inside bridge callback", ConfigurationFailure)
+            self.guard_bridge_resources()
+            return
+        require(self._resource_census is None, "Recursive resource census", ConfigurationFailure)
         if force or self.clock() - self.last_resource_check >= 2:
-            original_limit, original_lifecycle = self.original_xcresult_budget()
-            sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
-                      "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,))}
-            # Only the explicitly sealed, shutdown collection scope may omit
-            # repeated traversal of these roots. No cached size is called fresh.
-            # Entry and exit always request the full uncached census.
-            if self._offline_collection is None or full_resources:
-                sample["derived_data"] = self.resource_size("derived_data", self.derived, DERIVED_CAP,
-                                                            cap_metric="allocated")
-                if self.device_root:
-                    sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
-            else:
-                sample["sealed_offline_resources"] = {
-                    "entry_sample": self._offline_collection["entry_sample"],
-                    "live_input_seal_sha256": self.collector.seal_sha256,
-                    "omitted_categories": ["derived_data", "device"]}
-            for name, root, limit in [
-                ("original_xcresult", self.output / "original.xcresult", original_limit),
-                ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP),
-                ("attachments", self.output / "evidence/collection/xcresult/attachments", ATTACHMENT_CAP),
-                ("logs", self.output / "logs", LOG_CAP),
+            self._resource_census = object()
+            try:
+                self.complete_resource_census(free, full_resources=full_resources)
+            finally:
+                self._resource_census = None
+
+    def guard_bridge_resources(self):
+        """Fresh affected-root caps while the owned full census is suspended.
+
+        The device/DerivedData totals remain incomplete, never cached-as-fresh.
+        Their original walk must resume, and any later cap failure is terminal.
+        """
+        scope = self._bridge_scan_guard
+        require(scope is not None and scope["census"] is self._resource_census
+                and self._resource_census is not None and not scope["busy"]
+                and self.collector is scope["collector"] and not self.cleanup_mode,
+                "Invalid or recursive bridge resource guard", ConfigurationFailure)
+        scope["validate"]()
+        self.tick()
+        if self.clock() - scope["last_check"] < 2:
+            return
+        scope["busy"] = True
+        previous_scan = self.record.get("resource_scan")
+        try:
+            original_limit, _ = self.original_xcresult_budget()
+            for name, root, limit, excluded in [
+                ("output", self.output, OUTPUT_CAP, (self.derived,)),
+                ("original_xcresult", self.output / "original.xcresult", original_limit, ()),
+                ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP, ()),
+                ("attachments", self.output / "evidence/collection/xcresult/attachments", ATTACHMENT_CAP, ()),
+                ("logs", self.output / "logs", LOG_CAP, ()),
             ]:
-                sample[name] = self.resource_size(name, root, limit)
-                if name == "original_xcresult":
-                    sample[name].update(cap_bytes=limit, lifecycle=original_lifecycle)
-            self.last_samples.append(sample)
-            require(len(self.last_samples) <= 2000, "Resource observation cap exceeded")
-            write_json(self.output / "resource-samples.json", self.last_samples)
-            # Only completed, persisted accounting advances the periodic clock.
-            completed = self.clock()
+                self.resource_size(name, root, limit, excluded=excluded)
+            scope["validate"]()
             self.tick()
-            self.last_resource_check = completed
+            scope["last_check"] = self.clock()
+            # Restore the still-active outer scan observation, not its totals.
+            if previous_scan is not None:
+                self.record["resource_scan"] = previous_scan
+        finally:
+            scope["busy"] = False
+
+    def complete_resource_census(self, free, *, full_resources=False):
+        require(self._resource_census is not None and self._bridge_scan_guard is None,
+                "Invalid full resource census", ConfigurationFailure)
+        original_limit, original_lifecycle = self.original_xcresult_budget()
+        sample = {"elapsed": self.clock() - self.start, "free_bytes": free,
+                  "output": self.resource_size("output", self.output, OUTPUT_CAP, excluded=(self.derived,))}
+        # Only the explicitly sealed, shutdown collection scope may omit
+        # repeated traversal of these roots. No cached size is called fresh.
+        # Entry and exit always request the full uncached census.
+        if self._offline_collection is None or full_resources:
+            sample["derived_data"] = self.resource_size("derived_data", self.derived, DERIVED_CAP,
+                                                        cap_metric="allocated")
+            if self.device_root:
+                sample["device"] = self.resource_size("device", self.device_root, DEVICE_CAP)
+        else:
+            sample["sealed_offline_resources"] = {
+                "entry_sample": self._offline_collection["entry_sample"],
+                "live_input_seal_sha256": self.collector.seal_sha256,
+                "omitted_categories": ["derived_data", "device"]}
+        for name, root, limit in [
+            ("original_xcresult", self.output / "original.xcresult", original_limit),
+            ("verified_xcresult", self.output / "evidence/collection/xcresult/verified.xcresult", XCRESULT_CAP),
+            ("attachments", self.output / "evidence/collection/xcresult/attachments", ATTACHMENT_CAP),
+            ("logs", self.output / "logs", LOG_CAP),
+        ]:
+            sample[name] = self.resource_size(name, root, limit)
+            if name == "original_xcresult":
+                sample[name].update(cap_bytes=limit, lifecycle=original_lifecycle)
+        self.last_samples.append(sample)
+        require(len(self.last_samples) <= 2000, "Resource observation cap exceeded")
+        write_json(self.output / "resource-samples.json", self.last_samples)
+        # Only completed, persisted accounting advances the periodic clock.
+        completed = self.clock()
+        self.tick()
+        self.last_resource_check = completed
 
     def phase(self, name):
         self.diagnostic_stage = "phase"
@@ -1454,6 +1506,9 @@ class RecoveryRun:
         derived_root, derived_identity = self.derived, self._owned_derived_identity
         pipe_eof = [False, False]
         allow_scan_handoff = False
+        bridge_collector = (self.collector if xcresult_producer and name == "ui-test"
+                            and self.collector is not None and on_poll == self.collector.poll_bridge else None)
+        bridge_last = float("-inf")
 
         def require_device_owner(*, active_scan=True):
             # Python object/ledger identity only; never infer kernel group absence.
@@ -1488,10 +1543,11 @@ class RecoveryRun:
         def service_scan(*, device_scan=False):
             """Cooperative work between returning walker checkpoints, never a worker.
 
-            No callback/guard/flush here. A single blocked syscall still blocks
-            supervision; every returning boundary checks the original deadline.
+            A pending bridge may run in an explicit nonrecursive resource scope.
+            A single blocked syscall still blocks supervision; every returning
+            boundary checks the original deadline.
             """
-            nonlocal service_checkpoints, service_last, service_busy, device_checkpoints, device_last
+            nonlocal service_checkpoints, service_last, service_busy, device_checkpoints, device_last, bridge_last
             self.tick()
             require(self._derived_scan_service is service_derived_scan and not service_busy,
                     "Invalid or reentrant scan service", ConfigurationFailure)
@@ -1565,6 +1621,49 @@ class RecoveryRun:
                     service_checkpoints, service_last = 0, self.clock()
                 self.tick()
                 observe(record, "quantum_completed", value=device_last if device_scan else service_last)
+                if (bridge_collector is not None and self._resource_census is not None
+                        and self._bridge_scan_guard is None and polled is None
+                        and self.clock() - bridge_last >= .05):
+                    validate = require_device_owner if device_scan else require_derived_owner
+                    validate()
+                    self.tick()
+                    pending = bridge_collector.has_pending_bridge_request()
+                    self.tick()
+                    if pending:
+                        require(self.collector is bridge_collector and on_poll == bridge_collector.poll_bridge,
+                                "Changed bridge callback owner", ConfigurationFailure)
+                        sequence = len(bridge_collector.barriers) + 1
+                        trace = record.setdefault("bridge_scan_service", {"schema_version": 1, "records": []})
+                        require(1 <= sequence <= 6 and len(trace["records"]) < 6
+                                and all(row["sequence"] != sequence for row in trace["records"]),
+                                "Duplicate cooperative bridge service", ConfigurationFailure)
+                        observation = {"sequence": sequence, "state": "started",
+                                       "incomplete_census": "device" if device_scan else "derived_data",
+                                       "started_elapsed": self.diagnostic_elapsed(), "finished_elapsed": None}
+                        trace["records"].append(observation)
+                        self._bridge_scan_guard = {"census": self._resource_census,
+                                                   "collector": bridge_collector,
+                                                   "validate": validate, "busy": False,
+                                                   "last_check": float("-inf")}
+                        try:
+                            self.guard()  # Fresh affected-root caps before any collector write.
+                            on_poll()
+                            self.tick()
+                            validate()
+                            require(len(bridge_collector.barriers) == sequence,
+                                    "Pending bridge request was not completed", ConfigurationFailure)
+                            observation["state"] = "completed"
+                        finally:
+                            self._bridge_scan_guard = None
+                            if observation["state"] == "started":
+                                observation["state"] = "failed"
+                                try:
+                                    observation["finished_elapsed"] = self.diagnostic_elapsed()
+                                except BaseException:
+                                    pass  # A diagnostic interruption cannot replace the callback failure.
+                            else:
+                                observation["finished_elapsed"] = self.diagnostic_elapsed()
+                        bridge_last = self.clock()
                 if (device_scan or derived_identity is not None) and all(pipe_eof) and polled is not None:
                     require(type(polled) is int and polled in allowed_codes, "Command failed: " + name)
                     if device_scan:

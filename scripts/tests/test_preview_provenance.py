@@ -463,8 +463,34 @@ class PreviewWorkflowTests(unittest.TestCase):
             self.assertEqual(set(workflow["on"]), {"workflow_call"})
         pr_entries = {name for name, workflow in self.workflows.items() if "pull_request" in workflow["on"]}
         self.assertEqual(pr_entries, {"quality-gate.yml"})
-        for workflow in self.workflows.values():
-            self.assertNotIn("pull_request_target", workflow["on"])
+        metadata = {
+            "auto-approve.yml": ("auto-approve", "auto-approve-reusable.yml", {"BOT_PAT", "APPROVAL_PAT"}),
+            "auto-merge.yml": ("auto-merge", "auto-merge.yml", {"BOT_PAT"}),
+        }
+        for name, workflow in self.workflows.items():
+            if name not in metadata:
+                self.assertNotIn("pull_request_target", workflow["on"])
+                continue
+            job_name, callee, secret_names = metadata[name]
+            self.assertIn("pull_request_target", workflow["on"])
+            self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "write"})
+            self.assertEqual(set(workflow["jobs"]), {job_name})
+            job = workflow["jobs"][job_name]
+            self.assertEqual(job["uses"], "victron-venus/venus-os-ci-toolkit/.github/workflows/" +
+                             callee + "@ffa568e48a9510bf66dcfe01d6646f6840382431")
+            self.assertNotIn("steps", job)
+            self.assertNotIn("runs-on", job)
+            self.assertNotIn("permissions", job)
+            self.assertEqual(set(job["secrets"]), secret_names)
+            for secret, expression in job["secrets"].items():
+                self.assertEqual(expression, "${{ secrets." + secret + " }}")
+            self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", job["if"])
+            self.assertIn("californiantiramisu", job["if"])
+            self.assertIn("renovate[bot]", job["if"])
+            if job_name == "auto-merge":
+                self.assertEqual(job["with"]["required-status-checks"], "CI gate")
+                for flag in ("reviewed-merge", "reviewed-single-pass", "allow-owned-bot-actions-review"):
+                    self.assertEqual(job["with"][flag], "true")
 
     def test_preview_permissions_are_read_only_and_no_secrets_are_forwarded(self):
         def inspect(node):

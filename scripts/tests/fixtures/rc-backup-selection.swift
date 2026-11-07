@@ -46,6 +46,7 @@ private final class SelectionFixture {
     }
     var presentationMode = false
     var presentationWindows: [TimeInterval] = []
+    var shareDiagnostics: [[String: Any]] = []
     var shareMatches = [401]
     var shareIdentifier = "actionGroupCell"
     var shareLabel = "Save to Files"
@@ -436,6 +437,16 @@ private final class FilesNavigationReadiness {
                              hittable: @escaping (SelectionObservation) throws -> Bool,
                              tap: @escaping (SelectionObservation) throws -> Void) throws {
         try native.waitAndTapSelection(observe: observe, enabled: enabled, hittable: hittable, tap: tap)
+    }
+}
+
+@MainActor
+private enum FixtureShareDiagnostic {
+    static var uptime: TimeInterval { SelectionFixture.current.now }
+    static func emit(_ text: String) {
+        XCTAssertLessThanOrEqual(text.utf8.count, 4_096)
+        let record = try! JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any]
+        SelectionFixture.current.shareDiagnostics.append(record)
     }
 }
 
@@ -912,6 +923,62 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
             if enabled { f.beforeEnabled={f.now=30} } else { f.beforeHittable={f.now=30} }
             XCTAssertThrowsError(try RCBody(f).present(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
             XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.saveQueries, 0)
+        }
+    }
+
+    @MainActor
+    func testShareDiagnosticUsesReturnedCountsWithoutExtraQueries() throws {
+        let f=fixture(); f.beforeShareResolve={ f.now += 6; f.shareMatches=f.shareResolves == 1 ? [] : [402] }
+        try RCBody(f).present(f)
+        XCTAssertEqual(f.shareDiagnostics.count, 1)
+        let d=f.shareDiagnostics[0]
+        XCTAssertEqual(d["action_queries"] as? Int, 2); XCTAssertEqual(d["action_returns"] as? Int, 2)
+        XCTAssertEqual(d["last_action_count"] as? Int, 1); XCTAssertEqual(d["save_queries"] as? Int, 1)
+        XCTAssertEqual(d["save_returns"] as? Int, 1); XCTAssertEqual(d["last_save_count"] as? Int, 1)
+        XCTAssertEqual(d["last_stage"] as? String, "complete"); XCTAssertEqual(d["completed"] as? Bool, true)
+        XCTAssertEqual(d["tap_started"] as? Bool, true); XCTAssertEqual(d["tap_returned"] as? Bool, true)
+        XCTAssertEqual(d["elapsed_seconds"] as? Double, 12); XCTAssertEqual(d["observed_remaining_seconds"] as? Double, 18)
+        XCTAssertEqual(f.shareResolves, 2); XCTAssertEqual(f.saveQueries, 1); XCTAssertEqual(f.taps, [402])
+    }
+    @MainActor
+    func testShareDiagnosticDistinguishesMissingDisabledAndUnhittableWithoutTap() {
+        for mode in 0..<3 {
+            let f=fixture()
+            if mode == 0 { f.shareMatches=[] } else if mode == 1 { f.shareEnabled=false } else { f.shareHittable=false }
+            f.beforeShareResolve={ if f.shareResolves == 2 { f.now=30 } }
+            if mode == 1 { f.beforeEnabled={f.now=30} }
+            if mode == 2 { f.beforeHittable={f.now=30} }
+            XCTAssertThrowsError(try RCBody(f).present(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+            XCTAssertEqual(f.shareDiagnostics.count, 1); let d=f.shareDiagnostics[0]
+            XCTAssertEqual(d["last_stage"] as? String, ["action-query","action-enabled","action-hittable"][mode])
+            XCTAssertEqual(d["last_action_count"] as? Int, mode == 0 ? 0 : 1)
+            if mode == 1 { XCTAssertEqual(d["last_action_enabled"] as? Bool, false) }
+            if mode == 2 { XCTAssertEqual(d["last_action_hittable"] as? Bool, false) }
+            XCTAssertEqual(d["tap_started"] as? Bool, false); XCTAssertEqual(d["completed"] as? Bool, false)
+            XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.saveQueries, 0)
+        }
+    }
+    @MainActor
+    func testShareDiagnosticLateTapIsReturnedButNotCompleted() {
+        let f=fixture(); f.shareTapSeconds=30
+        XCTAssertThrowsError(try RCBody(f).present(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+        let d=f.shareDiagnostics[0]
+        XCTAssertEqual(d["last_stage"] as? String, "action-tap"); XCTAssertEqual(d["tap_started"] as? Bool, true)
+        XCTAssertEqual(d["tap_returned"] as? Bool, true); XCTAssertEqual(d["completed"] as? Bool, false)
+        XCTAssertEqual(d["observed_remaining_seconds"] as? Double, 0); XCTAssertEqual(f.saveQueries, 0)
+    }
+    @MainActor
+    func testShareDiagnosticCannotReplaceNativeErrorOrCancellation() {
+        enum OriginalError: Error { case native }
+        for cancel in [false,true] {
+            let f=fixture()
+            if cancel { f.beforeShareTap={f.activeWindow?.cancel()} } else { f.tapError=OriginalError.native }
+            XCTAssertThrowsError(try RCBody(f).present(f)) {
+                if cancel { XCTAssertEqual($0 as? Readiness.Failure, .cancelled) } else { XCTAssertTrue($0 is OriginalError) }
+            }
+            XCTAssertEqual(f.shareDiagnostics.count, 1); let d=f.shareDiagnostics[0]
+            XCTAssertEqual(d["tap_started"] as? Bool, true); XCTAssertEqual(d["completed"] as? Bool, false)
+            XCTAssertEqual(f.taps, [401]); XCTAssertEqual(f.saveQueries, 0)
         }
     }
 

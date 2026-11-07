@@ -118,6 +118,18 @@ This is a bounded cold-start allowance, not evidence that a particular silent
 boot failure was caused by first-boot initialization. A timeout still fails the
 attempt, and successful boot alone cannot qualify Recovery.
 
+The app and UI runner installations share one absolute 180-second window,
+reusing their former two 90-second allocations. It starts before the first
+installation guard and includes log preparation, both children, each child's
+four-second process cleanup, and mandatory full resource accounting. The second
+installation receives only the remaining time; a failed or late first
+installation cannot start it. The window is also clipped to the existing
+660-second startup boundary. `installation_window` records its original start,
+deadline, device-phase boundary and completion status; it cannot be renewed.
+This redistributes existing startup time and does not establish the cause of a
+silent `simctl` delay or guarantee that a later attempt succeeds. Test,
+collection, disk and final-cleanup limits remain unchanged.
+
 The single Photos seed is now created by the actual UI-test runner through
 PhotoKit after its owned installation acknowledgement. This replaces the
 `simctl addmedia` command that timed out before UI execution in both attempts of

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the actual RC selection body with host XCTest transport fixtures only."""
+"""Run the actual RC selection and filename observation with host XCTest transport fixtures."""
 import argparse
 import hashlib
 import json
@@ -41,7 +41,17 @@ def materialize(destination, inputs):
     if helper.count('final class FilesNavigationReadiness {') != 1:
         raise ValueError('Shared helper declaration changed')
     helper = re.sub(r'\bFilesNavigationReadiness\b', 'Readiness', helper)
-    tests = fixture.replace(marker, body)
+    echo_start = '    private func observeExportedFilename('
+    echo_end = '\n    private func export('
+    echo_marker = '    // RC_FILENAME_ECHO_BODY'
+    if source.count(echo_start) != 1 or source.count(echo_end) != 1 or fixture.count(echo_marker) != 1:
+        raise ValueError('Filename observer or fixture boundary changed')
+    echo_first, echo_last = source.index(echo_start), source.index(echo_end)
+    if echo_last <= echo_first:
+        raise ValueError('Filename observer boundary order changed')
+    echo_method = source[echo_first:echo_last]
+    echo_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], echo_method)
+    tests = fixture.replace(marker, body).replace(echo_marker, echo_body)
     cases = re.findall(r'    func (test\w+)\(', fixture)
     if not cases or len(cases) != len(set(cases)):
         raise ValueError('Expected fixture case identities are missing or ambiguous')
@@ -55,6 +65,7 @@ def materialize(destination, inputs):
     (directory / 'RCBackupSelectionRegressionTests.swift').write_text(tests)
     return {
         'method_sha256': digest(method.encode()),
+        'filename_echo_method_sha256': digest(echo_method.encode()),
         'transport_type_substitutions': substitutions,
         'shared_class_rename': 'FilesNavigationReadiness -> Readiness',
         'generated_sources': {p.name: digest(p.read_bytes()) for p in directory.iterdir()},

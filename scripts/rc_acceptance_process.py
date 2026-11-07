@@ -5,6 +5,7 @@ After a leader is reaped, only non-destructive group observation is permitted.
 """
 import errno
 import os
+import math
 import selectors
 import signal
 import subprocess
@@ -98,12 +99,14 @@ class CaptureFailure(RuntimeError):
     pass
 
 
-def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None, cleanup_parent_deadline=None, on_stdout=None):
+def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None, cleanup_parent_deadline=None, on_stdout=None, work_deadline=None):
     """One isolated process with cooperative deadlines; preserve primary errors.
 
     An explicit absolute parent deadline lets cleanup retain one four-second
     window after late work. It never extends that parent or renews cleanup.
     Other callers retain the original combined work-plus-cleanup deadline.
+    An optional absolute work deadline also debits delayed capture entry. Its
+    pre-spawn/return checks are cooperative; a blocked OS call is not preempted.
     """
     record = {} if receipt is None else receipt
     start = time.monotonic()
@@ -115,6 +118,14 @@ def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, r
     failure = None
     record.update(command=list(argv), timeout_seconds=timeout, cleanup_reserved_seconds=4)
     try:
+        if work_deadline is not None:
+            if type(work_deadline) not in (int,float) or not math.isfinite(work_deadline):
+                raise CaptureFailure('Invalid absolute work deadline')
+            work_end=min(work_end,work_deadline,end-4)
+            record.update(timeout_seconds=max(0,work_end-start),
+                          work_deadline_monotonic=work_end,cleanup_deadline_monotonic=end)
+            if time.monotonic()>=work_end:
+                raise CaptureFailure('Metadata command work deadline exceeded before spawn')
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)

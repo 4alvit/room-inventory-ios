@@ -2057,13 +2057,45 @@ class RecoveryRun:
                 validate_runner_photos_metadata(info)
         validate_raw_fixture(self.runner / "PlugIns/RoomInventoryUITests.xctest" / FIXTURE_RESOURCE)
 
+    def install_products(self):
+        """Spend the original two installation allowances once, including accounting."""
+        require(self.record.get("phase") == "device" and not self.cleanup_mode
+                and "installation_window" not in self.record,
+                "Installation window is not fresh", ConfigurationFailure)
+        self.tick()
+        started, original_phase_end = self.clock(), self.phase_end
+        end = min(started + 180, original_phase_end, self.work_end, self.outer_end)
+        window = self.record["installation_window"] = {
+            "start_elapsed": started - self.start, "end_deadline_elapsed": end - self.start,
+            "device_phase_end_elapsed": original_phase_end - self.start,
+            "maximum_seconds": 180, "cleanup_per_child_seconds": 4,
+            "status": "STARTED", "completed_elapsed": None}
+        self.phase_end = end
+        try:
+            self.arm(end - 4)
+            for app, label in [(self.app, "app"), (self.runner, "runner")]:
+                # The fixed phase boundary also charges the first guard, log
+                # preparation and mandatory full post-command resource census.
+                self.command(["xcrun", "simctl", "install", self.device_id, app],
+                             "install-" + label, cap=180)
+            finished = self.clock()
+            require(finished < end, "Installation accounting returned late", DeadlineFailure)
+            window.update(status="COMPLETED", completed_elapsed=finished - self.start)
+        except BaseException:
+            window["status"] = "FAILED"
+            raise
+        finally:
+            self.phase_end = original_phase_end
+            self.disarm()
+            if self.timer_enabled and self.clock() < original_phase_end:
+                self.arm(original_phase_end)
+
     def prepare_device(self):
         from recovery_collector import Collector
         self.phase("device")
         self.command(["xcrun", "simctl", "boot", self.device_id], "boot-device", cap=30)
         self.command(["xcrun", "simctl", "bootstatus", self.device_id, "-b"], "boot-status", cap=300)
-        for app, label in [(self.app, "app"), (self.runner, "runner")]:
-            self.command(["xcrun", "simctl", "install", self.device_id, app], "install-" + label, cap=90)
+        self.install_products()
         self.command(["xcrun", "simctl", "privacy", self.device_id, "grant", "photos", RUNNER_BUNDLE], "authorize-runner-photos", cap=90)
         app_container = self.app_container(BUNDLE, "app-container")
         runner_container = self.app_container(RUNNER_BUNDLE, "runner-container")

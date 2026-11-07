@@ -342,6 +342,58 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         }
     }
 
+    private func observeExportedFilename(_ baseName: String, _ app: XCUIApplication) throws -> String {
+        // Observe the single completed input; never retype or renew this window.
+        let began = ProcessInfo.processInfo.systemUptime
+        let echo = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
+        var lastReturned: String?
+        var readsStarted = 0
+        var readsReturned = 0
+        var stage = "waiting"
+        var matched = false
+        defer {
+            let record: [String: Any] = [
+                "schema_version": 1, "phase": "export_filename_echo", "expected": baseName,
+                "last_returned": lastReturned.map { String($0.prefix(256)) as Any } ?? NSNull(),
+                "last_returned_truncated": (lastReturned?.count ?? 0) > 256,
+                "reads_started": readsStarted, "reads_returned": readsReturned, "stage": stage,
+                "allowance_seconds": FilesNavigationReadiness.systemProviderAllowance,
+                "elapsed_seconds": ProcessInfo.processInfo.systemUptime - began,
+                "result": matched ? "matched" : "failed"
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_RC_FILES_FILENAME_ECHO_V1 \(text)")
+            }
+        }
+        let value = try echo.waitForFilenameEcho(expected: baseName, readValue: {
+            stage = "resolving_picker"
+            readsStarted += 1
+            let pickers = try echo.perform {
+                app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+                    .allElementsBoundByAccessibilityElement
+            }
+            guard pickers.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            guard let picker = pickers.first else { return nil }
+            stage = "resolving_field"
+            let fields = try echo.perform {
+                picker.textFields.matching(identifier: "DOCPicker.filenameTextField")
+                    .allElementsBoundByAccessibilityElement
+            }
+            guard fields.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            guard let field = fields.first else { return nil }
+            stage = "reading_value"
+            let observed = try echo.perform { field.value as? String }
+            lastReturned = observed
+            readsReturned += 1
+            stage = "value_returned"
+            return observed
+        })
+        matched = true
+        stage = "completed"
+        return value
+    }
+
     private func export(_ action: String, baseName: String, create: Bool, _ app: XCUIApplication) throws {
         try select(action, app)
         try tap(app.cells.matching(NSPredicate(format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files")))
@@ -354,7 +406,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         try tap(q)
         name.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + baseName)
-        try require(name.value as? String == baseName, "Exact exported base name")
+        try require(try observeExportedFilename(baseName, app) == baseName, "Exact exported base name")
         try capture("save-" + baseName, app)
         try tap(app.buttons.matching(identifier: "Save"))
         let returning = ExportReturnReadiness(homeName: names["home"]!)

@@ -3,6 +3,7 @@ import copy
 import ast
 from contextlib import contextmanager
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -492,73 +493,181 @@ class InstallationWindow(unittest.TestCase):
             run=R.Run(d,Path(d)/'out');run.device=ID;now[0]=start
             yield run,now,calls
 
-    def test_only_verified_application_installs_once_with_original_allowance(self):
-        for duration,start in [(100,0),(200,0),(295,0),(100,400)]:
-            with self.subTest(duration=duration,start=start),self.fixture([duration],start=start) as (run,now,calls):
-                R.install_application(run,'exact-rc.app')
-                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
-                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296])
-                self.assertEqual(run.commands[0]['cleanup_reserved_seconds'],4)
-                self.assertEqual(now[0],start+duration)
-                self.assertEqual(run.end,1800)
-                self.assertIsNone(run.cleanup_end)
+    def test_slow_boot_or_install_shares_original_total_with_one_aut_install(self):
+        for durations,start in [([2,200,100],0),([2,50,295],0),([2,200,100],400)]:
+            with self.subTest(durations=durations,start=start),self.fixture(durations,start=start) as (run,now,calls):
+                R.setup_application(run,'exact-rc.app')
+                self.assertEqual(calls,[['xcrun','simctl','boot',ID],
+                    ['xcrun','simctl','bootstatus',ID,'-b'],['xcrun','simctl','install',ID,'exact-rc.app']])
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],
+                    [476,476-durations[0],476-sum(durations[:2])])
+                self.assertTrue(all(c['cleanup_reserved_seconds']==4 for c in run.commands))
+                self.assertTrue(all(c['work_deadline_monotonic']==start+476 for c in run.commands))
+                self.assertTrue(all(c['cleanup_deadline_monotonic']==start+480 for c in run.commands))
+                self.assertEqual(run.setup_window,dict(start_monotonic=start,end_monotonic=start+480,
+                    parent_end_monotonic=1800,maximum_seconds=480,cleanup_per_child_seconds=4,
+                    status='COMPLETED',finished_monotonic=start+sum(durations),admissions=[
+                        dict(operation=operation,operation_index=index+1,admission_monotonic=start+sum(durations[:index]),
+                            granted_seconds=476-sum(durations[:index]),deadline_monotonic=start+480,
+                            returned_monotonic=start+sum(durations[:index+1]),status='COMPLETED')
+                        for index,operation in enumerate(['boot','bootstatus','install'])]))
+                self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+                with self.assertRaisesRegex(R.AcceptanceError,'not fresh'):
+                    R.setup_application(run,'exact-rc.app')
+                self.assertEqual(len(calls),3)
 
-    def test_late_application_never_retries_or_installs_runner(self):
+    def test_late_child_at_each_stage_never_renews_or_starts_next_action(self):
         from rc_acceptance_process import CaptureFailure
-        for duration in [296,297,300]:
-            with self.subTest(duration=duration),self.fixture([duration]) as (run,now,calls):
+        for durations in [[476],[2,474],[2,200,274]]:
+            with self.subTest(durations=durations),self.fixture(durations) as (run,now,calls):
                 with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
-                    R.install_application(run,'exact-rc.app')
-                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
-                self.assertEqual(run.commands[0]['timeout_seconds'],296)
-                self.assertEqual(run.commands[0]['elapsed_seconds'],duration)
+                    R.setup_application(run,'exact-rc.app')
+                self.assertEqual(len(calls),len(durations))
+                self.assertEqual(run.setup_window['end_monotonic'],480)
+                self.assertEqual(run.setup_window['status'],'FAILED')
+                self.assertIsNone(run.setup_window['finished_monotonic'])
+                self.assertEqual(len(run.setup_window['admissions']),len(durations))
+                self.assertIsNone(run.setup_window['admissions'][-1]['returned_monotonic'])
+                self.assertEqual(run.setup_window['admissions'][-1]['status'],'STARTED')
 
-    def test_parent_deadline_clips_application_without_renewal(self):
-        with self.fixture([20],start=1770) as (run,now,calls):
-            R.install_application(run,'exact-rc.app')
-            self.assertEqual([c['timeout_seconds'] for c in run.commands],[26])
-            self.assertEqual(now[0],1790)
-            self.assertEqual(run.end,1800)
-            self.assertIsNone(run.cleanup_end)
+    def test_parent_deadline_clips_all_setup_without_renewal(self):
+        with self.fixture([2,3,10],start=1770) as (run,now,calls):
+            R.setup_application(run,'exact-rc.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[26,24,21])
+            self.assertEqual(now[0],1785)
+            self.assertEqual(run.setup_window['end_monotonic'],1800)
+            self.assertEqual([a['granted_seconds'] for a in run.setup_window['admissions']],[26,24,21])
+            self.assertTrue(all(a['deadline_monotonic']==1800 for a in run.setup_window['admissions']))
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
 
-    def test_parent_expiry_blocks_admission_or_late_success(self):
+    def test_parent_expiry_blocks_first_admission_or_late_success(self):
         from rc_acceptance_process import CaptureFailure
         with self.fixture([26],start=1770) as (run,now,calls):
-            with self.assertRaises(CaptureFailure):R.install_application(run,'exact-rc.app')
+            with self.assertRaises(CaptureFailure):R.setup_application(run,'exact-rc.app')
             self.assertEqual(len(calls),1)
             self.assertEqual(run.commands[0]['timeout_seconds'],26)
         for start in [1796,1800,1801]:
             with self.subTest(start=start),self.fixture([],start=start) as (run,now,calls):
-                with self.assertRaisesRegex(R.AcceptanceError,'Application installation deadline'):
-                    R.install_application(run,'exact-rc.app')
-                self.assertEqual(calls,[])
-                self.assertEqual(run.commands,[])
+                with self.assertRaisesRegex(R.AcceptanceError,'Simulator setup deadline'):
+                    R.setup_application(run,'exact-rc.app')
+                self.assertEqual(calls,[]);self.assertEqual(run.commands,[])
+                self.assertEqual(run.setup_window['status'],'FAILED')
+                self.assertEqual(run.setup_window['admissions'],[])
 
-    def test_cleanup_at_or_after_installation_phase_end_is_not_success(self):
-        for delay in [5,6]:
-            with self.subTest(delay=delay),self.fixture([295],cleanup_durations=[delay]) as (run,now,calls):
-                with self.assertRaisesRegex(R.AcceptanceError,'Application installation returned late'):
-                    R.install_application(run,'exact-rc.app')
-                self.assertEqual(len(calls),1)
-                self.assertEqual(run.commands[0]['returncode'],0)
-                self.assertNotIn('error',run.commands[0])
-                self.assertEqual(now[0],295+delay)
+    def test_cleanup_at_or_after_shared_end_blocks_next_action(self):
+        for durations,delays in [([475],[5]),([475],[6]),([2,470],[0,8])]:
+            with self.subTest(durations=durations,delays=delays),self.fixture(durations,cleanup_durations=delays) as (run,now,calls):
+                with self.assertRaisesRegex(R.AcceptanceError,'Simulator setup command returned late'):
+                    R.setup_application(run,'exact-rc.app')
+                self.assertEqual(len(calls),len(durations))
+                self.assertEqual(run.commands[-1]['returncode'],0)
+                self.assertNotIn('error',run.commands[-1])
+                self.assertEqual(run.setup_window['status'],'FAILED')
+                self.assertEqual(run.setup_window['admissions'][-1]['returned_monotonic'],now[0])
+                self.assertEqual(run.setup_window['admissions'][-1]['status'],'RETURNED_LATE')
+                self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
 
-    def test_timely_cleanup_does_not_admit_a_redundant_runner_install(self):
-        with self.fixture([290],cleanup_durations=[6]) as (run,now,calls):
-            R.install_application(run,'exact-rc.app')
-            self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
-            self.assertEqual(run.commands[0]['returncode'],0)
-            self.assertEqual(now[0],296)
+    def test_timely_cleanup_consumes_shared_time_without_runner_install(self):
+        with self.fixture([2,200,260],cleanup_durations=[1,1,1]) as (run,now,calls):
+            R.setup_application(run,'exact-rc.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[476,473,272])
+            self.assertEqual(calls[-1],['xcrun','simctl','install',ID,'exact-rc.app'])
+            self.assertEqual(sum(c[2]=='install' for c in calls),1)
+            self.assertEqual(now[0],465)
+            self.assertEqual([a['admission_monotonic'] for a in run.setup_window['admissions']],[0,3,204])
+            self.assertEqual([a['returned_monotonic'] for a in run.setup_window['admissions']],[3,204,465])
 
-    def test_install_failure_is_preserved_without_retry(self):
+    def test_native_failure_at_each_stage_is_preserved_without_retry(self):
         from rc_acceptance_process import CaptureFailure
-        with self.fixture([1],returncodes=[7]) as (run,now,calls):
-            with self.assertRaisesRegex(CaptureFailure,'Metadata command exited 7'):
-                R.install_application(run,'exact-rc.app')
-            self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
-            self.assertEqual(run.commands[0]['returncode'],7)
-            self.assertEqual(run.commands[0]['error'],'CaptureFailure: Metadata command exited 7')
+        for index in range(3):
+            with self.subTest(index=index),self.fixture([1]*(index+1),returncodes=[0]*index+[7]) as (run,now,calls):
+                with self.assertRaisesRegex(CaptureFailure,'Metadata command exited 7'):
+                    R.setup_application(run,'exact-rc.app')
+                self.assertEqual(len(calls),index+1)
+                self.assertEqual(run.commands[-1]['error'],'CaptureFailure: Metadata command exited 7')
+                self.assertEqual(run.setup_window['status'],'FAILED')
+                self.assertIsNone(run.setup_window['admissions'][-1]['returned_monotonic'])
+
+    def test_cancellation_does_not_advance_setup_or_replace_error(self):
+        with self.fixture([]) as (run,now,calls):
+            error=R.CancellationRequested('injected cancellation')
+            with patch.object(run,'sim',side_effect=error) as sim:
+                with self.assertRaises(R.CancellationRequested) as caught:R.setup_application(run,'exact-rc.app')
+            self.assertIs(caught.exception,error)
+            self.assertEqual(sim.call_count,1)
+            self.assertEqual(calls,[])
+            self.assertEqual(run.setup_window['status'],'FAILED')
+            self.assertEqual(len(run.setup_window['admissions']),1)
+            self.assertIsNone(run.setup_window['admissions'][0]['returned_monotonic'])
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+
+    def test_production_setup_still_precedes_authoritative_inventory_and_ui(self):
+        source=inspect.getsource(R.execute)
+        self.assertLess(source.index('run.claim_created_device('),source.index('setup_application(run,aut)'))
+        self.assertLess(source.index('setup_application(run,aut)'),source.index("installed=run.container(BUNDLE,'app')"))
+        self.assertLess(source.index("save(run.out/'installed-before.json'"),source.index("'test-installed-rc',cap=720"))
+        self.assertIn("result['setup_window']=run.setup_window",source)
+
+    def test_preparation_is_debited_before_scoped_capture_admission(self):
+        original=R.os.environ.copy
+        with self.fixture([2,3,4]) as (run,now,calls):
+            def prepare():
+                now[0]+=7
+                return original()
+            with patch.object(R.os.environ,'copy',side_effect=prepare):
+                R.setup_application(run,'exact-rc.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[469,460,450])
+            self.assertTrue(all(c['work_deadline_monotonic']==476 for c in run.commands))
+            self.assertTrue(all(c['cleanup_deadline_monotonic']==480 for c in run.commands))
+            self.assertEqual(run.setup_window['finished_monotonic'],30)
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+        with self.fixture([]) as (run,now,calls):
+            def expired_preparation():
+                now[0]=476
+                return original()
+            with patch.object(R.os.environ,'copy',side_effect=expired_preparation):
+                with self.assertRaisesRegex(R.AcceptanceError,'Overall acceptance deadline'):
+                    R.setup_application(run,'exact-rc.app')
+            self.assertEqual(calls,[]);self.assertEqual(run.commands,[])
+
+    def test_delayed_capture_entry_clips_work_and_rejects_expiry_before_spawn(self):
+        from rc_acceptance_process import CaptureFailure
+        original=R.bounded_capture
+        with self.fixture([2,3,4]) as (run,now,calls):
+            def delayed(*args,**kwargs):
+                now[0]+=7
+                self.assertEqual(kwargs['work_deadline'],476)
+                self.assertEqual(kwargs['cleanup_parent_deadline'],480)
+                return original(*args,**kwargs)
+            with patch.object(R,'bounded_capture',side_effect=delayed):
+                R.setup_application(run,'exact-rc.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[469,460,450])
+            self.assertEqual(run.setup_window['finished_monotonic'],30)
+        for entered in [476,481]:
+            with self.subTest(entered=entered),self.fixture([]) as (run,now,calls):
+                def expired(*args,**kwargs):
+                    now[0]=entered
+                    return original(*args,**kwargs)
+                with patch.object(R,'bounded_capture',side_effect=expired):
+                    with self.assertRaisesRegex(CaptureFailure,'before spawn'):
+                        R.setup_application(run,'exact-rc.app')
+                self.assertEqual(calls,[])
+                self.assertEqual(run.commands[0]['timeout_seconds'],0)
+                self.assertEqual(run.commands[0]['work_deadline_monotonic'],476)
+                self.assertEqual(run.commands[0]['cleanup_deadline_monotonic'],480)
+                self.assertNotIn('pid',run.commands[0])
+                self.assertEqual(run.setup_window['status'],'FAILED')
+
+    def test_absolute_work_deadline_rejects_nonfinite_or_nonnumeric_without_spawn(self):
+        import rc_acceptance_process as P
+        for value in [float('nan'),float('inf'),float('-inf'),'476',True]:
+            with self.subTest(value=value),self.fixture([]) as (run,now,calls):
+                record={}
+                with self.assertRaisesRegex(P.CaptureFailure,'Invalid absolute work deadline'):
+                    P.bounded_capture(['inert'],timeout=30,receipt=record,
+                        work_deadline=value,cleanup_parent_deadline=480)
+                self.assertEqual(calls,[]);self.assertNotIn('pid',record)
+
 
 class FailureSummary(unittest.TestCase):
     def test_allowlist_does_not_emit_sensitive_operation_content(self):
@@ -800,6 +909,21 @@ class CleanupAdmission(unittest.TestCase):
             self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],94)
             self.assertEqual(record['cleanup']['group_state'],'unverified')
             self.assertFalse(record['cleanup']['leader_reaped'])
+
+    def test_scoped_capture_work_and_actual_cleanup_share_absolute_parent(self):
+        with self.fixture([477]) as (P,run,now,seen):
+            with self.assertRaisesRegex(P.CaptureFailure,'work deadline exceeded'):
+                run.command(['inert'],'scoped-late',cap=476,deadline=480)
+            record=run.commands[0]
+            self.assertEqual(record['work_deadline_monotonic'],476)
+            self.assertEqual(record['cleanup_deadline_monotonic'],480)
+            self.assertEqual(seen['parents'],[480])
+            self.assertEqual(record['cleanup_state']['cleanup_deadline_monotonic'],480)
+            self.assertEqual([s[1] for s in seen['signals']],[P.signal.SIGTERM])
+            self.assertTrue(record['cleanup']['success'])
+            self.assertTrue(record['cleanup']['leader_reaped'])
+            self.assertEqual(record['cleanup']['group_state'],'absent')
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
 
     def test_term_kill_and_repeated_probes_do_not_renew_four_seconds(self):
         with self.fixture([95],mode='stubborn') as (P,run,now,seen):

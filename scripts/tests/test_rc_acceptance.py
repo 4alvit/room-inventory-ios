@@ -38,11 +38,9 @@ def preview(**info_changes):
         ('RoomInventory.app/RoomInventory',b'exact downloaded app bytes',stat.S_IFREG|0o755)])
 
 def plan():
-    return {'__xctestrun_metadata__':{'FormatVersion':1},R.TARGET:{
-        'BlueprintName':R.TARGET,'IsUITestBundle':True,
-        'TestHostPath':'__TESTROOT__/Release-iphonesimulator/'+R.TARGET+'-Runner.app',
-        'TestBundlePath':'__TESTHOST__/PlugIns/'+R.TARGET+'.xctest',
-        'TestingEnvironmentVariables':{'DYLD_INSERT_LIBRARIES':'__TESTBUNDLE__/Frameworks/libXCTestBundleInject.dylib'}}}
+    # Exact standalone descriptor emitted by Xcode 27.1 (27A9275). It contains
+    # runner-only relative paths and no machine paths, credentials or RC data.
+    return plistlib.loads((SCRIPTS/'tests/fixtures/rc-generated-simulator.xctestrun').read_bytes())
 
 def inventory_fixture():
     item={'id':str(uuid.uuid4()),'name':NAMES['item'],'model':'RC Model','serialNumber':'RC-SERIAL-001',
@@ -146,26 +144,63 @@ class ArchiveAndInstalledAUT(unittest.TestCase):
             with self.assertRaises(R.AcceptanceError):R.inventory(root)
 
 class ExternalAUT(unittest.TestCase):
-    def test_preinstalled_mode_removes_all_install_paths(self):
-        p=R.destination_xctestrun(plistlib.dumps(plan()),{'CFBundleIdentifier':R.RUNNER},ID)
+    def test_captured_simulator_descriptor_preserves_runner_paths_and_testing_environment(self):
+        generated=plan()[R.TARGET]
+        p=R.simulator_xctestrun(plistlib.dumps(plan()),{'CFBundleIdentifier':R.RUNNER},ID)
         target=plistlib.loads(p)[R.TARGET]
-        self.assertIs(target['UseDestinationArtifacts'],True)
-        self.assertFalse({'TestHostPath','TestBundlePath','UITargetAppPath'}&set(target))
-        self.assertEqual(target['UITargetAppBundleIdentifier'],R.BUNDLE)
+        for key in ('TestHostPath','TestBundlePath','DependentProductPaths','TestingEnvironmentVariables',
+                    'TestHostBundleIdentifier','UseUITargetAppProvidedByTests'):
+            self.assertEqual(target[key],generated[key])
+        self.assertFalse({'UseDestinationArtifacts','TestBundleDestinationRelativePath',
+                          'UITargetAppPath','UITargetAppBundleIdentifier'}&set(target))
         self.assertEqual(target['OnlyTestIdentifiers'],[R.METHOD])
         self.assertEqual(target['EnvironmentVariables'],{'RC_ACCEPTANCE_ID':ID})
+        self.assertEqual(target['UITargetAppEnvironmentVariables'],{})
+        self.assertEqual(target['UITargetAppCommandLineArguments'],[])
+    def test_device_only_mode_or_missing_test_provided_aut_rejected(self):
+        for key,value in [('UseDestinationArtifacts',True),
+                          ('TestBundleDestinationRelativePath','__TESTHOST__/PlugIns/'+R.TARGET+'.xctest'),
+                          ('UseUITargetAppProvidedByTests',False),('UseUITargetAppProvidedByTests',None)]:
+            with self.subTest(key=key,value=value):
+                p=plan()
+                if value is None:p[R.TARGET].pop(key)
+                else:p[R.TARGET][key]=value
+                with self.assertRaises(R.AcceptanceError):
+                    R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+    def test_foreign_missing_or_duplicate_build_dependency_rejected(self):
+        expected=plan()[R.TARGET]['DependentProductPaths']
+        for dependencies in [None,[],expected[:1],expected+[expected[0]],expected+[{'path':'bad'}],
+                             [expected[0],'__TESTROOT__/RoomInventory.app']]:
+            with self.subTest(dependencies=dependencies):
+                p=plan()
+                if dependencies is None:p[R.TARGET].pop('DependentProductPaths')
+                else:p[R.TARGET]['DependentProductPaths']=dependencies
+                with self.assertRaises(R.AcceptanceError):
+                    R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+    def test_foreign_runner_roots_or_bundle_identity_rejected(self):
+        for key,value in [('TestHostPath','/other/'+R.TARGET+'-Runner.app'),
+                          ('TestBundlePath','/other/PlugIns/'+R.TARGET+'.xctest'),
+                          ('TestHostBundleIdentifier','other'),('UITargetAppBundleIdentifier',R.BUNDLE)]:
+            with self.subTest(key=key):
+                p=plan();p[R.TARGET][key]=value
+                with self.assertRaises(R.AcceptanceError):
+                    R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
     def test_app_dependency_is_rejected(self):
         p=plan();p[R.TARGET]['UITargetAppPath']='__TESTROOT__/rebuilt/RoomInventory.app'
-        with self.assertRaises(R.AcceptanceError):R.destination_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+        with self.assertRaises(R.AcceptanceError):R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
     def test_wrong_runner_and_added_target_rejected(self):
-        with self.assertRaises(R.AcceptanceError):R.destination_xctestrun(plistlib.dumps(plan()),{'CFBundleIdentifier':'other'},ID)
+        with self.assertRaises(R.AcceptanceError):R.simulator_xctestrun(plistlib.dumps(plan()),{'CFBundleIdentifier':'other'},ID)
         p=plan();p['OtherTarget']={}
-        with self.assertRaises(R.AcceptanceError):R.destination_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+        with self.assertRaises(R.AcceptanceError):R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
     def test_format_two_also_requires_one_target(self):
         p={'__xctestrun_metadata__':{'FormatVersion':2},'TestConfigurations':[{'TestTargets':[plan()[R.TARGET]],'IsEnabled':True}]}
-        R.destination_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+        configured=plistlib.loads(R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID))
+        target=configured['TestConfigurations'][0]['TestTargets'][0]
+        self.assertEqual(target['TestHostPath'],plan()[R.TARGET]['TestHostPath'])
+        self.assertIs(target['UseUITargetAppProvidedByTests'],True)
+        self.assertNotIn('UseDestinationArtifacts',target)
         p['TestConfigurations'][0]['TestTargets'].append(copy.deepcopy(plan()[R.TARGET]))
-        with self.assertRaises(R.AcceptanceError):R.destination_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
+        with self.assertRaises(R.AcceptanceError):R.simulator_xctestrun(plistlib.dumps(p),{'CFBundleIdentifier':R.RUNNER},ID)
 
 class Evidence(unittest.TestCase):
     def setUp(self):
@@ -220,6 +255,23 @@ class BuildHarnessOnly(unittest.TestCase):
             self.assertIs(proof['test_executed'],False);self.assertIs(proof['application_built'],False)
             self.assertTrue(any('build-for-testing' in c for c in run.commands))
             self.assertFalse(any('simctl' in c or 'test-without-building' in c for c in run.commands))
+    def test_executable_descriptor_keeps_original_products_root_not_evidence_copy(self):
+        with tempfile.TemporaryDirectory(prefix='rc build output ') as d:
+            run=self.fixture(Path(d));products,runner,configured,proof=R.build_harness(run,ID)
+            original=products/'generated.xctestrun'
+            self.assertEqual(configured.parent,original.parent)
+            self.assertNotEqual(configured,run.out/'configured.xctestrun')
+            self.assertEqual(configured.read_bytes(),(run.out/'configured.xctestrun').read_bytes())
+            target=plistlib.loads(configured.read_bytes())[R.TARGET]
+            host=Path(target['TestHostPath'].replace('__TESTROOT__',str(configured.parent)))
+            bundle=Path(target['TestBundlePath'].replace('__TESTHOST__',str(host)))
+            self.assertEqual(host,runner)
+            self.assertEqual(bundle,runner/'PlugIns'/f'{R.TARGET}.xctest')
+            self.assertEqual({Path(p.replace('__TESTROOT__',str(configured.parent)))
+                              for p in target['DependentProductPaths']},{host,bundle})
+            self.assertEqual(proof['test_root'],str(products.relative_to(run.out)))
+            self.assertEqual(proof['configured_xctestrun'],str(configured.relative_to(run.out)))
+            self.assertEqual(proof['mode'],'SimulatorRunnerWithPreinstalledAUT')
     def test_project_destination_exists_before_generator_is_invoked(self):
         with tempfile.TemporaryDirectory() as d:
             run=self.fixture(Path(d));command=run.command;observed=[]

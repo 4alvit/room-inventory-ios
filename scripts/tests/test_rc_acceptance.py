@@ -461,6 +461,254 @@ class OwnedDeviceCleanup(unittest.TestCase):
                 self.assertNotIn('private',summary)
 
 
+class OwnedContainerDiscovery(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.home=Path(self.temp.name).resolve();self.now=100.
+        self.addCleanup(patch.stopall)
+        patch.object(R.Path,'home',return_value=self.home).start()
+        patch.object(R.time,'monotonic',side_effect=lambda:self.now).start()
+        self.run=R.Run(self.home,self.home/'out');self.run.device=ID
+        self.run.owned_device={'udid':ID,'name':'RC-fixture','runtime':R.RUNTIME,
+                               'device_type':R.DEVICES['iphone'],'absent_before':True}
+        R.save(self.run.out/'owned-device.json',self.run.owned_device)
+        self.device=self.home/'Library/Developer/CoreSimulator/Devices'/ID
+        self.device.mkdir(parents=True)
+        self.app_root=self.device/'data/Containers/Bundle/Application'
+        self.data_root=self.device/'data/Containers/Data/Application'
+        self.native=patch.object(self.run,'sim',side_effect=AssertionError('No native container lookup')).start()
+
+    def app(self,container='11111111-1111-4111-8111-111111111111',**changes):
+        root=self.app_root/container/'RoomInventory.app';root.mkdir(parents=True)
+        info={'CFBundleIdentifier':R.BUNDLE,'CFBundleExecutable':'RoomInventory'};info.update(changes)
+        (root/'Info.plist').write_bytes(plistlib.dumps(info))
+        (root/'RoomInventory').write_bytes(b'original RC');(root/'RoomInventory').chmod(0o755)
+        return root
+
+    def data(self,bundle,container):
+        root=self.data_root/container;root.mkdir(parents=True)
+        (root/R.ContainerDiscovery.METADATA).write_bytes(plistlib.dumps({'MCMMetadataIdentifier':bundle}))
+        return root
+
+    def before(self):
+        absent=self.run.discover('preinstall_absence');self.assertIsNone(absent.path)
+        app=self.app();expected=R.inventory(app)
+        with self.run.discover('app_before').consume() as found:
+            R.same_installed(expected,R.inventory(found.path))
+        return app
+
+    def after(self):
+        app=self.before()
+        with self.run.discover('app_after').consume() as found:self.assertEqual(found.path,app)
+        return app
+
+    def test_all_five_roles_exact_owned_paths_and_selected_mcm_bytes_without_simctl(self):
+        self.after()
+        for role,bundle,cid in [('runner_data',R.RUNNER,'22222222-2222-4222-8222-222222222222'),
+                                ('aut_data',R.BUNDLE,'33333333-3333-4333-8333-333333333333')]:
+            root=self.data(bundle,cid)
+            with self.run.discover(role).consume() as found:
+                self.assertEqual(found.path,root)
+                meta=found.record['metadata'];raw=R.base64.b64decode(meta['base64'],validate=True)
+                self.assertEqual(raw,(root/R.ContainerDiscovery.METADATA).read_bytes())
+                self.assertEqual(meta['sha256'],R.digest(raw))
+                self.assertEqual(plistlib.loads(raw)['MCMMetadataIdentifier'],bundle)
+        self.assertEqual([x['role'] for x in self.run.container_discovery],list(R.ContainerDiscovery.ROLES))
+        self.assertTrue(all(x['status']=='COMPLETED' for x in self.run.container_discovery))
+        self.assertEqual(self.native.call_count,0)
+
+    def test_preexisting_aut_or_wrong_executable_is_not_absence(self):
+        self.app(CFBundleExecutable='Wrong')
+        with self.assertRaisesRegex(R.AcceptanceError,'executable'):self.run.discover('preinstall_absence')
+        self.assertEqual(self.run.container_discovery[0]['status'],'FAILED')
+
+    def test_absence_allows_missing_chain_but_pins_existing_ancestors(self):
+        (self.device/'data').mkdir()
+        self.run.discover('preinstall_absence')
+        (self.device/'data').rename(self.device/'old-data');self.app()
+        with self.assertRaisesRegex(R.AcceptanceError,'root replaced'):self.run.discover('app_before')
+
+    def test_wrong_device_or_changed_ownership_receipt_rejected(self):
+        self.run.owned_device['udid']='11111111-1111-4111-8111-111111111111'
+        with self.assertRaises(R.AcceptanceError):self.run.discover('preinstall_absence')
+
+    def test_changed_persisted_owner_rejected(self):
+        (self.run.out/'owned-device.json').write_text('{}')
+        with self.assertRaisesRegex(R.AcceptanceError,'ownership'):self.run.discover('preinstall_absence')
+
+    def test_symlink_in_each_app_ancestor_container_app_or_plist_rejected(self):
+        app=self.app();targets=[self.device,self.device/'data',self.device/'data/Containers',
+            self.device/'data/Containers/Bundle',self.app_root,app.parent,app,app/'Info.plist']
+        for target in targets:
+            with self.subTest(target=target):
+                moved=target.with_name(target.name+'-saved');target.rename(moved);target.symlink_to(moved)
+                try:
+                    self.run.container_discovery=[]
+                    with self.assertRaises((R.AcceptanceError,OSError)):self.run.discover('preinstall_absence')
+                finally:target.unlink();moved.rename(target)
+
+    def test_duplicate_aut_rejected(self):
+        self.run.discover('preinstall_absence');self.app();self.app('44444444-4444-4444-8444-444444444444')
+        with self.assertRaisesRegex(R.AcceptanceError,'ambiguous'):self.run.discover('app_before')
+
+    def test_data_ambiguous_mcm_rejected(self):
+        self.after()
+        for n in ['22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333']:self.data(R.RUNNER,n)
+        with self.assertRaisesRegex(R.AcceptanceError,'ambiguous'):self.run.discover('runner_data')
+
+    def test_data_malformed_oversized_special_and_symlink_metadata_fail(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222');meta=root/R.ContainerDiscovery.METADATA
+        original=meta.read_bytes()
+        for kind in ['malformed','oversized','fifo','symlink']:
+            with self.subTest(kind=kind):
+                self.run.container_discovery=self.run.container_discovery[:3];meta.unlink()
+                if kind=='malformed':meta.write_bytes(b'not plist')
+                if kind=='oversized':meta.write_bytes(b'x'*(R.MIB+1))
+                if kind=='fifo':os.mkfifo(meta)
+                if kind=='symlink':meta.symlink_to(root/'missing')
+                with self.assertRaises((R.AcceptanceError,OSError,plistlib.InvalidFileException)):
+                    self.run.discover('runner_data')
+                meta.unlink();meta.write_bytes(original)
+
+    def test_app_replaced_between_native_before_after_rejected(self):
+        app=self.before();app.rename(self.home/'old.app');self.app()
+        with self.assertRaisesRegex(R.AcceptanceError,'ambiguous|inode|root replaced'):self.run.discover('app_after')
+
+    def test_app_uuid_ancestor_replacement_preserving_app_inode_fails(self):
+        def replace_parent(app):
+            parent=app.parent;old=parent.with_name('old-parent');parent.rename(old);parent.mkdir()
+            (old/app.name).rename(app);old.rmdir()
+        self.run.discover('preinstall_absence');app=self.app()
+        with self.assertRaisesRegex(R.AcceptanceError,'ancestor replaced'):
+            with self.run.discover('app_before').consume():replace_parent(app)
+        self.run.container_discovery=self.run.container_discovery[:1]
+        self.run.container_roots={k:v for k,v in self.run.container_roots.items() if '/Bundle/Application/' not in k}
+        self.run.installed_container=None
+        with self.run.discover('app_before').consume():pass
+        replace_parent(app)
+        with self.assertRaisesRegex(R.AcceptanceError,'root replaced'):self.run.discover('app_after')
+
+    def test_selected_metadata_drift_during_consumption_fails(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        with self.assertRaisesRegex(R.AcceptanceError,'metadata changed'):
+            with self.run.discover('runner_data').consume() as found:
+                (root/R.ContainerDiscovery.METADATA).write_bytes(plistlib.dumps({'MCMMetadataIdentifier':R.BUNDLE}))
+        self.assertEqual(self.run.container_discovery[-1]['status'],'FAILED')
+
+    def test_selected_root_replaced_during_consumption_fails(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        with self.assertRaisesRegex(R.AcceptanceError,'replaced'):
+            with self.run.discover('runner_data').consume():
+                root.rename(root.with_name('old'));self.data(R.RUNNER,root.name)
+
+    def test_installed_bytes_and_executable_modes_remain_required(self):
+        self.run.discover('preinstall_absence');app=self.app();expected=R.inventory(app)
+        (app/'RoomInventory').chmod(0o644)
+        with self.assertRaisesRegex(R.AcceptanceError,'mode'):self.run.discover('app_before')
+        (app/'RoomInventory').chmod(0o755);(app/'RoomInventory').write_bytes(b'changed')
+        self.run.container_discovery=self.run.container_discovery[:1]
+        with self.assertRaisesRegex(R.AcceptanceError,'differs'):
+            with self.run.discover('app_before').consume() as found:R.same_installed(expected,R.inventory(found.path))
+
+    def test_app_container_and_child_count_caps(self):
+        self.app_root.mkdir(parents=True)
+        for _ in range(65):(self.app_root/str(uuid.uuid4()).upper()).mkdir()
+        with self.assertRaisesRegex(R.AcceptanceError,'entry cap'):self.run.discover('preinstall_absence')
+
+    def test_data_count_and_aggregate_metadata_caps(self):
+        self.after();self.data_root.mkdir(parents=True)
+        for _ in range(513):(self.data_root/str(uuid.uuid4()).upper()).mkdir()
+        with self.assertRaisesRegex(R.AcceptanceError,'entry cap'):self.run.discover('runner_data')
+
+    def test_aggregate_metadata_bytes_fail_closed(self):
+        self.after()
+        for _ in range(9):
+            root=self.data('unrelated',str(uuid.uuid4()).upper())
+            (root/R.ContainerDiscovery.METADATA).write_bytes(plistlib.dumps({'MCMMetadataIdentifier':'unrelated','padding':'x'*(R.MIB-1000)}))
+        with self.assertRaisesRegex(R.AcceptanceError,'aggregate'):self.run.discover('runner_data')
+
+    def test_deadline_after_read_and_parent_clip_cannot_stamp_complete(self):
+        self.app();original=R.regular
+        def slow(path,*args):
+            raw=original(path,*args)
+            if Path(path).name=='Info.plist':self.now+=30
+            return raw
+        with patch.object(R,'regular',side_effect=slow):
+            with self.assertRaisesRegex(R.AcceptanceError,'deadline'):self.run.discover('preinstall_absence')
+        row=self.run.container_discovery[-1];self.assertEqual(row['status'],'FAILED');self.assertIsNone(row['lookup_finished_monotonic'])
+        self.run.container_discovery=[];self.run.end=self.now
+        with self.assertRaisesRegex(R.AcceptanceError,'deadline'):self.run.discover('preinstall_absence')
+
+    def test_consumption_uses_existing_parent_not_renewed_lookup_and_rejects_late_return(self):
+        self.run.discover('preinstall_absence');self.app()
+        with self.run.discover('app_before').consume():self.now+=40
+        row=self.run.container_discovery[-1]
+        self.assertLess(row['lookup_finished_monotonic'],row['deadline_monotonic'])
+        self.assertGreater(row['consumption']['finished_monotonic'],row['deadline_monotonic'])
+        with self.assertRaisesRegex(R.AcceptanceError,'deadline'):
+            with self.run.discover('app_after').consume():self.now=self.run.end
+        self.assertEqual(self.run.container_discovery[-1]['status'],'FAILED')
+
+    def test_preabsence_debits_setup_and_expiry_prevents_install(self):
+        calls=[]
+        def sim(*args,**kwargs):
+            calls.append(args[0]);self.run.commands.append({'command':['xcrun','simctl',*map(str,args)]})
+        self.native.side_effect=sim
+        original=self.run.discover
+        def slow(role,deadline=None):
+            found=original(role,deadline);self.now=deadline;return found
+        with patch.object(self.run,'discover',side_effect=slow):
+            with self.assertRaisesRegex(R.AcceptanceError,'setup deadline'):R.setup_application(self.run,'aut')
+        self.assertEqual(calls,['boot','bootstatus'])
+        self.assertEqual(self.run.setup_window['status'],'FAILED')
+        self.assertEqual(self.run.container_discovery[0]['native_operation_cursor'],2)
+
+    def test_native_cursor_and_invalid_role_never_advance_or_retry(self):
+        with self.assertRaisesRegex(R.AcceptanceError,'role order'):self.run.discover('app_before')
+        self.run.commands=[{}]*36;self.run.discover('preinstall_absence')
+        self.assertEqual(self.run.container_discovery[0]['native_operation_cursor'],36)
+        with self.assertRaisesRegex(R.AcceptanceError,'role order'):self.run.discover('preinstall_absence')
+        self.assertEqual(self.native.call_count,0)
+
+    def test_consumed_descendant_replacement_after_child_return_is_rejected(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        documents=root/'Documents';evidence=documents/'RC-fixture';evidence.mkdir(parents=True)
+        (evidence/'journey.json').write_text('{}')
+        with self.assertRaisesRegex(R.AcceptanceError,'Indirect|replaced'):
+            with self.run.discover('runner_data').consume() as found:
+                returned=found.child('Documents/RC-fixture')
+                documents.rename(root/'old-documents');documents.symlink_to(root/'old-documents')
+                self.assertEqual((returned/'journey.json').read_text(),'{}')
+        self.assertEqual(self.run.container_discovery[-1]['status'],'FAILED')
+
+    def test_consumed_terminal_directory_and_file_replacement_are_rejected(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        (root/'Documents').mkdir();evidence=root/'Documents/evidence';evidence.mkdir()
+        with self.assertRaisesRegex(R.AcceptanceError,'replaced'):
+            with self.run.discover('runner_data').consume() as found:
+                returned=found.child('Documents/evidence');returned.rename(root/'old-evidence');returned.mkdir()
+        self.run.container_discovery=self.run.container_discovery[:3]
+        final=root/'Documents/journey.json';final.write_text('{}')
+        with self.assertRaisesRegex(R.AcceptanceError,'file replaced'):
+            with self.run.discover('runner_data').consume() as found:
+                returned=found.child('Documents/journey.json');returned.rename(root/'old-journey');returned.write_text('{}')
+
+    def test_missing_unselected_data_metadata_is_explicitly_fail_closed(self):
+        self.after();self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        (self.data_root/'33333333-3333-4333-8333-333333333333').mkdir()
+        with self.assertRaises(FileNotFoundError):self.run.discover('runner_data')
+
+    def test_cancellation_during_discovery_remains_primary(self):
+        with patch.object(R,'regular',side_effect=R.CancellationRequested('fixture')):
+            with self.assertRaises(R.CancellationRequested):self.run.discover('preinstall_absence')
+        self.assertEqual(self.run.container_discovery[-1]['status'],'FAILED')
+
+    def test_consumed_child_symlink_is_rejected(self):
+        self.after();root=self.data(R.RUNNER,'22222222-2222-4222-8222-222222222222')
+        (root/'Documents').symlink_to(self.home)
+        with self.assertRaisesRegex(R.AcceptanceError,'Indirect'):
+            with self.run.discover('runner_data').consume() as found:found.child('Documents/journey.json')
+
 class InstallationWindow(unittest.TestCase):
     @contextmanager
     def fixture(self, durations, start=0, cleanup_durations=None, returncodes=None):
@@ -491,6 +739,9 @@ class InstallationWindow(unittest.TestCase):
                 patch.object(P.os,'set_blocking'), \
                 patch.object(P,'kill_owned',side_effect=cleanup):
             run=R.Run(d,Path(d)/'out');run.device=ID;now[0]=start
+            # This suite isolates native shared-window admission; the real
+            # filesystem preabsence path is exercised by OwnedContainerDiscovery.
+            run.discover=Mock(return_value=Mock(path=None))
             yield run,now,calls
 
     def test_slow_boot_or_install_shares_original_total_with_one_aut_install(self):
@@ -604,7 +855,7 @@ class InstallationWindow(unittest.TestCase):
     def test_production_setup_still_precedes_authoritative_inventory_and_ui(self):
         source=inspect.getsource(R.execute)
         self.assertLess(source.index('run.claim_created_device('),source.index('setup_application(run,aut)'))
-        self.assertLess(source.index('setup_application(run,aut)'),source.index("installed=run.container(BUNDLE,'app')"))
+        self.assertLess(source.index('setup_application(run,aut)'),source.index("run.discover('app_before')"))
         self.assertLess(source.index("save(run.out/'installed-before.json'"),source.index("'test-installed-rc',cap=720"))
         self.assertIn("result['setup_window']=run.setup_window",source)
 

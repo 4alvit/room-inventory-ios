@@ -197,3 +197,41 @@ Authoritative installed-app inventories, the 720-second UI command cap,
 unchanged. The parent does not guarantee a full 720 seconds remains for UI work.
 This reallocates existing setup time; it does not establish or cure the cause of
 the silent Simulator bootstatus and metadata failures.
+
+
+### Owned container discovery
+
+The fresh owned Simulator is checked for an absent AUT after bootstatus and before
+its sole installation, within the original shared 480-second setup window. The
+absence observation is clipped to setup end minus the existing four-second child
+stop reserve. After installation, four typed observations locate the AUT app
+before and after XCTest, then the runner data and AUT data containers after the
+native summary. These replace `simctl get_app_container`; there is no fallback,
+retry, device-wide search or new native action.
+
+Each lookup has one cooperative 30-second filesystem deadline, clipped to the
+original 1,800-second parent. Filesystem calls cannot be forcibly interrupted;
+a late return fails. Exact owned-device receipt, UUID, ancestor identities,
+container membership and no-follow metadata reads are checked. App discovery
+allows at most 64 containers and eight children per container; data discovery
+allows at most 512 containers. Plists are limited to 1 MiB each and 8 MiB total
+per lookup. A malformed, missing or indirect MCM plist in any enumerated data
+container fails closed, including an unrelated incomplete system container.
+This is stricter than Recovery's unrelated-container filtering.
+
+App bundle ID and executable must match exactly. The before/after app path and
+inode stay fixed, and both full byte/executable-mode inventories must equal the
+original downloaded RC. Data lookup requires one exact MCM identifier; selected
+runner and AUT containers must be distinct. Only the two selected MCM plists are
+retained as canonical base64 with size, hash and file identity (at most 2 MiB raw).
+
+The five ordered records carry native operation cursors and lookup timestamps.
+They are appended in memory; final result persistence is not claimed to occur
+inside each lookup. Existing full inventories and evidence copies retain their
+parent allocation, with separate consumption timestamps and fresh checks of the
+selected container, metadata and every used descendant directory or terminal
+file before and after consumption. This does not renew a lookup allowance.
+Native XCTest success, all journey/export checks, byte identities and process
+closure remain mandatory: filesystem discovery alone proves neither application
+registration nor successful launch. The existing already-Shutdown cleanup
+alternative is preserved.

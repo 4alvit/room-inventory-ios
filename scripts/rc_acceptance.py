@@ -6,6 +6,8 @@ The sole native entry point requires a trusted main workflow_dispatch context.
 """
 from __future__ import annotations
 import argparse
+import base64
+from contextlib import contextmanager
 import csv
 from collections import Counter
 import hashlib
@@ -256,6 +258,230 @@ def validate_created_device(before, after, device_id, name, device_type):
             and current[0].get('state')=='Shutdown', 'Created device identity mismatch')
     return current[0]
 
+class ContainerDiscovery:
+    """Cooperative bounded lookup in the freshly owned device, never registration proof."""
+    ROLES = ('preinstall_absence', 'app_before', 'app_after', 'runner_data', 'aut_data')
+    METADATA = '.com.apple.mobile_container_manager.metadata.plist'
+
+    def __init__(self, run, role, deadline=None):
+        self.run, self.role = run, role
+        require(role in self.ROLES and len(run.container_discovery)<5
+                and role==self.ROLES[len(run.container_discovery)], 'Discovery role order')
+        self.started=time.monotonic()
+        self.end=min(self.started+30,run.end,run.end if deadline is None else deadline)
+        self.record={'schema_version':1,'method':'exclusive-owned-filesystem','role':role,
+            'device_uuid':run.device,'native_operation_cursor':len(run.commands),
+            'started_monotonic':self.started,'deadline_monotonic':self.end,
+            'parent_end_monotonic':run.end,'lookup_finished_monotonic':None,
+            'receipt_storage':'in-memory-until-final-result','status':'STARTED',
+            'selected':None,'metadata':None,'consumption':None,
+            'limits':{'lookup_seconds':30,'containers':64 if role in self.ROLES[:3] else 512,
+                'children_per_app_container':8,'metadata_file_bytes':MIB,'metadata_total_bytes':8*MIB}}
+        run.container_discovery.append(self.record)
+        self.dirs={};self.memberships={};self.metadata_files={};self.bytes=0;self.entries=0
+        self.path=None;self.selected_metadata=None;self.consumed_directories={};self.consumed_files={}
+
+    def check(self):
+        require(time.monotonic()<min(self.end,self.run.end),'Container discovery deadline')
+
+    @staticmethod
+    def directory_identity(path):
+        value=path.lstat()
+        require(stat.S_ISDIR(value.st_mode) and path.resolve(strict=True)==path,
+                'Indirect or invalid container directory')
+        return [value.st_dev,value.st_ino,value.st_mode]
+
+    @staticmethod
+    def file_identity(path):
+        value=path.lstat()
+        require(stat.S_ISREG(value.st_mode),'Indirect or special container metadata')
+        return [value.st_dev,value.st_ino,value.st_mode,value.st_size,value.st_mtime_ns,value.st_ctime_ns]
+
+    def directory(self,path):
+        self.check();identity=self.directory_identity(path);self.check()
+        old=self.dirs.setdefault(path,identity)
+        require(old==identity,'Container directory replaced during discovery')
+        return identity
+
+    def entries_at(self,path,maximum):
+        self.check();items=[]
+        with os.scandir(path) as stream:
+            for entry in stream:
+                self.check();items.append(Path(entry.path))
+                require(len(items)<=maximum,'Container discovery entry cap')
+        self.check();items=sorted(items)
+        names=[item.name for item in items]
+        require(len({n.casefold() for n in names})==len(names),'Ambiguous container names')
+        old=self.memberships.setdefault(path,names)
+        require(old==names,'Container membership changed during discovery')
+        return items
+
+    def metadata(self,path):
+        self.check();before=self.file_identity(path)
+        data=regular(path,MIB);after=self.file_identity(path);self.check()
+        require(before==after,'Container metadata changed during discovery')
+        self.bytes+=len(data);require(self.bytes<=8*MIB,'Container metadata aggregate cap')
+        value=plistlib.loads(data);require(isinstance(value,dict),'Malformed container metadata')
+        self.metadata_files[path]=(before,digest(data),len(data))
+        return value,data,before
+
+    def ownership(self):
+        self.check();owned=self.run.owned_device
+        require(isinstance(owned,dict) and owned.get('udid')==self.run.device
+                and owned.get('absent_before') is True
+                and str(uuid.UUID(self.run.device)).upper()==self.run.device,
+                'Missing fresh exclusive device ownership')
+        raw=regular(self.run.out/'owned-device.json',MIB)
+        require(loads(raw)==owned,'Persisted device ownership changed')
+        self.check()
+        return digest(raw)
+
+    def lookup(self):
+        try:
+            self.record['ownership_sha256']=self.ownership()
+            self.device=Path.home()/'Library/Developer/CoreSimulator/Devices'/self.run.device
+            self.directory(self.device)
+            kind='Bundle' if self.role in self.ROLES[:3] else 'Data'
+            self.root=self.device/'data/Containers'/kind/'Application'
+            self.record['root']=self.root.relative_to(self.device).as_posix()
+            missing=None;chain=[self.device]
+            for part in self.root.relative_to(self.device).parts:
+                path=chain[-1]/part;chain.append(path);self.check()
+                if not os.path.lexists(path):
+                    require(self.role=='preinstall_absence','Container root missing')
+                    missing=path;break
+                self.directory(path)
+            candidates=[]
+            if missing is None:
+                for container in self.entries_at(self.root,self.record['limits']['containers']):
+                    require(str(uuid.UUID(container.name)).upper()==container.name,'Invalid container UUID')
+                    self.directory(container);self.entries+=1
+                    if kind=='Bundle':
+                        for app in self.entries_at(container,8):
+                            self.check();self.entries+=1;node=app.lstat()
+                            require(stat.S_ISREG(node.st_mode) or stat.S_ISDIR(node.st_mode),
+                                    'Indirect or special app container entry')
+                            if stat.S_ISREG(node.st_mode):
+                                require(node.st_size<=MIB,'Oversized app container entry');continue
+                            require(app.suffix=='.app','Unexpected app container directory')
+                            self.directory(app)
+                            value,raw,identity=self.metadata(app/'Info.plist')
+                            require(isinstance(value.get('CFBundleIdentifier'),str) and value['CFBundleIdentifier'],
+                                    'Missing app bundle identity')
+                            if value.get('CFBundleIdentifier')==BUNDLE:
+                                require(app.name=='RoomInventory.app' and value.get('CFBundleExecutable')=='RoomInventory',
+                                        'Wrong installed AUT executable')
+                                executable=app/'RoomInventory';self.file_identity(executable)
+                                require(executable.lstat().st_mode & 0o111,'AUT executable mode missing')
+                                candidates.append((app,app/'Info.plist',raw,identity))
+                    else:
+                        value,raw,identity=self.metadata(container/self.METADATA)
+                        require(isinstance(value.get('MCMMetadataIdentifier'),str) and value['MCMMetadataIdentifier'],
+                                'Missing data container identity')
+                        bundle=RUNNER if self.role=='runner_data' else BUNDLE
+                        if value.get('MCMMetadataIdentifier')==bundle:
+                            candidates.append((container,container/self.METADATA,raw,identity))
+            for path,identity in self.dirs.items():
+                require(self.directory(path)==identity,'Container directory changed')
+            for path,names in self.memberships.items():
+                maximum=self.record['limits']['containers'] if path==self.root else 8
+                require([p.name for p in self.entries_at(path,maximum)]==names,'Container membership changed')
+            for path,(identity,sha,size) in self.metadata_files.items():
+                self.check();require(self.file_identity(path)==identity,'Container metadata identity drift')
+            require(missing is None or not os.path.lexists(missing),'Missing app root changed during absence check')
+            require(len(candidates)==(0 if self.role=='preinstall_absence' else 1),'Missing or ambiguous container')
+            retained=set(chain)
+            if candidates:
+                selected_path=candidates[0][0];retained.add(selected_path)
+                retained.update(p for p in selected_path.parents if p==self.device or p.is_relative_to(self.device))
+            roots={str(p):v for p,v in self.dirs.items() if p in retained}
+            for path,identity in self.run.container_roots.items():
+                if path in roots:require(roots[path]==identity,'Previously owned container root replaced')
+                else:
+                    self.check();require(self.directory_identity(Path(path))==identity,'Previously owned root replaced')
+            self.run.container_roots.update(roots)
+            self.record.update(directory_identities={str(p.relative_to(self.device)):v for p,v in self.dirs.items() if p in retained},
+                root_missing=None if missing is None else missing.relative_to(self.device).as_posix(),
+                candidate_count=len(candidates),entry_count=self.entries,metadata_bytes=self.bytes)
+            if candidates:
+                self.path,self.selected_metadata,raw,identity=candidates[0]
+                selected={'path':self.path.relative_to(self.device).as_posix(),'identity':self.dirs[self.path]}
+                self.record['selected']=selected
+                meta={'path':self.selected_metadata.relative_to(self.device).as_posix(),
+                      'identity':identity,'size':len(raw),'sha256':digest(raw)}
+                if kind=='Data':meta['base64']=base64.b64encode(raw).decode('ascii')
+                self.record['metadata']=meta
+                if kind=='Bundle':
+                    require(self.run.installed_container in (None,selected),'Installed AUT path or inode changed')
+                    self.run.installed_container=selected
+                elif self.role=='aut_data':
+                    prior=self.run.container_discovery[-2]['selected']
+                    require(selected['path']!=prior['path'] and selected['identity'][:2]!=prior['identity'][:2],
+                            'Runner and AUT data containers alias')
+            self.check();require(self.ownership()==self.record['ownership_sha256'],'Ownership changed during lookup')
+            self.record['status']='LOOKUP_COMPLETE'
+            finished=time.monotonic();require(finished<self.end,'Container lookup returned late')
+            self.record['lookup_finished_monotonic']=finished
+            return self
+        except BaseException:
+            self.record['status']='FAILED';raise
+
+    def revalidate(self):
+        # Content consumption keeps its existing parent allocation. It does not
+        # renew the completed thirty-second lookup or claim a hard FS interrupt.
+        require(time.monotonic()<self.run.end,'Container consumption parent deadline')
+        owned=self.run.owned_device
+        require(owned is not None and owned['udid']==self.run.device
+                and digest(regular(self.run.out/'owned-device.json',MIB))==self.record['ownership_sha256']
+                and loads(regular(self.run.out/'owned-device.json',MIB))==owned,'Container ownership drift')
+        for rel,identity in self.record['directory_identities'].items():
+            require(self.directory_identity(self.device/rel)==identity,'Container ancestor replaced')
+        require(self.path is not None and self.directory_identity(self.path)==self.record['selected']['identity'],
+                'Selected container replaced')
+        meta=self.record['metadata'];raw=regular(self.selected_metadata,MIB)
+        require(self.file_identity(self.selected_metadata)==meta['identity']
+                and len(raw)==meta['size'] and digest(raw)==meta['sha256'],'Selected metadata changed')
+        for path,identity in self.consumed_directories.items():
+            require(self.directory_identity(path)==identity,'Consumed container directory replaced')
+        for path,identity in self.consumed_files.items():
+            require(self.file_identity(path)==identity,'Consumed container file replaced')
+        require(time.monotonic()<self.run.end,'Container consumption returned late')
+
+    def child(self,relative):
+        require(time.monotonic()<self.run.end,'Container consumption parent deadline')
+        path=PurePosixPath(relative)
+        require(not path.is_absolute() and path.parts and all(x not in ('','.','..') for x in path.parts),
+                'Unsafe container child')
+        current=self.path
+        for index,part in enumerate(path.parts):
+            current=current/part;node=current.lstat()
+            if index<len(path.parts)-1 or stat.S_ISDIR(node.st_mode):
+                identity=self.directory_identity(current)
+                require(self.consumed_directories.setdefault(current,identity)==identity,'Consumed directory changed')
+            else:
+                identity=self.file_identity(current)
+                require(self.consumed_files.setdefault(current,identity)==identity,'Consumed file changed')
+        self.record['consumption']['directory_identities']={str(p.relative_to(self.device)):v
+            for p,v in self.consumed_directories.items()}
+        self.record['consumption']['file_identities']={str(p.relative_to(self.device)):v
+            for p,v in self.consumed_files.items()}
+        require(time.monotonic()<self.run.end,'Container consumption child returned late')
+        return current
+
+    @contextmanager
+    def consume(self):
+        require(self.record['status']=='LOOKUP_COMPLETE','Container lookup not complete')
+        self.record['consumption']={'started_monotonic':time.monotonic(),'finished_monotonic':None,
+                                    'parent_end_monotonic':self.run.end,'status':'STARTED'}
+        try:
+            self.revalidate();yield self
+            self.revalidate();finished=time.monotonic()
+            require(finished<self.run.end,'Container consumption returned late')
+            self.record['consumption'].update(finished_monotonic=finished,status='COMPLETED')
+            self.record['status']='COMPLETED'
+        except BaseException:
+            self.record['status']='FAILED';self.record['consumption']['status']='FAILED';raise
+
 def setup_application(run, aut):
     # Normal Simulator testing stages the runner from TestHostPath. Only the
     # separately verified RC application needs an explicit installation here.
@@ -266,6 +492,9 @@ def setup_application(run, aut):
         'cleanup_per_child_seconds':4,'status':'STARTED','finished_monotonic':None,'admissions':[]}
     try:
         for args in [('boot',run.device),('bootstatus',run.device,'-b'),('install',run.device,aut)]:
+            if args[0]=='install':
+                absent=run.discover('preinstall_absence',deadline=phase_end-4)
+                require(absent.path is None,'AUT exists before installation')
             admitted=time.monotonic();remaining=phase_end-admitted
             require(remaining>4,'Simulator setup deadline')
             admission={'operation':args[0],'operation_index':len(run.commands)+1,'admission_monotonic':admitted,
@@ -499,6 +728,7 @@ class Run:
         (self.out/'operations').mkdir()
         self.end=time.monotonic()+1800; self.commands=[]; self.device=None; self.cleanup_end=None
         self.owned_device=None; self.device_cleanup=None; self.setup_window=None
+        self.container_discovery=[]; self.container_roots={}; self.installed_container=None
     def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False,on_stdout=None,deadline=None):
         if cleanup and self.cleanup_end is None:self.cleanup_end=time.monotonic()+90
         parent_end=self.cleanup_end if cleanup else self.end
@@ -521,11 +751,11 @@ class Run:
             self.commands.append(record); save(stem.with_suffix('.json'),record)
     def sim(self,*args,cap=30,cleanup=False,deadline=None):
         return self.command(['xcrun','simctl',*args],str(args[0]),cap=cap,cleanup=cleanup,deadline=deadline)
-    def container(self,bundle,kind,cleanup=False):
-        p=Path(self.sim('get_app_container',self.device,bundle,kind,cleanup=cleanup).decode().strip())
-        expected=Path.home()/'Library/Developer/CoreSimulator/Devices'/self.device/'data/Containers'
-        require(p.is_absolute() and p.resolve()==p and p.is_relative_to(expected),'Container outside exact device')
-        return p
+    def discover(self,role,deadline=None):
+        found=ContainerDiscovery(self,role,deadline).lookup()
+        if role=='preinstall_absence':
+            found.check();found.record['status']='COMPLETED'
+        return found
     def claim_created_device(self, before, after, device_id, name, device_type):
         created=validate_created_device(before,after,device_id,name,device_type)
         require(self.device==device_id and str(uuid.UUID(device_id)).upper()==device_id,
@@ -770,47 +1000,52 @@ def execute(args):
         run.device=created;result['device_uuid']=run.device
         result['created_device']=run.claim_created_device(previous_devices,loads(run.sim('list','devices','--json')),created,name,DEVICES[args.device])
         setup_application(run,aut)
-        installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
-        save(run.out/'installed-before.json',inventory(installed))
+        with run.discover('app_before').consume() as found:
+            installed=found.path;before_inventory=inventory(installed)
+            same_installed(aut_inventory,before_inventory);found.revalidate()
+            save(run.out/'installed-before.json',before_inventory)
         failure_sample=FailureSample(run,run_id,installed)
         run.command(['xcodebuild','test-without-building','-xctestrun',plan,'-destination','platform=iOS Simulator,id='+run.device,
             '-only-testing:'+TARGET+'/'+METHOD,'-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1',
             '-collect-test-diagnostics','never','-resultBundlePath',run.out/'Acceptance.xcresult'],
             'test-installed-rc',cap=720,limit=64*MIB,on_stdout=failure_sample.feed)
         require(not failure_sample.seen,'Native failure marker received')
-        same_installed(aut_inventory,inventory(run.container(BUNDLE,'app')))
-        save(run.out/'installed-after.json',inventory(installed))
+        with run.discover('app_after').consume() as found:
+            after_inventory=inventory(found.path);same_installed(aut_inventory,after_inventory)
+            found.revalidate();save(run.out/'installed-after.json',after_inventory)
         summary=loads(run.command(['xcrun','xcresulttool','get','test-results','summary','--path',run.out/'Acceptance.xcresult'],'test-summary',cap=45))
         require(summary.get('result')=='Passed' and all(summary.get(k)==v for k,v in {'totalTestCount':1,'passedTests':1,'failedTests':0,'skippedTests':0,'expectedFailures':0}.items()),'Expected one successful native acceptance test')
         configurations=summary.get('devicesAndConfigurations',[])
         require(len(configurations)==1 and configurations[0].get('device',{}).get('deviceId')==run.device,'Result device mismatch')
         save(run.out/'test-summary.json',summary)
-        runner_data=run.container(RUNNER,'data');evidence=runner_data/'Documents'/('RC-'+run_id)
-        ei=inventory(evidence,count_limit=128,byte_limit=64*MIB)
-        journey=loads(regular(evidence/'journey.json',MIB));names=validate_journey(journey,run_id,ei)
-        shutil.copytree(evidence,run.out/'ui-evidence');same_installed(ei,inventory(run.out/'ui-evidence',count_limit=128,byte_limit=64*MIB))
-        data=run.container(BUNDLE,'data');inv=loads(regular(data/'Library/Application Support/RoomInventory/inventory.json',4*MIB))
-        assert_inventory(inv,names,'RC saved notes');save(run.out/'restored-inventory.json',inv)
-        folder=saved_folder(run.device,'RC-'+run_id);saved=inventory(folder,count_limit=8,byte_limit=32*MIB)
-        files={p:regular(folder/p,24*MIB) for p in saved};checks=validate_exports(files,inv,names,run_id)
-        generated_root=data/'tmp/InventoryExports'
-        generated=inventory(generated_root,count_limit=16,byte_limit=32*MIB)
-        generated_names={'csv':('Inventory-localized.csv','csv'),'pdf':('Inventory.pdf','pdf'),
-            'package':('Inventory-package.zip','zip'),'backup':('Inventory.roominventory','roominventory'),
-            'cancel-backup':('Inventory.roominventory','roominventory')}
-        wanted=Counter((filename,digest(files[f'{kind}-{run_id}.{ext}'])) for kind,(filename,ext) in generated_names.items())
-        observed=Counter()
-        for p,meta in generated.items():
-            parts=PurePosixPath(p).parts;require(len(parts)==2,'Unexpected generated export nesting');uuid.UUID(parts[0])
-            observed[(parts[1],meta['sha256'])]+=1
-        require(observed==wanted,'Generated/saved export byte multiset mismatch')
-        result['generated_exports']=generated
-        export_dir=run.out/'exports';export_dir.mkdir()
-        for p,raw in files.items():(export_dir/p).write_bytes(raw)
-        unpacked=export_dir/'package-contents';unpacked.mkdir()
-        for p,(raw,_) in zip_members(files[f'package-{run_id}.zip'],max_files=8,max_bytes=24*MIB).items():(unpacked/p).write_bytes(raw)
-        result['export_checks']=checks;result['saved_exports']=saved
-        result['ui_evidence']=ei;result['steps']=journey['steps'];result['installed_app_inventory']=aut_inventory
+        with run.discover('runner_data').consume() as found:
+            evidence=found.child('Documents/RC-'+run_id)
+            ei=inventory(evidence,count_limit=128,byte_limit=64*MIB)
+            journey=loads(regular(evidence/'journey.json',MIB));names=validate_journey(journey,run_id,ei)
+            shutil.copytree(evidence,run.out/'ui-evidence');same_installed(ei,inventory(run.out/'ui-evidence',count_limit=128,byte_limit=64*MIB))
+        with run.discover('aut_data').consume() as found:
+            inv=loads(regular(found.child('Library/Application Support/RoomInventory/inventory.json'),4*MIB))
+            assert_inventory(inv,names,'RC saved notes');save(run.out/'restored-inventory.json',inv)
+            folder=saved_folder(run.device,'RC-'+run_id);saved=inventory(folder,count_limit=8,byte_limit=32*MIB)
+            files={p:regular(folder/p,24*MIB) for p in saved};checks=validate_exports(files,inv,names,run_id)
+            generated_root=found.child('tmp/InventoryExports')
+            generated=inventory(generated_root,count_limit=16,byte_limit=32*MIB)
+            generated_names={'csv':('Inventory-localized.csv','csv'),'pdf':('Inventory.pdf','pdf'),
+                'package':('Inventory-package.zip','zip'),'backup':('Inventory.roominventory','roominventory'),
+                'cancel-backup':('Inventory.roominventory','roominventory')}
+            wanted=Counter((filename,digest(files[f'{kind}-{run_id}.{ext}'])) for kind,(filename,ext) in generated_names.items())
+            observed=Counter()
+            for p,meta in generated.items():
+                parts=PurePosixPath(p).parts;require(len(parts)==2,'Unexpected generated export nesting');uuid.UUID(parts[0])
+                observed[(parts[1],meta['sha256'])]+=1
+            require(observed==wanted,'Generated/saved export byte multiset mismatch')
+            result['generated_exports']=generated
+            export_dir=run.out/'exports';export_dir.mkdir()
+            for p,raw in files.items():(export_dir/p).write_bytes(raw)
+            unpacked=export_dir/'package-contents';unpacked.mkdir()
+            for p,(raw,_) in zip_members(files[f'package-{run_id}.zip'],max_files=8,max_bytes=24*MIB).items():(unpacked/p).write_bytes(raw)
+            result['export_checks']=checks;result['saved_exports']=saved
+            result['ui_evidence']=ei;result['steps']=journey['steps'];result['installed_app_inventory']=aut_inventory
         require(rc.snapshot_identity(rc.release_snapshot(client,args.expected['tag']))==rc.snapshot_identity(initial),'RC changed during exercise')
         for p,v in source.items():require(digest(regular(root/p,2*MIB))==v['sha256'],'Harness source changed')
         require(digest(regular(run.out/'payload'/asset['name']))==asset['sha256'],'RC archive changed')
@@ -830,6 +1065,7 @@ def execute(args):
         # in Acceptance.xcresult. Never query runner containers after shutdown.
         result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
         result['setup_window']=run.setup_window
+        result['container_discovery']=run.container_discovery
         if cleanup_errors:result['status']='FAILED'
         if primary is not None or cleanup_errors:
             try:result['failure_diagnostics']=collect_failure_diagnostics(run,failed_index)

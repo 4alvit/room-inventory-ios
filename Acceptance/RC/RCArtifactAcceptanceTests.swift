@@ -118,10 +118,10 @@ final class RCArtifactAcceptanceTests: XCTestCase {
 
     private func tap(_ query: XCUIElementQuery, timeout: TimeInterval = 10) throws {
         let w = FilesNavigationReadiness(timeout: timeout)
-        // The action is inside the live waiter, not a second readiness pass.
-        try w.waitAndTapFile(pickerCount: { 1 }, folderCount: { 1 }, fileViewCount: { 1 },
-            fileCount: { query.count }, enabled: { query.firstMatch.isEnabled },
-            hittable: { query.firstMatch.isHittable }, tap: { query.firstMatch.tap() })
+        // Retain this probe's unique identity through the live gates and tap.
+        try w.waitAndTapBoundElement(
+            matchingElements: { query.allElementsBoundByAccessibilityElement },
+            enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
     }
 
     private func openRecord(_ name: String, _ app: XCUIApplication) throws {

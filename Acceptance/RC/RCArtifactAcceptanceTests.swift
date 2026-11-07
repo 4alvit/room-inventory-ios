@@ -129,9 +129,17 @@ final class RCArtifactAcceptanceTests: XCTestCase {
     }
 
     private func openRecord(_ name: String, _ app: XCUIApplication) throws {
+        // Reuse the existing tap10 + target10 allocation as one transition.
+        // Native event delivery may itself wait for idleness; it cannot renew
+        // this deadline or replace positive readiness of the exact destination.
+        let window = FilesNavigationReadiness(timeout: 20)
         let rows = app.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ", "))
-        try tap(rows)
-        try ready(app.navigationBars.matching(identifier: name))
+        try window.waitAndTapBoundElement(
+            matchingElements: { rows.allElementsBoundByAccessibilityElement },
+            enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
+        let target = app.navigationBars.matching(identifier: name)
+        _ = try window.waitForTargetFolder(titleCount: { target.count },
+            enabled: { target.firstMatch.isEnabled }, hittable: { target.firstMatch.isHittable })
     }
 
     private func openItem(_ app: XCUIApplication) throws {
@@ -342,6 +350,20 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         }
     }
 
+    private func openExportDestination(_ app: XCUIApplication) throws {
+        // One existing provider allowance covers presentation, one exact action,
+        // and positive destination readiness. Neither stage renews the deadline.
+        let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
+        let actions = app.cells.matching(NSPredicate(format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
+        try window.waitAndTapBoundElement(matchingElements: {
+            actions.allElementsBoundByAccessibilityElement
+        }, enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
+        let save = app.buttons.matching(identifier: "Save")
+        _ = try window.waitForTargetFolder(titleCount: { save.count },
+                                          enabled: { save.firstMatch.isEnabled },
+                                          hittable: { save.firstMatch.isHittable })
+    }
+
     private func observeExportedFilename(_ baseName: String, _ app: XCUIApplication) throws -> String {
         // Observe the single completed input; never retype or renew this window.
         let began = ProcessInfo.processInfo.systemUptime
@@ -396,8 +418,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
 
     private func export(_ action: String, baseName: String, create: Bool, _ app: XCUIApplication) throws {
         try select(action, app)
-        try tap(app.cells.matching(NSPredicate(format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files")))
-        try ready(app.buttons.matching(identifier: "Save"), timeout: 30)
+        try openExportDestination(app)
         try folder(create, app)
         let q = app.textFields.matching(identifier: "DOCPicker.filenameTextField")
         let name = try ready(q)

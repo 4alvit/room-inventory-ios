@@ -22,7 +22,7 @@ Each RC command passes its existing absolute parent deadline to process cleanup:
 
 ## Why this uses a separate test project
 
-`Acceptance/RC/project.yml` has one UI-test target and **no application target or application dependency**. It reuses the existing keyboard, Files and export-return readiness helpers without changing their time windows. The RC scenario is outside `UITests` and the normal app test plan; shared helper regressions remain in the ordinary suite.
+`Acceptance/RC/project.yml` has one UI-test target and **no application target or application dependency**. It reuses the existing keyboard, Files and export-return readiness helper implementations; the caller allocations are specified below. The RC scenario is outside `UITests` and the normal app test plan; shared helper regressions remain in the ordinary suite.
 
 The controller builds the runner in Release configuration, requires that it is the only `.app` build product, and manually installs only the verified RC. Xcode stages the runner from its generated `TestHostPath` during testing. The generated test-run specification must retain `UseUITargetAppProvidedByTests=true`, the exact runner/test-bundle paths and only those two build dependencies. It must not name an AUT path or AUT build dependency. `UseDestinationArtifacts=true` is device-only: Xcode rejects that mode for an iOS Simulator before any test executes. The controller therefore preserves Xcode's normal Simulator runner paths and testing environment, selecting just the acceptance method and its journey ID.
 
@@ -235,3 +235,35 @@ Native XCTest success, all journey/export checks, byte identities and process
 closure remain mandatory: filesystem discovery alone proves neither application
 registration nor successful launch. The existing already-Shutdown cleanup
 alternative is preserved.
+
+
+### Record navigation allocation
+
+Opening a home, room or item uses one absolute 20-second window covering the
+existing 10-second tap and 10-second target-readiness allocations. The window
+starts before the row observation, retains one unique accessibility-bound row
+through its enabled/hittable gates, admits one tap, and then requires the exact
+target navigation bar to be unique, enabled and hittable before that same
+original deadline. A late query or action, native error, cancellation, duplicate
+identity or absent target remains failure; there is no second tap or renewal.
+This reallocates the existing transition total and preserves the 720-second UI
+and 1,800-second controller limits. It does not establish why XCTest idleness was
+late, guarantee a transition will complete, or change any historical failure.
+The existing tracked host regression runner executes the actual `openRecord`
+body with the unchanged readiness helper and deterministic clock boundaries.
+
+### Shared export destination window
+
+After selecting an export format, system share presentation, the exact unique
+`actionGroupCell` labelled `Save to Files`, its single bound tap, and the unique
+enabled/hittable `Save` destination button share one absolute 30-second provider
+window. This replaces the adjacent 10-second action and 30-second destination
+allowances with 30 seconds total. The window starts before the first action query;
+neither presentation nor the tap renews it. Exact selectors, native-error and
+cancellation precedence, strict late-return rejection, and the 720-second native
+command/1,800-second controller limits remain unchanged. No retry or second tap is
+introduced. Folder navigation, exact filename observation, Save, and export-return
+validation retain their existing contracts. This allocation change does not claim
+a Simulator cause, retroactively accept failed runs, or prove platform readiness.
+The tracked host fixture executes the actual production destination method with
+controlled query/tap timings alongside record-navigation and prior cases.

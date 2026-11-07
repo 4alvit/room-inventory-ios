@@ -345,8 +345,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
     }
 
     private func selectOCRField(_ id: String, app: XCUIApplication) throws {
-        let toggle = app.switches["ocr.select.\(id)"]
-        try reveal(toggle, app: app)
+        let toggles = app.switches.matching(NSPredicate(format: "identifier == %@", "ocr.select.\(id)"))
+        try reveal(toggles.element, app: app)
         let window = RecoveryOCRReadinessWindow()
         typealias Node = (element: any XCUIElementSnapshot, form: (any XCUIElementSnapshot)?, inToolbar: Bool)
         typealias Observation = (snapshot: any XCUIElementSnapshot, nodes: [Node], switches: [Node], navigation: [Node])
@@ -373,13 +373,15 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             return (snapshot, nodes, switches, navigation)
         }
         var observation: Observation?
+        var boundToggle: XCUIElement?
         var observationError: Error?
         var observedState = "<no timely observation>"
-        // A live four-property predicate resolves the same switch repeatedly.
-        // Read state once from the snapshot also used for geometry, then make
-        // only the separate hit test that a snapshot cannot provide.
+        // Retain only the unique live identity from the accepted snapshot probe.
+        // Coordinates reuse that identity instead of resolving its query again.
         let readinessResult = try window.waitForProbe {
             if observation != nil || observationError != nil { return true }
+            boundToggle = nil
+            var candidateToggle: XCUIElement?
             do {
                 observation = try window.probe(snapshot: observeForm, stateReady: { candidate in
                     let targets = candidate.switches
@@ -393,10 +395,18 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                     observedState = "switches=\(targets.count); enabled=\(enabled); value=\(value ?? "<missing>")"
                     return target?.form != nil && candidate.navigation.count == 1 && enabled && value == "0"
                 }, hittable: {
-                    let hittable = toggle.isHittable
+                    let matches = try window.perform { toggles.allElementsBoundByAccessibilityElement }
+                    guard matches.count <= 1 else {
+                        throw RecoveryJourneyFailure.assertion("OCR \(id) unique live target",
+                            "matches=\(matches.count)", "one exact identifier")
+                    }
+                    guard let toggle = matches.first else { return false }
+                    let hittable = try window.perform { toggle.isHittable }
                     observedState += "; hittable=\(hittable)"
+                    if hittable { candidateToggle = toggle }
                     return hittable
                 })
+                if observation != nil { boundToggle = candidateToggle }
                 return observation != nil
             } catch {
                 // End the wait without another snapshot; retain this error in
@@ -412,7 +422,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 "one enabled, unselected, hittable switch within 10 seconds")
         }
         try ledger.require("OCR \(id) starts unselected and interactive", readinessResult == .completed && observation != nil)
-        guard let observation else {
+        guard let observation, let toggle = boundToggle else {
             throw RecoveryJourneyFailure.assertion("OCR \(id) readiness observation", "missing", "completed")
         }
         // The visible label is separate from the native switch, whose frame
@@ -463,8 +473,8 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
-        let start = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
-        let end = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        let start = try window.perform { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)) }
+        let end = try window.perform { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)) }
         let startPoint = try window.perform { start.screenPoint }
         let endPoint = try window.perform { end.screenPoint }
         guard startPoint == dragStart, endPoint == dragEnd,

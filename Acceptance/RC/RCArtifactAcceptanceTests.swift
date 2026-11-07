@@ -406,15 +406,58 @@ final class RCArtifactAcceptanceTests: XCTestCase {
     private func openExportDestination(_ app: XCUIApplication) throws {
         // One existing provider allowance covers presentation, one exact action,
         // and positive destination readiness. Neither stage renews the deadline.
+        let began = ProcessInfo.processInfo.systemUptime
         let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
+        var stage = "action-query", queries = 0, returns = 0, saveQueries = 0, saveReturns = 0
+        var lastCount: Int?, lastSaveCount: Int?
+        var lastEnabled: Bool?, lastHittable: Bool?, lastSaveEnabled: Bool?, lastSaveHittable: Bool?
+        var tapStarted = false, tapReturned = false, completed = false
+        defer {
+            let elapsed = ProcessInfo.processInfo.systemUptime - began
+            let record: [String: Any] = [
+                "schema_version": 1, "phase": "export-destination", "last_stage": stage,
+                "action_queries": queries, "action_returns": returns,
+                "last_action_count": lastCount as Any? ?? NSNull(),
+                "last_action_enabled": lastEnabled as Any? ?? NSNull(),
+                "last_action_hittable": lastHittable as Any? ?? NSNull(),
+                "save_queries": saveQueries, "save_returns": saveReturns,
+                "last_save_count": lastSaveCount as Any? ?? NSNull(),
+                "last_save_enabled": lastSaveEnabled as Any? ?? NSNull(),
+                "last_save_hittable": lastSaveHittable as Any? ?? NSNull(),
+                "tap_started": tapStarted, "tap_returned": tapReturned, "completed": completed,
+                "elapsed_seconds": elapsed,
+                "observed_remaining_seconds": max(0, FilesNavigationReadiness.systemProviderAllowance - elapsed)
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+               data.count <= 4_096, let text = String(data: data, encoding: .utf8) {
+                print("ROOM_RC_EXPORT_DESTINATION_V1 \(text)")
+            }
+        }
         let actions = app.cells.matching(NSPredicate(format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
         try performBoundTap(window, matchingElements: {
-            actions.allElementsBoundByAccessibilityElement
-        }, enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
+            stage = "action-query"; queries += 1
+            lastEnabled = nil; lastHittable = nil
+            let matches = actions.allElementsBoundByAccessibilityElement
+            returns += 1; lastCount = matches.count
+            return matches
+        }, enabled: {
+            stage = "action-enabled"; let value = $0.isEnabled; lastEnabled = value; return value
+        }, hittable: {
+            stage = "action-hittable"; let value = $0.isHittable; lastHittable = value; return value
+        }, tap: {
+            stage = "action-tap"; tapStarted = true; $0.tap(); tapReturned = true
+        })
         let save = app.buttons.matching(identifier: "Save")
-        _ = try window.waitForTargetFolder(titleCount: { save.count },
-                                          enabled: { save.firstMatch.isEnabled },
-                                          hittable: { save.firstMatch.isHittable })
+        _ = try window.waitForTargetFolder(titleCount: {
+            stage = "save-query"; saveQueries += 1
+            lastSaveEnabled = nil; lastSaveHittable = nil
+            let count = save.count; saveReturns += 1; lastSaveCount = count; return count
+        }, enabled: {
+            stage = "save-enabled"; let value = save.firstMatch.isEnabled; lastSaveEnabled = value; return value
+        }, hittable: {
+            stage = "save-hittable"; let value = save.firstMatch.isHittable; lastSaveHittable = value; return value
+        })
+        completed = true; stage = "complete"
     }
 
     private func observeExportedFilename(_ baseName: String, _ app: XCUIApplication) throws -> String {

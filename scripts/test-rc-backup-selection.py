@@ -18,6 +18,9 @@ INPUTS = (
     'UITests/Support/FilesNavigationReadiness.swift',
     'scripts/tests/fixtures/rc-backup-selection.swift',
     'UITests/InventoryRecoveryJourneyTests.swift',
+    'UITests/Support/RecoveryOCRReadinessWindow.swift',
+    'UITests/Support/RecoveryOCRSelectionWindow.swift',
+    'scripts/tests/fixtures/recovery-ocr-selection.swift',
 )
 
 
@@ -26,7 +29,7 @@ def digest(raw):
 
 
 def materialize(destination, inputs):
-    source, helper, fixture, recovery = (inputs[path].decode('utf-8') for path in INPUTS)
+    source, helper, fixture, recovery, ocr_readiness, ocr_selection, ocr_fixture = (inputs[path].decode('utf-8') for path in INPUTS)
     start = '    private func selectBackup('
     end = '\n    private func checkpoint('
     marker = '    // RC_SELECT_BACKUP_BODY'
@@ -73,6 +76,15 @@ def materialize(destination, inputs):
         raise ValueError('Export destination boundary order changed')
     presentation_method = source[presentation_first:presentation_last]
     presentation_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], presentation_method)
+    diagnostic_substitutions = {
+        'ProcessInfo.processInfo.systemUptime': 'FixtureShareDiagnostic.uptime',
+        r'print("ROOM_RC_EXPORT_DESTINATION_V1 \(text)")': 'FixtureShareDiagnostic.emit(text)',
+    }
+    for old, new in diagnostic_substitutions.items():
+        expected = 2 if old.startswith('ProcessInfo') else 1
+        if presentation_body.count(old) != expected:
+            raise ValueError('Export diagnostic transport changed: ' + old)
+        presentation_body = presentation_body.replace(old, new)
     action_start = '    private func performBoundTap<Element>('
     action_end = '\n    private func openItem('
     action_marker = '    // RC_BOUND_ACTION_BODY'
@@ -135,6 +147,24 @@ def materialize(destination, inputs):
     cases = re.findall(r'    func (test\w+)\(', fixture)
     if not cases or len(cases) != len(set(cases)):
         raise ValueError('Expected fixture case identities are missing or ambiguous')
+    ocr_start = '    private func selectOCRField('
+    ocr_end = '\n    private func backToDashboard('
+    ocr_marker = '    // RECOVERY_OCR_SELECTION_BODY'
+    if recovery.count(ocr_start) != 1 or recovery.count(ocr_end) != 1 or ocr_fixture.count(ocr_marker) != 1:
+        raise ValueError('OCR method or fixture boundary changed')
+    ocr_method = recovery[recovery.index(ocr_start):recovery.index(ocr_end)]
+    ocr_substitutions = {'XCUIApplication': 'OCRFixtureApp', 'XCUIElement': 'OCRFixtureElement',
+                         'XCUIElementSnapshot': 'OCRFixtureSnapshot'}
+    ocr_body = re.sub(r'\b(XCUIApplication|XCUIElement|XCUIElementSnapshot)\b',
+                      lambda m: ocr_substitutions[m[0]], ocr_method)
+    ocr_tests = ocr_fixture.replace(ocr_marker, ocr_body)
+    ocr_cases = re.findall(r'func (test\w+)\(', ocr_fixture)
+    if not ocr_cases or len(ocr_cases) != len(set(ocr_cases)):
+        raise ValueError('OCR fixture case inventory changed')
+    ocr_helpers = {
+        'OCRReadiness.swift': re.sub(r'\bRecoveryOCRReadinessWindow\b', 'OCRNativeReadinessWindow', ocr_readiness),
+        'OCRSelection.swift': re.sub(r'\bRecoveryOCRSelectionWindow\b', 'OCRNativeSelectionWindow', ocr_selection),
+    }
     directory = destination / 'Tests/RCBackupSelectionRegressionTests'
     directory.mkdir(parents=True)
     (destination / 'Package.swift').write_text(
@@ -143,7 +173,14 @@ def materialize(destination, inputs):
         'platforms: [.macOS(.v14)], targets: [.testTarget(name: "RCBackupSelectionRegressionTests")])\n')
     (directory / 'Readiness.swift').write_text(helper)
     (directory / 'RCBackupSelectionRegressionTests.swift').write_text(tests)
+    (directory / 'RecoveryOCRSelectionRegressionTests.swift').write_text(ocr_tests)
+    for name, text in ocr_helpers.items():
+        (directory / name).write_text(text)
     return {
+        'export_diagnostic_transport_substitutions': diagnostic_substitutions,
+        'ocr_selection_method_sha256': digest(ocr_method.encode()),
+        'ocr_transport_type_substitutions': ocr_substitutions,
+        'ocr_helper_renames': {'RecoveryOCRReadinessWindow': 'OCRNativeReadinessWindow', 'RecoveryOCRSelectionWindow': 'OCRNativeSelectionWindow'},
         'picker_constructor_expressions': picker_expressions,
         'picker_constructor_sha256': {name: digest(value.encode()) for name, value in picker_expressions.items()},
         'failure_journal_tail_sha256': digest(journal_tail.encode()),
@@ -158,7 +195,8 @@ def materialize(destination, inputs):
         'transport_type_substitutions': substitutions,
         'shared_class_rename': 'FilesNavigationReadiness -> Readiness',
         'generated_sources': {p.name: digest(p.read_bytes()) for p in directory.iterdir()},
-        'expected_cases': ['RCBackupSelectionRegressionTests.' + case for case in cases],
+        'expected_cases': (['RCBackupSelectionRegressionTests.' + case for case in cases]
+                           + ['RecoveryOCRSelectionRegressionTests.' + case for case in ocr_cases]),
     }
 
 

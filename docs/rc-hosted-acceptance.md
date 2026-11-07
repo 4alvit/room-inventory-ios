@@ -364,3 +364,5 @@ does not prevent capture, and the original failure is rethrown. The actual extra
 success/catch tail is exercised with capture delay/errors and a journal error;
 successful completion still writes only the complete journal. This improves failure
 evidence and does not establish the cause of any previous restore-alert failure.
+
+The export destination transition emits one bounded `ROOM_RC_EXPORT_DESTINATION_V1` JSON record when its method returns or throws, before outer failure capture. It reports query attempts/returns, last returned cardinalities and enabled/hittable results, stage, tap invocation/return and completion. All UI values come from existing reads; diagnostics add no UI query, retry or allowance. Elapsed time and the derived nonnegative remaining estimate are observation metadata, not proof of timely acceptance. A stalled native call can still prevent the defer from running; native errors and the original 30-second deadline remain authoritative.

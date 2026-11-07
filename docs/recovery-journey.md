@@ -1786,3 +1786,9 @@ seconds, its step 39 minutes and the Recovery job 48 minutes, preserving the
 previous setup/upload margins. All 17 checkpoints, assertions, source/byte checks
 and actual successful test completion remain required; there is no retry loop
 ([issue #28](https://github.com/4alvit/room-inventory-ios/issues/28)).
+
+### Exact Files picker identity
+
+The export and restore selection queries match the documented `Browse View (Picker)` accessibility identifier with an explicit `identifier ==` predicate. This avoids the broader identifier-alias query observed requesting unrelated elements’ values and placeholders before resolving the picker. The selection classifier, unique-element error handling, live enabled/hittable checks, and existing 30-second observation/action windows remain unchanged. A later valid screenshot does not satisfy an expired observation, and this query change does not guarantee a timely native response.
+
+The existing macOS host regression command, `python3 scripts/test-rc-backup-selection.py --output <new-output-directory>`, also extracts both Recovery picker expressions directly from this source and checks exact-identifier semantics against label/value/placeholder aliases. It exercises Foundation predicates without launching the app or a Simulator; current native Recovery qualification is still required.

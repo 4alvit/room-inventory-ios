@@ -161,6 +161,11 @@ private final class FixtureQuery {
     let f: SelectionFixture
     let scope: String
     var identifier = ""
+    var predicate: NSPredicate?
+    func matching(_ predicate: NSPredicate) -> FixtureQuery { self.predicate=predicate; return self }
+    func acceptsPicker(_ identifier: String) -> Bool {
+        predicate?.evaluate(with: ["identifier": identifier, "label": "", "value": "", "placeholderValue": ""]) == true
+    }
     init(_ f: SelectionFixture, _ scope: String) { self.f=f; self.scope=scope }
     func matching(identifier: String) -> FixtureQuery {
         self.identifier=identifier
@@ -174,7 +179,8 @@ private final class FixtureQuery {
     }
     var allElementsBoundByAccessibilityElement: [FixtureElement] {
         if scope == "picker" {
-            XCTAssertEqual(identifier, Readiness.pickerIdentifier)
+            XCTAssertTrue(acceptsPicker(Readiness.pickerIdentifier))
+            XCTAssertFalse(acceptsPicker("not-the-picker"))
             if f.folderMode {
                 f.folderQuery("picker")
                 return f.folderPickerIDs.map { FixtureElement(f, scope, $0) }
@@ -407,6 +413,9 @@ private final class FilesNavigationReadiness {
         f.snapshots += 1
         let result = try native.captureSelection(folder: folder, target: target, uniqueSnapshot: {
             self.f.beforeSnapshot?()
+            guard pickers.acceptsPicker(self.f.root.item.identifier) else {
+                throw Readiness.Failure.invalidSelectionSnapshot
+            }
             return self.f.root
         }, children: { $0.children }, attributes: { $0.item })
         if result == nil && f.pendingExpires { f.now = 31 }
@@ -449,6 +458,56 @@ private final class RCBody {
         try observeExportedFilename(expected, FixtureApp(f))
     }
     func run(_ f: SelectionFixture) throws { try selectBackup(FixtureApp(f)) }
+}
+
+// Minimal transports for the exact native constructors and success/catch tail.
+private final class PredicateQuery {
+    var predicate: NSPredicate!
+    func matching(_ value: NSPredicate) -> PredicateQuery { predicate=value; return self }
+    func matches(_ nodes: [[String: String]]) -> [[String: String]] { nodes.filter { predicate.evaluate(with: $0) } }
+}
+private struct PredicateApp { var otherElements: PredicateQuery { PredicateQuery() } }
+@MainActor
+private enum PickerConstructors {
+    static func make() -> [PredicateQuery] {
+        let app=PredicateApp()
+        return [
+    // PICKER_CONSTRUCTORS
+        ]
+    }
+}
+@MainActor
+private final class FixtureSampleOutput {
+    static let standardOutput=FixtureSampleOutput()
+    var writes: [Data]=[]
+    func write(contentsOf data: Data) throws { writes.append(data) }
+}
+@MainActor
+private final class FailureJournalBody {
+    enum FixtureError: Error { case original, journal, capture }
+    let runID="D13A8615-B837-4BC1-A532-8D0196B26F6F"
+    let app=0
+    let file: URL
+    var events: [String]=[]
+    var journalError=false
+    var captureError=false
+    var duringCapture: (() throws -> Void)?
+    init(_ file: URL) { self.file=file }
+    func journal(status: String, failure: String? = nil) throws {
+        events.append("journal:"+status)
+        if journalError { throw FixtureError.journal }
+        try Data((status+":"+(failure ?? "")).utf8).write(to: file)
+    }
+    func capture(_ name: String, _ app: Int) throws {
+        events.append("capture:"+name)
+        try duringCapture?()
+        if captureError { throw FixtureError.capture }
+    }
+    func run(_ operation: () throws -> Void) throws {
+        do {
+            try operation()
+    // RC_FAILURE_JOURNAL_TAIL
+    }
 }
 
 final class RCBackupSelectionRegressionTests: XCTestCase {
@@ -1082,6 +1141,90 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
         let f=fixture();f.folderMenuMatches=[804,808]
         XCTAssertThrowsError(try RCBody(f).create(f,pad:false)) { XCTAssertEqual($0 as? Readiness.Failure,.invalidSelectionCount) }
         XCTAssertEqual(f.taps,[803]);XCTAssertEqual(f.folderWindows,[10,10])
+    }
+
+    @MainActor
+    func testAllFiveActualPickerConstructorsMatchExactIdentifierOnly() {
+        let exact=["identifier": Readiness.pickerIdentifier, "label": "foreign", "value": "", "placeholderValue": ""]
+        let queries=PickerConstructors.make(); XCTAssertEqual(queries.count, 5)
+        for query in queries { XCTAssertEqual(query.matches([exact]), [exact]) }
+    }
+    @MainActor
+    func testAllFiveActualPickerConstructorsExcludeEveryAliasField() {
+        for key in ["label", "value", "placeholderValue"] {
+            var alias=["identifier": "unrelated", "label": "", "value": "", "placeholderValue": ""]
+            alias[key]=Readiness.pickerIdentifier
+            for query in PickerConstructors.make() { XCTAssertTrue(query.matches([alias]).isEmpty) }
+        }
+    }
+    @MainActor
+    func testActualPickerConstructorsPreserveMissingAndDuplicateCounts() {
+        let exact=["identifier": Readiness.pickerIdentifier]
+        for query in PickerConstructors.make() {
+            XCTAssertEqual(query.matches([]).count, 0)
+            XCTAssertEqual(query.matches([exact, exact]).count, 2)
+            XCTAssertTrue(query.matches([["identifier": Readiness.pickerIdentifier+" suffix"]]).isEmpty)
+        }
+    }
+    @MainActor
+    func testBackupWrongPickerIdentifierCannotReachLiveFileOrTap() {
+        let f=fixture(); f.nodes=[.init(.other, Readiness.pickerIdentifier, id: "alias-only", children: f.root.children)]
+        fails(f, .invalidSelectionSnapshot); XCTAssertEqual(f.resolves, 0)
+    }
+    @MainActor
+    private func journalFixture(_ check: (FailureJournalBody) throws -> Void) throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        FixtureSampleOutput.standardOutput.writes=[]
+        try check(FailureJournalBody(directory.appendingPathComponent("journey.json")))
+    }
+    @MainActor
+    func testActualFailureTailPersistsBeforeCaptureThrowsAndRethrowsOriginal() throws {
+        try journalFixture { body in
+            body.captureError=true
+            XCTAssertThrowsError(try body.run { throw FailureJournalBody.FixtureError.original }) {
+                XCTAssertEqual($0 as? FailureJournalBody.FixtureError, .original)
+            }
+            XCTAssertEqual(body.events, ["journal:failed", "capture:failure"])
+            XCTAssertEqual(try String(contentsOf: body.file, encoding: .utf8), "failed:original")
+            XCTAssertEqual(FixtureSampleOutput.standardOutput.writes.count, 1)
+        }
+    }
+    @MainActor
+    func testActualFailureTailHasDurableJournalWhileCaptureIsStillBlocked() throws {
+        try journalFixture { body in
+            body.duringCapture={
+                XCTAssertEqual(try String(contentsOf: body.file, encoding: .utf8), "failed:original")
+                // A bounded blocking transport stands in for screenshot RPC latency.
+                Thread.sleep(forTimeInterval: 0.02)
+                XCTAssertEqual(try String(contentsOf: body.file, encoding: .utf8), "failed:original")
+            }
+            XCTAssertThrowsError(try body.run { throw FailureJournalBody.FixtureError.original }) {
+                XCTAssertEqual($0 as? FailureJournalBody.FixtureError, .original)
+            }
+            XCTAssertEqual(body.events, ["journal:failed", "capture:failure"])
+        }
+    }
+    @MainActor
+    func testActualFailureTailJournalErrorStillCapturesAndRethrowsOriginal() throws {
+        try journalFixture { body in
+            body.journalError=true; body.captureError=true
+            XCTAssertThrowsError(try body.run { throw FailureJournalBody.FixtureError.original }) {
+                XCTAssertEqual($0 as? FailureJournalBody.FixtureError, .original)
+            }
+            XCTAssertEqual(body.events, ["journal:failed", "capture:failure"])
+            XCTAssertFalse(FileManager.default.fileExists(atPath: body.file.path))
+        }
+    }
+    @MainActor
+    func testActualSuccessTailOnlyWritesCompleteWithoutFailureDiagnostics() throws {
+        try journalFixture { body in
+            try body.run {}
+            XCTAssertEqual(body.events, ["journal:complete"])
+            XCTAssertEqual(try String(contentsOf: body.file, encoding: .utf8), "complete:")
+            XCTAssertTrue(FixtureSampleOutput.standardOutput.writes.isEmpty)
+        }
     }
 
 }

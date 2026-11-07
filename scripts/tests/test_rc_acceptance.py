@@ -650,6 +650,18 @@ class FailureDiagnostics(unittest.TestCase):
             run.owned_device=None
             self.assertEqual(R.collect_failure_diagnostics(run,1),{'status':'skipped_no_owned_device'})
             self.assertEqual(calls,[])
+
+    def test_workflow_upload_includes_actual_generated_diagnostic_files(self):
+        with self.fixture() as (run,now,calls):
+            R.collect_failure_diagnostics(run,1)
+            generated=[p.relative_to(run.out) for p in run.out.rglob('*') if p.is_file()]
+            self.assertTrue(generated)
+            workflow=(SCRIPTS.parent/'.github/workflows/rc-acceptance.yml').read_text()
+            prefix='${{ runner.temp }}/rc-acceptance/'
+            uploaded=[Path(line.strip()[len(prefix):]) for line in workflow.split('          path: |\n',1)[1].splitlines()
+                      if line.strip().startswith(prefix)]
+            for path in generated:
+                self.assertTrue(any(path==root or path.is_relative_to(root) for root in uploaded),str(path))
     def test_parent_clips_phase_and_prevents_another_child_after_late_return(self):
         with self.fixture(end=7,duration=3) as (run,now,calls):
             result=R.collect_failure_diagnostics(run,1)
@@ -694,13 +706,15 @@ class FailureDiagnostics(unittest.TestCase):
         code=compile(ast.fix_missing_locations(ast.Module(body=final,type_ignores=[])),'actual-finalizer','exec')
         for primary in (None,R.AcceptanceError('original failure')):
             with self.subTest(failed=primary is not None),tempfile.TemporaryDirectory() as d:
-                run=R.Run(d,Path(d)/'out');run.close_device=Mock()
+                run=R.Run(d,Path(d)/'out');run.device=ID;run.close_device=Mock()
+                run.container=Mock(side_effect=AssertionError('No post-shutdown container query'))
                 result={'status':'PASS' if primary is None else 'FAILED','error':'original failure'}
                 collector=Mock(side_effect=OSError('private collector failure'))
-                namespace=dict(R.__dict__,run=run,result=result,primary=primary,cleanup_errors=[],run_id=None,
+                namespace=dict(R.__dict__,run=run,result=result,primary=primary,cleanup_errors=[],run_id=ID,
                                failed_index=None,collect_failure_diagnostics=collector)
                 with patch('builtins.print') as output:exec(code,namespace)
                 run.close_device.assert_called_once()
+                run.container.assert_not_called()
                 if primary is None:
                     collector.assert_not_called();output.assert_not_called()
                     self.assertNotIn('failure_diagnostics',result);self.assertEqual(result['status'],'PASS')

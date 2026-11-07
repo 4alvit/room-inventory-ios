@@ -108,6 +108,7 @@ jobs:
             ${{ runner.temp }}/rc-acceptance/*.json
             ${{ runner.temp }}/rc-acceptance/*.xctestrun
             ${{ runner.temp }}/rc-acceptance/operations
+            ${{ runner.temp }}/rc-acceptance/failure-diagnostics
             ${{ runner.temp }}/rc-acceptance/ui-evidence
             ${{ runner.temp }}/rc-acceptance/exports
             ${{ runner.temp }}/rc-acceptance/payload

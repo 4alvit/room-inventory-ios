@@ -425,6 +425,12 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         if let failure { value["failure"] = String(failure.prefix(1024)) }
         let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         try require(data.count <= 64 * 1024, "Journal size cap")
+        if status == "failed" {
+            // Preserve the bounded journal while the runner is alive. Its data
+            // container cannot be queried after the owned Simulator shuts down.
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "failure-journey"; attachment.lifetime = .keepAlways; add(attachment)
+        }
         try data.write(to: directory.appendingPathComponent("journey.json"), options: .atomic)
     }
 }

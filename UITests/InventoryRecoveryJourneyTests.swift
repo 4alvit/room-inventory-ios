@@ -561,14 +561,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let saveToFiles = app.cells.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
         let shareAction = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
-        // As in the standalone RC runner, this action has no Files navigation
-        // scopes yet. Check its unique count and live readiness, then tap once
-        // inside the same waiter. A late native query cannot authorize a tap.
-        try shareAction.waitAndTapFile(pickerCount: { 1 }, folderCount: { 1 }, fileViewCount: { 1 },
-            fileCount: { saveToFiles.count },
-            enabled: { try shareAction.perform { saveToFiles.element }.isEnabled },
-            hittable: { try shareAction.perform { saveToFiles.element }.isHittable },
-            tap: { try shareAction.perform { saveToFiles.element }.tap() })
+        // Resolve the exact action once per probe and retain its accessibility
+        // identity through the live gates and one tap, inside the same window.
+        try shareAction.waitAndTapBoundElement(
+            matchingElements: { saveToFiles.allElementsBoundByAccessibilityElement },
+            enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
         // Let the existing Files presentation window observe a positive
         // navigation state before querying the save action. The remote picker
         // can appear after a short, label-only existence wait has already ended.

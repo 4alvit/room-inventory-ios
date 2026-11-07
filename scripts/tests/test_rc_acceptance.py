@@ -1267,7 +1267,7 @@ class CleanupAdmission(unittest.TestCase):
 
 class LiveFailureSample(unittest.TestCase):
     @contextmanager
-    def fixture(self, *, rows=None, changed=False, failed=None, unclosed=None, advance=None):
+    def fixture(self, *, rows=None, changed=False, failed=None, unclosed=None, advance=None, focus_raw=b'[]'):
         with tempfile.TemporaryDirectory() as d:
             home=Path(d).resolve();run=R.Run(home,home/'out');run.device=ID
             run.owned_device={'udid':ID,'absent_before':True}
@@ -1277,12 +1277,13 @@ class LiveFailureSample(unittest.TestCase):
             R.save(run.out/'installed-before.json',R.inventory(installed))
             now=[0.0];calls=[];run.end=1800
             def capture(argv,**kwargs):
-                name=['identity-before','sample','identity-after'][len(calls)]
+                name=['focus-log','identity-before','sample','identity-after'][len(calls)]
                 calls.append((argv,kwargs));now[0]+=(advance or {}).get(name,1 if name=='sample' else .1)
                 receipt=kwargs['receipt'];receipt.update(returncode=0,cleanup={'success':name!=unclosed,
                     'group_state':'unknown' if name==unclosed else 'absent','leader_reaped':True,'errors':[]})
                 if name==failed:raise R.AcceptanceError('private diagnostic exception')
-                if name=='sample':raw=b'bounded stack fixture'
+                if name=='focus-log':raw=focus_raw
+                elif name=='sample':raw=b'bounded stack fixture'
                 else:
                     pid=124 if changed and name=='identity-after' else 123
                     raw=(rows if rows is not None else f'{pid} Sat Nov 7 06:04:52 2026 {installed}/RoomInventory\n').encode()
@@ -1293,6 +1294,74 @@ class LiveFailureSample(unittest.TestCase):
                     patch.object(R,'bounded_capture',side_effect=capture):
                 sampler=R.FailureSample(run,ID,installed)
                 yield sampler,run,now,calls
+
+    def test_focus_log_is_exact_owned_device_and_precedes_optional_stack(self):
+        with self.fixture() as (s,run,now,calls):
+            s.feed(s.marker+b'\n',720)
+            self.assertEqual(calls[0][0],['xcrun','simctl','spawn',ID,'/usr/bin/log','show',
+                '--last','10m','--style','json','--info','--predicate',
+                'process == "RoomInventory" AND subsystem == "com.alvit.roominventory" AND category == "NameEntryFocus"'])
+            self.assertEqual(calls[0][1]['timeout'],2)
+            self.assertEqual(calls[0][1]['limit'],256*1024)
+            self.assertEqual(calls[0][1]['work_deadline'],2)
+            self.assertTrue(all(k['work_deadline']<=6 and k['cleanup_parent_deadline']==10 for _,k in calls))
+            self.assertEqual(s.report['focus_log']['status'],'collected')
+            self.assertEqual((run.out/'failure-diagnostics/live-aut/focus-log.stdout').read_bytes(),b'[]')
+            self.assertIn('empty or missing logs prove no cause',s.report['focus_log']['scope'])
+            self.assertEqual(run.commands,[]);self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+
+    def test_focus_log_failure_or_unproved_closure_never_samples_or_retries(self):
+        for options in ({'failed':'focus-log'},{'unclosed':'focus-log'}):
+            with self.subTest(options=options),self.fixture(**options) as (s,run,now,calls):
+                s.feed(s.marker+b'\n',720);s.feed(s.marker+b'\n',720)
+                self.assertEqual(len(calls),1);self.assertEqual(s.report['status'],'partial')
+                self.assertNotEqual(s.report['focus_log']['status'],'collected')
+                self.assertFalse((run.out/'failure-diagnostics/live-aut/sample.stdout').exists())
+
+    def test_focus_log_parent_clips_work_and_cleanup_without_new_window(self):
+        with self.fixture(advance={'focus-log':.6}) as (s,run,now,calls):
+            s.feed(s.marker+b'\n',4.5)
+            self.assertEqual(len(calls),1);self.assertEqual(calls[0][1]['timeout'],.5)
+            self.assertEqual(calls[0][1]['work_deadline'],.5)
+            self.assertEqual(calls[0][1]['cleanup_parent_deadline'],4.5)
+            self.assertEqual(s.report['status'],'partial');self.assertEqual(run.end,1800)
+
+    def test_late_focus_log_cannot_renew_window_or_mark_capture_collected(self):
+        with self.fixture(advance={'focus-log':10}) as (s,run,now,calls):
+            s.feed(s.marker+b'\n',720)
+            self.assertEqual(len(calls),1);self.assertEqual(s.report['status'],'partial')
+            self.assertEqual(s.report['focus_log']['status'],'started')
+            self.assertEqual(calls[0][1]['cleanup_parent_deadline'],10)
+
+    def test_delayed_focus_capture_entry_is_rejected_before_process_spawn(self):
+        import rc_acceptance_process as P
+        with self.fixture() as (s,run,now,calls):
+            admitted=[]
+            def delayed(argv,**kwargs):
+                admitted.append(kwargs);now[0]=2
+                return P.bounded_capture(argv,**kwargs)
+            with patch.object(R,'bounded_capture',side_effect=delayed), \
+                    patch.object(P.subprocess,'Popen',side_effect=AssertionError('Expired work must not spawn')) as spawn:
+                s.feed(s.marker+b'\n',720)
+            spawn.assert_not_called();self.assertEqual(len(admitted),1)
+            self.assertEqual(admitted[0]['work_deadline'],2)
+            self.assertEqual(admitted[0]['cleanup_parent_deadline'],10)
+            self.assertEqual(s.report['status'],'partial')
+            self.assertNotIn('pid',s.report['operations'][0]['receipt'])
+
+    def test_focus_output_cap_failure_retains_partial_and_primary_failure(self):
+        from rc_acceptance_process import CaptureFailure
+        with self.fixture() as (s,run,now,calls):
+            def capped(argv,**kwargs):
+                calls.append((argv,kwargs));self.assertEqual(kwargs['limit'],256*1024)
+                kwargs['receipt'].update(error='CaptureFailure: Metadata command stream cap exceeded',
+                    cleanup={'success':True,'group_state':'absent','leader_reaped':True,'errors':[]})
+                raise CaptureFailure('Metadata command stream cap exceeded')
+            with patch.object(R,'bounded_capture',side_effect=capped):
+                s.feed(s.marker+b'\n',720);s.feed(s.marker+b'\n',720)
+            self.assertEqual(len(calls),1);self.assertEqual(s.report['status'],'partial')
+            self.assertEqual(run.commands,[]);self.assertTrue(s.seen)
+            self.assertIn('stream cap exceeded',s.report['operations'][0]['receipt']['error'])
 
     def test_static_preparation_is_not_repeated_inside_live_sample_window(self):
         with self.fixture() as (s,run,now,calls):
@@ -1369,10 +1438,10 @@ class LiveFailureSample(unittest.TestCase):
             self.assertFalse(s.seen);self.assertEqual(calls,[])
             s.feed(ID[8:].encode()+b'\n',720)
             s.feed(s.marker+b'\n',720)
-            self.assertEqual(s.report['status'],'collected');self.assertEqual(len(calls),3)
-            self.assertEqual(calls[1][0],['/usr/bin/sample','123','1','10','-mayDie','-file','/dev/stdout'])
-            self.assertEqual(calls[0][0],['/bin/ps','-axww','-o','pid=,lstart=,comm='])
-            self.assertEqual(calls[1][1]['limit'],2*R.MIB)
+            self.assertEqual(s.report['status'],'collected');self.assertEqual(len(calls),4)
+            self.assertEqual(calls[2][0],['/usr/bin/sample','123','1','10','-mayDie','-file','/dev/stdout'])
+            self.assertEqual(calls[1][0],['/bin/ps','-axww','-o','pid=,lstart=,comm='])
+            self.assertEqual(calls[2][1]['limit'],2*R.MIB)
             self.assertTrue(all(k['cleanup_parent_deadline']==10 for _,k in calls))
             self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
             self.assertEqual((run.out/'failure-diagnostics/live-aut/sample.stdout').read_bytes(),b'bounded stack fixture')
@@ -1399,7 +1468,7 @@ class LiveFailureSample(unittest.TestCase):
             with self.subTest(rows=rows),self.fixture(rows=rows) as (s,run,now,calls):
                 # Each fixture has a different owned root; no matching foreign path can be sampled.
                 s.feed(s.marker+b'\n',720)
-                self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),1)
+                self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),2)
 
     def test_identity_parser_rejects_duplicate_and_bad_start_for_current_path(self):
         path=Path('/owned/RoomInventory.app/RoomInventory')
@@ -1414,13 +1483,13 @@ class LiveFailureSample(unittest.TestCase):
             with self.subTest(mode=mode),self.fixture(**options) as (s,run,now,calls):
                 s.feed(s.marker+b'\n',720);before=len(calls);s.feed(s.marker+b'\n',720)
                 self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),before)
-                self.assertEqual(before,3 if mode=='changed' else 2)
+                self.assertEqual(before,4 if mode=='changed' else 3)
                 self.assertNotIn('private diagnostic exception',json.dumps(s.report))
 
     def test_late_sample_has_no_post_lookup_or_new_budget(self):
         with self.fixture(advance={'sample':10}) as (s,run,now,calls):
             s.feed(s.marker+b'\n',8)
-            self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),2)
+            self.assertEqual(s.report['status'],'partial');self.assertEqual(len(calls),3)
             self.assertTrue(all(k['cleanup_parent_deadline']==8 for _,k in calls))
 
     def test_changed_ownership_or_symlink_prevents_process_lookup(self):
@@ -1447,7 +1516,7 @@ class LiveFailureSample(unittest.TestCase):
                 return save(path,value)
             with patch.object(R,'save',side_effect=persist):
                 with self.assertRaises(R.CancellationRequested):s.feed(s.marker+b'\n',720)
-            self.assertEqual(len(calls),3);self.assertTrue(s.seen)
+            self.assertEqual(len(calls),4);self.assertTrue(s.seen)
             self.assertTrue(all(row['receipt']['cleanup']['success'] for row in s.report['operations']))
 
     def test_post_cleanup_collector_does_not_swallow_cancellation(self):

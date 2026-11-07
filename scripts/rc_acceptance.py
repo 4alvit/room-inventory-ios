@@ -11,6 +11,7 @@ from collections import Counter
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
@@ -253,13 +254,40 @@ def validate_created_device(before, after, device_id, name, device_type):
             and current[0].get('state')=='Shutdown', 'Created device identity mismatch')
     return current[0]
 
-def install_artifacts(run, aut, runner):
+def install_application(run, aut):
+    # Normal Simulator testing stages the runner from TestHostPath. Only the
+    # separately verified RC application needs an explicit installation here.
     phase_end=min(time.monotonic()+INSTALLATION_SECONDS,run.end)
-    for artifact in (aut,runner):
-        remaining=phase_end-time.monotonic()
-        require(remaining>4,'Shared installation deadline')
-        run.sim('install',run.device,artifact,cap=remaining-4)
-        require(time.monotonic()<phase_end,'Artifact installation returned late')
+    remaining=phase_end-time.monotonic()
+    require(remaining>4,'Application installation deadline')
+    run.sim('install',run.device,aut,cap=remaining-4)
+    require(time.monotonic()<phase_end,'Application installation returned late')
+
+def failure_summary(operations, failed_index, cleanup_failed):
+    """A small public diagnostic when uploading the detailed artifact also fails."""
+    op=operations[failed_index-1] if type(failed_index) is int and 0<failed_index<=len(operations) else {}
+    command=op.get('command',[]);phase='controller'
+    if len(command)>2 and command[:2]==['xcrun','simctl']:
+        phases={name:'simulator-'+name for name in ('create','list','boot','bootstatus','install','get_app_container','shutdown')}
+        phase=phases.get(command[2],'simulator-other')
+    elif len(command)>1 and command[1]=='api':phase='github-read'
+    elif command and command[0]=='xcodebuild':
+        phase='native-test' if 'test-without-building' in command else 'runner-build'
+    cleanup=op.get('cleanup',{})
+    def number(value):
+        return value if type(value) in (int,float) and math.isfinite(value) and value>=0 else None
+    code=op.get('returncode');code_source='work'
+    if type(code) is not int or not -255<=code<=255:
+        code=cleanup.get('returncode');code_source='cleanup'
+    if type(code) is not int or not -255<=code<=255:code=None;code_source=None
+    return {'schema_version':1,'controller_failed':True,'phase':phase,'operation_index':failed_index if op else None,
+            'grant_seconds':number(op.get('timeout_seconds')),'elapsed_seconds':number(op.get('elapsed_seconds')),
+            'exit_code':code,'exit_code_source':code_source,
+            'timed_out':op.get('error') in ('CaptureFailure: Metadata command work deadline exceeded',
+                                          'CaptureFailure: Metadata command completed after work deadline'),
+            'process_closed':cleanup.get('success') is True and cleanup.get('group_state')=='absent'
+                and cleanup.get('leader_reaped') is True and cleanup.get('errors')==[],
+            'cleanup_failed':bool(cleanup_failed)}
 
 class Run:
     def __init__(self, root, out):
@@ -491,7 +519,7 @@ def execute(args):
     result={'status':'FAILED','expected_rc':args.expected,'scope':{'runtime':RUNTIME,'device_type':DEVICES[args.device],'architecture':'arm64'},
             'limitations':['Hosted Simulator only; no physical device, TestFlight or production StoreKit acceptance.',
                            'Text-only record scenario; no original attachment added.','Human screenshot/AX/PDF review required before acceptance.']}
-    primary=None; cleanup_errors=[]; run_id=None
+    primary=None; cleanup_errors=[]; run_id=None; failed_index=None
     try:
         head=run.command(['git','rev-parse','HEAD'],'source-head',cap=8).decode().strip()
         require(head==args.harness_sha==os.environ.get('GITHUB_SHA') and re.fullmatch('[0-9a-f]{40}',head),'Harness SHA mismatch')
@@ -536,7 +564,7 @@ def execute(args):
         require(time.monotonic()<boot_end,'Boot budget expired')
         run.sim('bootstatus',run.device,'-b',cap=boot_end-time.monotonic())
         require(time.monotonic()<boot_end,'Boot status returned late')
-        install_artifacts(run,aut,runner)
+        install_application(run,aut)
         installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
         save(run.out/'installed-before.json',inventory(installed))
         run.command(['xcodebuild','test-without-building','-xctestrun',plan,'-destination','platform=iOS Simulator,id='+run.device,
@@ -582,9 +610,14 @@ def execute(args):
         result['status']='PASS_HOSTED_RC_EXERCISE_REVIEW_PENDING'
     except BaseException as e:
         primary=e;result['error']=type(e).__name__+': '+str(e)
+        if run.commands and run.commands[-1].get('error'):failed_index=len(run.commands)
     finally:
+        cleanup_start=len(run.commands)
         try:run.close_device()
-        except BaseException as e:cleanup_errors.append(type(e).__name__+': '+str(e))
+        except BaseException as e:
+            cleanup_errors.append(type(e).__name__+': '+str(e))
+            if primary is None:
+                failed_index=next((i+1 for i in range(cleanup_start,len(run.commands)) if run.commands[i].get('error')),None)
         # Preserve best-effort failure captures without changing the primary verdict.
         if run_id and run.device and not cleanup_errors and not (run.out/'ui-evidence').exists():
             try:
@@ -596,6 +629,9 @@ def execute(args):
         result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
         if cleanup_errors:result['status']='FAILED'
         save(run.out/'result.json',result)
+        if primary is not None or cleanup_errors:
+            try:print('ROOM_RC_FAILURE_V1 '+json.dumps(failure_summary(run.commands,failed_index,cleanup_errors)),flush=True)
+            except Exception:pass  # Diagnostic output must not replace the original failure.
     if primary:raise primary
     require(not cleanup_errors,'Device cleanup failed')
 

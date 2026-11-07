@@ -431,15 +431,32 @@ class OwnedDeviceCleanup(unittest.TestCase):
         env={'GITHUB_ACTIONS':'true','GITHUB_EVENT_NAME':'workflow_dispatch',
              'GITHUB_REPOSITORY':R.REPO,'GITHUB_REF':'refs/heads/main','RUNNER_ARCH':'ARM64',
              'GITHUB_WORKFLOW_REF':R.REPO+'/.github/workflows/rc-acceptance.yml@refs/heads/main'}
-        with tempfile.TemporaryDirectory() as d:
-            args=R.argparse.Namespace(expected=expected,harness_sha='a'*40,device='iphone',output=Path(d)/'out')
-            with patch.dict(os.environ,env),patch.object(R.Run,'command',side_effect=primary),patch.object(R.Run,'close_device',side_effect=cleanup):
-                with self.assertRaises(R.AcceptanceError) as caught:R.execute(args)
-            self.assertIs(caught.exception,primary)
-            result=json.loads((args.output/'result.json').read_bytes())
-            self.assertEqual(result['status'],'FAILED')
-            self.assertEqual(result['error'],'AcceptanceError: original install failure')
-            self.assertEqual(result['cleanup_errors'],['AcceptanceError: initial census failure; final state unproved'])
+        for record_failure,output_error in [(False,None),(True,None),(True,OSError('closed output')),(True,ValueError('unavailable output'))]:
+            def command(run,*args,**kwargs):
+                if record_failure:run.commands.append({'command':['private-gh','api','private-endpoint'],'returncode':7,'error':'private primary error'})
+                raise primary
+            def cleanup_command(run):
+                if record_failure:run.commands.append({'command':['xcrun','simctl','list','devices'],'error':'private cleanup error'})
+                raise cleanup
+            with self.subTest(record_failure=record_failure,output_error=output_error),tempfile.TemporaryDirectory() as d:
+                args=R.argparse.Namespace(expected=expected,harness_sha='a'*40,device='iphone',output=Path(d)/'out')
+                with patch.dict(os.environ,env),patch.object(R.Run,'command',new=command), \
+                        patch.object(R.Run,'close_device',autospec=True,side_effect=cleanup_command) as close, \
+                        patch('builtins.print',side_effect=output_error) as output:
+                    with self.assertRaises(R.AcceptanceError) as caught:R.execute(args)
+                self.assertIs(caught.exception,primary);close.assert_called_once()
+                result=json.loads((args.output/'result.json').read_bytes())
+                self.assertEqual(result['status'],'FAILED')
+                self.assertEqual(result['error'],'AcceptanceError: original install failure')
+                self.assertEqual(result['cleanup_errors'],['AcceptanceError: initial census failure; final state unproved'])
+                output.assert_called_once()
+                marker,summary=output.call_args.args[0].split(' ',1)
+                self.assertEqual(marker,'ROOM_RC_FAILURE_V1')
+                self.assertTrue(json.loads(summary)['cleanup_failed'])
+                self.assertNotIn('original install failure',summary)
+                self.assertEqual(json.loads(summary)['operation_index'],1 if record_failure else None)
+                self.assertEqual(json.loads(summary)['phase'],'github-read' if record_failure else 'controller')
+                self.assertNotIn('private',summary)
 
 
 class InstallationWindow(unittest.TestCase):
@@ -474,102 +491,117 @@ class InstallationWindow(unittest.TestCase):
             run=R.Run(d,Path(d)/'out');run.device=ID;now[0]=start
             yield run,now,calls
 
-    def test_both_installs_can_cross_prior_caps_with_one_remaining_budget(self):
-        for aut,runner in [(100,70),(200,90),(72,100)]:
-            with self.subTest(aut=aut,runner=runner),self.fixture([aut,runner]) as (run,now,calls):
-                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app'],
-                                        ['xcrun','simctl','install',ID,'standalone-runner.app']])
-                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,296-aut])
-                self.assertTrue(all(c['cleanup_reserved_seconds']==4 for c in run.commands))
-                self.assertEqual(now[0],aut+runner)
+    def test_only_verified_application_installs_once_with_original_allowance(self):
+        for duration,start in [(100,0),(200,0),(295,0),(100,400)]:
+            with self.subTest(duration=duration,start=start),self.fixture([duration],start=start) as (run,now,calls):
+                R.install_application(run,'exact-rc.app')
+                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
+                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296])
+                self.assertEqual(run.commands[0]['cleanup_reserved_seconds'],4)
+                self.assertEqual(now[0],start+duration)
                 self.assertEqual(run.end,1800)
                 self.assertIsNone(run.cleanup_end)
 
-    def test_aut_at_or_after_work_allowance_never_installs_runner_or_retries(self):
+    def test_late_application_never_retries_or_installs_runner(self):
         from rc_acceptance_process import CaptureFailure
         for duration in [296,297,300]:
             with self.subTest(duration=duration),self.fixture([duration]) as (run,now,calls):
                 with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
-                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-                self.assertEqual(len(calls),1)
+                    R.install_application(run,'exact-rc.app')
+                self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
                 self.assertEqual(run.commands[0]['timeout_seconds'],296)
                 self.assertEqual(run.commands[0]['elapsed_seconds'],duration)
 
-    def test_runner_at_residual_work_allowance_fails_without_retry(self):
-        from rc_acceptance_process import CaptureFailure
-        for duration in [224,225]:
-            with self.subTest(duration=duration),self.fixture([72,duration]) as (run,now,calls):
-                with self.assertRaisesRegex(CaptureFailure,'completed after work deadline'):
-                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-                self.assertEqual(len(calls),2)
-                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,224])
-
-    def test_parent_deadline_clips_both_installs_without_renewal(self):
-        with self.fixture([20,5],start=1770) as (run,now,calls):
-            R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-            self.assertEqual([c['timeout_seconds'] for c in run.commands],[26,6])
-            self.assertEqual(now[0],1795)
+    def test_parent_deadline_clips_application_without_renewal(self):
+        with self.fixture([20],start=1770) as (run,now,calls):
+            R.install_application(run,'exact-rc.app')
+            self.assertEqual([c['timeout_seconds'] for c in run.commands],[26])
+            self.assertEqual(now[0],1790)
             self.assertEqual(run.end,1800)
             self.assertIsNone(run.cleanup_end)
 
-    def test_parent_expiry_never_admits_another_install(self):
+    def test_parent_expiry_blocks_admission_or_late_success(self):
         from rc_acceptance_process import CaptureFailure
         with self.fixture([26],start=1770) as (run,now,calls):
-            with self.assertRaises(CaptureFailure):
-                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+            with self.assertRaises(CaptureFailure):R.install_application(run,'exact-rc.app')
             self.assertEqual(len(calls),1)
             self.assertEqual(run.commands[0]['timeout_seconds'],26)
         for start in [1796,1800,1801]:
             with self.subTest(start=start),self.fixture([],start=start) as (run,now,calls):
-                with self.assertRaisesRegex(R.AcceptanceError,'Shared installation deadline'):
-                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                with self.assertRaisesRegex(R.AcceptanceError,'Application installation deadline'):
+                    R.install_application(run,'exact-rc.app')
                 self.assertEqual(calls,[])
                 self.assertEqual(run.commands,[])
 
-    def test_phase_starts_at_installation_entry_and_not_at_run_creation(self):
-        with self.fixture([100,70],start=400) as (run,now,calls):
-            R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-            self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,196])
-            self.assertEqual(now[0],570)
-            self.assertEqual(run.end,1800)
-
-    def test_aut_cleanup_at_or_after_phase_end_blocks_runner(self):
+    def test_cleanup_at_or_after_installation_phase_end_is_not_success(self):
         for delay in [5,6]:
             with self.subTest(delay=delay),self.fixture([295],cleanup_durations=[delay]) as (run,now,calls):
-                with self.assertRaisesRegex(R.AcceptanceError,'Artifact installation returned late'):
-                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                with self.assertRaisesRegex(R.AcceptanceError,'Application installation returned late'):
+                    R.install_application(run,'exact-rc.app')
                 self.assertEqual(len(calls),1)
                 self.assertEqual(run.commands[0]['returncode'],0)
                 self.assertNotIn('error',run.commands[0])
                 self.assertEqual(now[0],295+delay)
 
-    def test_runner_cleanup_at_or_after_same_phase_end_is_not_success(self):
-        for delay in [5,6]:
-            with self.subTest(delay=delay),self.fixture([100,195],cleanup_durations=[0,delay]) as (run,now,calls):
-                with self.assertRaisesRegex(R.AcceptanceError,'Artifact installation returned late'):
-                    R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-                self.assertEqual(len(calls),2)
-                self.assertEqual([c['timeout_seconds'] for c in run.commands],[296,196])
-                self.assertTrue(all(c['returncode']==0 for c in run.commands))
-                self.assertEqual(now[0],295+delay)
-
-    def test_remaining_cleanup_reserve_cannot_admit_second_install(self):
+    def test_timely_cleanup_does_not_admit_a_redundant_runner_install(self):
         with self.fixture([290],cleanup_durations=[6]) as (run,now,calls):
-            with self.assertRaisesRegex(R.AcceptanceError,'Shared installation deadline'):
-                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
-            self.assertEqual(len(calls),1)
+            R.install_application(run,'exact-rc.app')
+            self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
             self.assertEqual(run.commands[0]['returncode'],0)
             self.assertEqual(now[0],296)
 
-    def test_first_install_failure_is_preserved_without_runner_or_retry(self):
+    def test_install_failure_is_preserved_without_retry(self):
         from rc_acceptance_process import CaptureFailure
         with self.fixture([1],returncodes=[7]) as (run,now,calls):
             with self.assertRaisesRegex(CaptureFailure,'Metadata command exited 7'):
-                R.install_artifacts(run,'exact-rc.app','standalone-runner.app')
+                R.install_application(run,'exact-rc.app')
             self.assertEqual(calls,[['xcrun','simctl','install',ID,'exact-rc.app']])
             self.assertEqual(run.commands[0]['returncode'],7)
             self.assertEqual(run.commands[0]['error'],'CaptureFailure: Metadata command exited 7')
+
+class FailureSummary(unittest.TestCase):
+    def test_allowlist_does_not_emit_sensitive_operation_content(self):
+        secret='PRIVATE_FAILURE_SENTINEL'
+        op={'command':['/private/'+secret+'/gh','api','--header',secret],
+            'timeout_seconds':30,'elapsed_seconds':1.5,'returncode':1,'error':secret,
+            'stdout':secret,'stderr':secret,
+            'cleanup':{'success':True,'group_state':'absent','leader_reaped':True,'errors':[]}}
+        summary=R.failure_summary([op],1,[secret])
+        self.assertEqual(summary,{'schema_version':1,'controller_failed':True,'phase':'github-read','operation_index':1,
+            'grant_seconds':30,'elapsed_seconds':1.5,'exit_code':1,'exit_code_source':'work','timed_out':False,
+            'process_closed':True,'cleanup_failed':True})
+        self.assertNotIn(secret,json.dumps(summary))
+
+    def test_timeout_and_unproved_closure_remain_distinct(self):
+        op={'command':['xcrun','simctl','get_app_container',ID,R.BUNDLE,'app'],
+            'timeout_seconds':30,'elapsed_seconds':34.5,
+            'error':'CaptureFailure: Metadata command work deadline exceeded',
+            'cleanup':{'success':False,'group_state':'present','leader_reaped':False,'errors':['private'],'returncode':-15}}
+        summary=R.failure_summary([op],1,[])
+        self.assertEqual(summary['phase'],'simulator-get_app_container')
+        self.assertTrue(summary['timed_out']);self.assertFalse(summary['process_closed'])
+        self.assertEqual(summary['exit_code'],-15)
+        self.assertEqual(summary['exit_code_source'],'cleanup')
+        # Some capture records retain the unset work result explicitly. The
+        # known cleanup exit is still reported without claiming work success.
+        op['returncode']=None
+        summary=R.failure_summary([op],1,[])
+        self.assertEqual(summary['exit_code'],-15)
+        self.assertEqual(summary['exit_code_source'],'cleanup')
+        self.assertTrue(summary['timed_out'])
+
+    def test_missing_or_invalid_numbers_never_create_success_or_nonfinite_json(self):
+        op={'command':['private-command'],'timeout_seconds':float('inf'),'elapsed_seconds':float('nan'),
+            'returncode':True,'cleanup':{}}
+        summary=R.failure_summary([op],1,[])
+        self.assertIsNone(summary['grant_seconds']);self.assertIsNone(summary['elapsed_seconds'])
+        self.assertIsNone(summary['exit_code']);self.assertFalse(summary['process_closed'])
+        self.assertIsNone(summary['exit_code_source'])
+        json.dumps(summary,allow_nan=False)
+        for index in [None,0,2,True]:
+            empty=R.failure_summary([op],index,[])
+            self.assertIsNone(empty['operation_index']);self.assertEqual(empty['phase'],'controller')
+
 
 class CleanupAdmission(unittest.TestCase):
     @contextmanager

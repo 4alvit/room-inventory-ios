@@ -578,6 +578,30 @@ final class FilesNavigationReadiness {
         return state == .targetFolder
     }
 
+    /// Keep the sole accessibility-bound identity from this probe through both
+    /// live readiness checks and the tap. A later probe resolves a fresh set;
+    /// no indexed or predicate lookup is repeated after uniqueness is checked.
+    func waitAndTapBoundElement<Element>(matchingElements: @escaping () throws -> [Element],
+                                         enabled: @escaping (Element) throws -> Bool,
+                                         hittable: @escaping (Element) throws -> Bool,
+                                         tap: @escaping (Element) throws -> Void) throws {
+        var boundElement: Element?
+        func bound() throws -> Element {
+            guard let element = boundElement else { throw Failure.invalidSelectionCount }
+            return element
+        }
+        try waitAndTapFile(pickerCount: { 1 }, folderCount: { 1 }, fileViewCount: { 1 },
+            fileCount: {
+                boundElement = nil
+                let elements = try matchingElements()
+                if elements.count == 1 { boundElement = elements[0] }
+                return elements.count
+            },
+            enabled: { try enabled(bound()) },
+            hittable: { try hittable(bound()) },
+            tap: { try tap(bound()) })
+    }
+
     /// Check each exact typed scope before its descendants. The direct tap is
     /// inside the same active waiter as readiness, with no second generic wait.
     /// Calling this selection again, including from a native callback, fails.

@@ -1777,6 +1777,151 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    func testBoundElementUsesOneResolvedIdentityThroughTap() throws {
+        let window = FilesNavigationReadiness(clock: { 0 })
+        var liveMatches = [7]
+        var queries = 0
+        var calls: [String] = []
+        try window.waitAndTapBoundElement(matchingElements: {
+            queries += 1
+            let captured = liveMatches
+            liveMatches = [9]
+            return captured
+        }, enabled: { calls.append("enabled:\($0)"); return true },
+           hittable: { calls.append("hittable:\($0)"); return true },
+           tap: { calls.append("tap:\($0)") })
+        XCTAssertEqual(queries, 1)
+        XCTAssertEqual(calls, ["enabled:7", "hittable:7", "tap:7"])
+    }
+
+    @MainActor
+    func testBoundElementRejectsAmbiguousMatchesWithoutAction() {
+        let window = FilesNavigationReadiness(clock: { 0 })
+        XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: { [7, 9] },
+            enabled: { _ in XCTFail("Ambiguous enabled"); return true },
+            hittable: { _ in XCTFail("Ambiguous hittable"); return true },
+            tap: { _ in XCTFail("Ambiguous tap") })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidSelectionCount)
+        }
+    }
+
+    @MainActor
+    func testBoundElementRefreshesIdentityAfterMissingOrUnreadyProbe() throws {
+        for unreadyGate in ["enabled", "hittable"] {
+            let window = FilesNavigationReadiness(clock: { 0 })
+            var queries = 0
+            var calls: [String] = []
+            try window.waitAndTapBoundElement(matchingElements: {
+                queries += 1
+                return queries == 1 ? [7] : queries == 2 ? [] : [9]
+            }, enabled: {
+                calls.append("enabled:\($0)")
+                return $0 != 7 || unreadyGate != "enabled"
+            }, hittable: {
+                calls.append("hittable:\($0)")
+                return $0 != 7 || unreadyGate != "hittable"
+            }, tap: { calls.append("tap:\($0)") })
+            XCTAssertEqual(queries, 3)
+            XCTAssertEqual(calls, ["enabled:7"]
+                + (unreadyGate == "hittable" ? ["hittable:7"] : [])
+                + ["enabled:9", "hittable:9", "tap:9"])
+        }
+    }
+
+    @MainActor
+    func testBoundElementRejectsLateQueryBeforeAnyGate() {
+        var now = 0.0
+        let window = FilesNavigationReadiness(clock: { now })
+        XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: {
+            now = 30
+            return [7]
+        }, enabled: { _ in XCTFail("Late query enabled"); return true },
+           hittable: { _ in XCTFail("Late query hittable"); return true },
+           tap: { _ in XCTFail("Late query tap") })) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+        }
+    }
+
+    @MainActor
+    func testBoundElementRetainsNativeErrorAtEveryOperationEvenWhenLate() {
+        final class NativeFailure: Error {}
+        for failedStage in 0...3 {
+            var now = 0.0
+            let window = FilesNavigationReadiness(clock: { now })
+            let expected = NativeFailure()
+            var calls: [Int] = []
+            func operation(_ stage: Int) throws {
+                calls.append(stage)
+                if stage == failedStage { now = 31; throw expected }
+            }
+            XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: {
+                try operation(0); return [7]
+            }, enabled: { _ in try operation(1); return true },
+               hittable: { _ in try operation(2); return true },
+               tap: { _ in try operation(3) })) {
+                XCTAssertTrue(($0 as? NativeFailure) === expected)
+            }
+            XCTAssertEqual(calls, Array(0...failedStage))
+            XCTAssertThrowsError(try window.perform { XCTFail("Action after native error") }) {
+                XCTAssertTrue(($0 as? NativeFailure) === expected)
+            }
+        }
+    }
+
+    @MainActor
+    func testBoundElementLateGateOrTapNeverAdmitsFurtherAction() {
+        for lateStage in 1...3 {
+            var now = 0.0
+            let window = FilesNavigationReadiness(clock: { now })
+            var calls: [Int] = []
+            func operation(_ stage: Int) {
+                calls.append(stage)
+                if stage == lateStage { now = 30 }
+            }
+            XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: {
+                operation(0); return [7]
+            }, enabled: { _ in operation(1); return true },
+               hittable: { _ in operation(2); return true },
+               tap: { _ in operation(3) })) {
+                XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired)
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            XCTAssertEqual(calls, Array(0...lateStage))
+        }
+    }
+
+    @MainActor
+    func testBoundElementCannotBeTappedTwice() throws {
+        let window = FilesNavigationReadiness(clock: { 0 })
+        var queries = 0
+        var taps = 0
+        func select() throws {
+            try window.waitAndTapBoundElement(matchingElements: { queries += 1; return [7] },
+                enabled: { _ in true }, hittable: { _ in true }, tap: { _ in taps += 1 })
+        }
+        try select()
+        XCTAssertThrowsError(try select()) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .selectionAlreadyStarted)
+        }
+        XCTAssertEqual(queries, 1)
+        XCTAssertEqual(taps, 1)
+    }
+
+    @MainActor
+    func testBoundElementTapStaysInsideOriginalWaiter() {
+        let window = FilesNavigationReadiness(timeout: 0.25)
+        var taps = 0
+        var nested: XCTWaiter.Result?
+        XCTAssertThrowsError(try window.waitAndTapBoundElement(matchingElements: { [7] },
+            enabled: { _ in true }, hittable: { _ in true }, tap: { _ in
+                taps += 1
+                nested = XCTWaiter.wait(for: [XCTestExpectation(description: "native bound tap")], timeout: 2)
+            })) { XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .expired) }
+        XCTAssertEqual(nested, .interrupted)
+        XCTAssertEqual(taps, 1)
+    }
+
+    @MainActor
     func testFileSelectionChecksExactScopesInOrderAndTapsOnce() throws {
         var now = 0.0
         let window = FilesNavigationReadiness(timeout: 10, clock: { now })

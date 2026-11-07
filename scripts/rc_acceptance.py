@@ -681,14 +681,8 @@ def execute(args):
             cleanup_errors.append(type(e).__name__+': '+str(e))
             if primary is None:
                 failed_index=next((i+1 for i in range(cleanup_start,len(run.commands)) if run.commands[i].get('error')),None)
-        # Preserve best-effort failure captures without changing the primary verdict.
-        if run_id and run.device and not cleanup_errors and not (run.out/'ui-evidence').exists():
-            try:
-                origin=run.container(RUNNER,'data',cleanup=True)/'Documents'/('RC-'+run_id)
-                before=inventory(origin,count_limit=128,byte_limit=64*MIB)
-                shutil.copytree(origin,run.out/'ui-evidence')
-                same_installed(before,inventory(run.out/'ui-evidence',count_limit=128,byte_limit=64*MIB))
-            except Exception as e:result['failure_evidence_error']=type(e).__name__+': '+str(e)
+        # Failure screenshots, AX and the bounded journey are native attachments
+        # in Acceptance.xcresult. Never query runner containers after shutdown.
         result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
         if cleanup_errors:result['status']='FAILED'
         if primary is not None or cleanup_errors:

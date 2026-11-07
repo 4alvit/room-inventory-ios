@@ -51,7 +51,7 @@ The controller verifies that the two backups have identical complete contents af
 
 This is a text-record scenario; no image original is added. Existing full Recovery and other source tests remain required and do not become exact-RC evidence. Acceptance of original/photo/OCR behavior on the RC would need explicit additional scope, not reinterpretation of this result.
 
-Uploaded evidence contains the explicit inputs, provenance/assets, source hashes, generated and configured test-run specifications, installed inventories, exact native summary, raw result bundle, command logs/closure receipts, step journal, screenshots/AX, real exports and final restored inventory. No authentication/config or build-cache directory is uploaded. Failed tests retain the raw result bundle and any available runner-side failure captures.
+Uploaded evidence contains the explicit inputs, provenance/assets, source hashes, generated and configured test-run specifications, installed inventories, exact native summary, raw result bundle, command logs/closure receipts, step journal, screenshots/AX, real exports and final restored inventory. No authentication/config or build-cache directory is uploaded. A failed native test attaches its available screenshots/AX and the capped 64 KiB `failure-journey` JSON directly to `Acceptance.xcresult` while the runner is alive. Custom attachments must be selected by their exact names; Xcode's `--only-failures` export can omit attachments not marked as associated with a failure. Cleanup does not query the runner container after shutdown, which rejects that lookup. Successful exercise still copies and verifies the complete runner evidence directory before cleanup. Missing captures never change the failure result or establish acceptance.
 
 If execution fails, the controller also prints one `ROOM_RC_FAILURE_V1` JSON line after cleanup. It contains only a fixed phase label, a failed operation index when available, finite numeric timing/exit values, a fixed work/cleanup exit-code source, and timeout/process-closure/cleanup-failure booleans. It excludes commands, paths, exception text and captured streams. A controller failure between commands has no failed operation index. This limited summary survives a later artifact-upload failure; it does not replace detailed receipts or prove runtime acceptance. Diagnostic-output errors never replace the original failure, and no command is retried.
 
@@ -70,7 +70,8 @@ metadata query and cleanup without increasing the time or output caps.
 These are cooperative deadlines, not hard preemption of a stalled host.
 
 The files and command receipts stay in the failed row's `failure-diagnostics/`
-artifact directory. Only an allowlisted collection status is added to the public
+artifact directory, explicitly included in the upload paths even for partial
+collection. Only an allowlisted collection status is added to the public
 failure summary; raw service messages never go into that summary. An empty log
 or matching PID does not prove the cause, service health, or process identity.
 Collection failure cannot replace the original error, turn the row green, or

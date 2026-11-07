@@ -1,5 +1,6 @@
 """No network, Xcode or Simulator: adversarial acceptance-input fixtures only."""
 import copy
+import ast
 from contextlib import contextmanager
 import importlib.util
 import io
@@ -569,7 +570,7 @@ class FailureSummary(unittest.TestCase):
         summary=R.failure_summary([op],1,[secret])
         self.assertEqual(summary,{'schema_version':1,'controller_failed':True,'phase':'github-read','operation_index':1,
             'grant_seconds':30,'elapsed_seconds':1.5,'exit_code':1,'exit_code_source':'work','timed_out':False,
-            'process_closed':True,'cleanup_failed':True})
+            'process_closed':True,'cleanup_failed':True,'diagnostics_status':None})
         self.assertNotIn(secret,json.dumps(summary))
 
     def test_timeout_and_unproved_closure_remain_distinct(self):
@@ -602,6 +603,112 @@ class FailureSummary(unittest.TestCase):
             empty=R.failure_summary([op],index,[])
             self.assertIsNone(empty['operation_index']);self.assertEqual(empty['phase'],'controller')
 
+
+class FailureDiagnostics(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, end=100, duration=1, failure=None, closed=True):
+        with tempfile.TemporaryDirectory() as d:
+            run=R.Run(d,Path(d)/'out');run.end=end;run.device=ID;run.owned_device={'udid':ID}
+            run.commands=[{'pid':123,'error':'original failure'}]
+            now=[0.0];calls=[]
+            def capture(argv,**kw):
+                calls.append((argv,kw['timeout'],kw['cleanup_parent_deadline'],kw['limit']))
+                now[0]+=duration
+                raw=b'123 1 123 S 00:30 0.0 0.1 simctl\n999 1 999 S 00:01 0.0 0.1 private-token\n'
+                kw['receipt'].update(command=argv,timeout_seconds=kw['timeout'],returncode=0,
+                    cleanup={'success':closed,'group_state':'absent' if closed else 'unverified',
+                             'leader_reaped':closed,'errors':[]},stdout_bytes=len(raw),stderr_bytes=0)
+                for key in ('stdout_path','stderr_path'):
+                    if kw.get(key):Path(kw[key]).write_bytes(raw if key=='stdout_path' else b'')
+                if failure:raise failure
+                return raw
+            with patch.object(R.time,'monotonic',side_effect=lambda:now[0]),patch.object(R,'bounded_capture',side_effect=capture):
+                yield run,now,calls
+    def test_fixed_commands_and_filtered_processes_share_one_parent_window(self):
+        with self.fixture() as (run,now,calls):
+            result=R.collect_failure_diagnostics(run,1)
+            self.assertEqual(result['status'],'collected')
+            self.assertEqual([x[0][0] for x in calls],['/bin/ps','/usr/bin/vm_stat','/usr/bin/log'])
+            self.assertEqual([x[1] for x in calls],[2,2,8])
+            self.assertEqual([x[2] for x in calls],[20,20,20])
+            self.assertEqual([x[3] for x in calls],[R.MIB,128*1024,4*R.MIB])
+            self.assertIn('ucomm=',calls[0][0][-1]);self.assertNotIn('args',calls[0][0][-1])
+            self.assertEqual(calls[2][0][2:4],['--last','10m'])
+            self.assertIn('process == "com.apple.CoreSimulator.CoreSimulatorService"',calls[2][0][-1])
+            self.assertNotIn('simctl',[x[0][0] for x in calls])
+            selected=(run.out/'failure-diagnostics/processes-selected.json').read_text()
+            self.assertNotIn('private-token',selected)
+            self.assertEqual(len(json.loads(selected)['processes']),1)
+            self.assertEqual(run.commands,[{'pid':123,'error':'original failure'}])
+            self.assertIsNone(run.cleanup_end)
+    def test_expired_parent_or_missing_device_admits_no_diagnostic_child(self):
+        for end in (0,4):
+            with self.subTest(end=end),self.fixture(end=end) as (run,now,calls):
+                self.assertEqual(R.collect_failure_diagnostics(run,1),{'status':'skipped_no_parent_time'})
+                self.assertEqual(calls,[]);self.assertFalse((run.out/'failure-diagnostics').exists())
+        with self.fixture() as (run,now,calls):
+            run.owned_device=None
+            self.assertEqual(R.collect_failure_diagnostics(run,1),{'status':'skipped_no_owned_device'})
+            self.assertEqual(calls,[])
+    def test_parent_clips_phase_and_prevents_another_child_after_late_return(self):
+        with self.fixture(end=7,duration=3) as (run,now,calls):
+            result=R.collect_failure_diagnostics(run,1)
+            self.assertEqual(result['status'],'partial');self.assertEqual(len(calls),1)
+            self.assertEqual(calls[0][1:3],(2,7))
+        with self.fixture(end=100,duration=25) as (run,now,calls):
+            self.assertEqual(R.collect_failure_diagnostics(run,1)['status'],'partial')
+            self.assertEqual(len(calls),1)
+    def test_collector_failure_is_retained_without_retry_or_primary_mutation(self):
+        with self.fixture(failure=OSError('private diagnostic failure')) as (run,now,calls):
+            result=R.collect_failure_diagnostics(run,1)
+            self.assertEqual(result['status'],'partial');self.assertEqual(len(calls),3)
+            self.assertEqual([x['status'] for x in result['operations']],['failed']*3)
+            self.assertEqual(run.commands[0]['error'],'original failure')
+            self.assertNotIn('private diagnostic failure',json.dumps(result))
+    def test_unproved_diagnostic_process_stops_collection(self):
+        with self.fixture(closed=False) as (run,now,calls):
+            result=R.collect_failure_diagnostics(run,1)
+            self.assertEqual(result['status'],'partial');self.assertEqual(len(calls),1)
+            self.assertEqual(result['operations'][0]['receipt']['cleanup']['group_state'],'unverified')
+    def test_process_fields_and_stdout_summary_cannot_copy_names_or_streams(self):
+        raw=b'123 1 123 S 00:30 0 0 PRIVATE_SECRET\n7 1 7 S 00:02 nan 0 simctl\n8 1 8 S 00:02 0 0 simctl-secret\n'
+        selected=R.diagnostic_processes(raw,123)
+        self.assertEqual([x['pid'] for x in selected['processes']],[123,8])
+        self.assertNotIn('SECRET',json.dumps(selected));self.assertNotIn('simctl-secret',json.dumps(selected))
+        self.assertIsNone(R.failure_summary([],None,[],{'status':'PRIVATE_SECRET'})['diagnostics_status'])
+        summary=R.failure_summary([],None,[],{'status':'partial','stdout':'PRIVATE_SECRET','error':'PRIVATE_SECRET'})
+        self.assertEqual(summary['diagnostics_status'],'partial');self.assertNotIn('PRIVATE_SECRET',json.dumps(summary))
+    def test_observed_truncated_accounting_names_keep_only_fixed_service_counters(self):
+        names=['com.apple.CoreSi','com.apple.CoreSimulator.CoreSimulatorService','CoreSimulatorService',
+               'SimulatorTrampol','SimulatorTrampoline','com.apple.otherService']
+        raw=''.join(f'{i+1} 1 {i+1} S 00:02 0 0 {name}\n' for i,name in enumerate(names)).encode()
+        selected=R.diagnostic_processes(raw,None)
+        self.assertEqual([x['pid'] for x in selected['processes']],[1,2,3,4,5])
+        self.assertEqual([x['role'] for x in selected['processes']],['core-simulator']*3+['simulator-launcher']*2)
+        self.assertTrue(all(not x['matches_recorded_pid'] for x in selected['processes']))
+        self.assertNotIn('com.apple',json.dumps(selected));self.assertNotIn('SimulatorTrampol',json.dumps(selected))
+    def test_actual_finalizer_skips_success_and_preserves_failure_if_collector_raises(self):
+        tree=ast.parse((SCRIPTS/'rc_acceptance.py').read_text())
+        execute=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='execute')
+        final=next(x for x in execute.body if isinstance(x,ast.Try)).finalbody
+        code=compile(ast.fix_missing_locations(ast.Module(body=final,type_ignores=[])),'actual-finalizer','exec')
+        for primary in (None,R.AcceptanceError('original failure')):
+            with self.subTest(failed=primary is not None),tempfile.TemporaryDirectory() as d:
+                run=R.Run(d,Path(d)/'out');run.close_device=Mock()
+                result={'status':'PASS' if primary is None else 'FAILED','error':'original failure'}
+                collector=Mock(side_effect=OSError('private collector failure'))
+                namespace=dict(R.__dict__,run=run,result=result,primary=primary,cleanup_errors=[],run_id=None,
+                               failed_index=None,collect_failure_diagnostics=collector)
+                with patch('builtins.print') as output:exec(code,namespace)
+                run.close_device.assert_called_once()
+                if primary is None:
+                    collector.assert_not_called();output.assert_not_called()
+                    self.assertNotIn('failure_diagnostics',result);self.assertEqual(result['status'],'PASS')
+                else:
+                    collector.assert_called_once_with(run,None)
+                    self.assertEqual(result['failure_diagnostics'],{'status':'unavailable'})
+                    self.assertIs(namespace['primary'],primary);self.assertEqual(result['error'],'original failure')
+                    self.assertNotIn('private collector failure',output.call_args.args[0])
 
 class CleanupAdmission(unittest.TestCase):
     @contextmanager

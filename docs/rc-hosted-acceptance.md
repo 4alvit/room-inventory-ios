@@ -55,6 +55,31 @@ Uploaded evidence contains the explicit inputs, provenance/assets, source hashes
 
 If execution fails, the controller also prints one `ROOM_RC_FAILURE_V1` JSON line after cleanup. It contains only a fixed phase label, a failed operation index when available, finite numeric timing/exit values, a fixed work/cleanup exit-code source, and timeout/process-closure/cleanup-failure booleans. It excludes commands, paths, exception text and captured streams. A controller failure between commands has no failed operation index. This limited summary survives a later artifact-upload failure; it does not replace detailed receipts or prove runtime acceptance. Diagnostic-output errors never replace the original failure, and no command is retried.
 
+After a failure involving an owned Simulator, the controller attempts one small
+host diagnostic collection **after device cleanup**. Its combined 20-second
+window comes from the remaining original 1,800-second work deadline; it never
+extends that deadline or consumes the separate 90-second device-cleanup reserve.
+With no remaining admission time it records a skip. Three fixed, bounded reads
+capture selected process counters (`ps`, without arguments or environment),
+memory page statistics (`vm_stat`), and the last ten minutes of narrowly filtered
+CoreSimulator/Simulator/installer unified logs. Each child has the existing
+bounded process cleanup; an unproved diagnostic child stops further collection.
+The process filter recognizes the service's truncated accounting names as well
+as its full name. The ten-minute log interval includes installation before a slow
+metadata query and cleanup without increasing the time or output caps.
+These are cooperative deadlines, not hard preemption of a stalled host.
+
+The files and command receipts stay in the failed row's `failure-diagnostics/`
+artifact directory. Only an allowlisted collection status is added to the public
+failure summary; raw service messages never go into that summary. An empty log
+or matching PID does not prove the cause, service health, or process identity.
+Collection failure cannot replace the original error, turn the row green, or
+erase an unproved process/device closure. No `simctl diagnose`, repeated metadata
+query, service restart, or extra test is performed. Both rows of run `42334033801`
+stalled at the authoritative app-container query before XCTest, even after the
+redundant runner installation was removed; this evidence collection diagnoses
+that unresolved boundary and does not claim to repair it.
+
 Review both rows, screenshots/AX and both PDFs, verify that their RC/manifest/asset identities agree, and record the exact run/attempt and reviewer evidence before checking release-checklist.md's RC item. The protected stable environment remains unchanged; do not approve promotion while evidence is missing or a release criterion remains open. This workflow cannot supply that approval.
 
 ## Descriptor validation and remaining runtime acceptance

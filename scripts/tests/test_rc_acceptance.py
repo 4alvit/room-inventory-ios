@@ -899,7 +899,8 @@ class LiveFailureSample(unittest.TestCase):
             R.save(run.out/'owned-device.json',run.owned_device)
             installed=home/'Library/Developer/CoreSimulator/Devices'/ID/'data/Containers/Bundle/Application'/ID/'RoomInventory.app'
             installed.mkdir(parents=True);(installed/'RoomInventory').write_bytes(b'exact installed executable')
-            sampler=R.FailureSample(run,ID,installed);now=[0.0];calls=[];run.end=1800
+            R.save(run.out/'installed-before.json',R.inventory(installed))
+            now=[0.0];calls=[];run.end=1800
             def capture(argv,**kwargs):
                 name=['identity-before','sample','identity-after'][len(calls)]
                 calls.append((argv,kwargs));now[0]+=(advance or {}).get(name,1 if name=='sample' else .1)
@@ -915,7 +916,77 @@ class LiveFailureSample(unittest.TestCase):
                 return raw
             with patch.object(R.Path,'home',return_value=home),patch.object(R.time,'monotonic',side_effect=lambda:now[0]), \
                     patch.object(R,'bounded_capture',side_effect=capture):
+                sampler=R.FailureSample(run,ID,installed)
                 yield sampler,run,now,calls
+
+    def test_static_preparation_is_not_repeated_inside_live_sample_window(self):
+        with self.fixture() as (s,run,now,calls):
+            regular=R.regular
+            def slow_read(*args):
+                now[0]+=2.5
+                return regular(*args)
+            with patch.object(R,'regular',side_effect=slow_read):
+                prepared=R.FailureSample(run,ID,s.installed)
+            self.assertEqual(prepared.preparation_seconds,5)
+            self.assertEqual(calls,[])
+            self.assertFalse((run.out/'failure-diagnostics').exists())
+            with patch.object(R,'regular',side_effect=AssertionError('Repeated static read')), \
+                    patch.object(R.Path,'resolve',side_effect=AssertionError('Repeated path resolution')):
+                prepared.feed(prepared.marker+b'\n',720)
+            self.assertEqual(prepared.report['status'],'collected')
+            self.assertEqual(calls[0][1]['timeout'],2)
+            self.assertTrue(all(kwargs['cleanup_parent_deadline']==15 for _,kwargs in calls))
+            self.assertEqual(prepared.report['installed_before_sha256'],
+                             R.digest(regular(run.out/'installed-before.json',16*R.MIB)))
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
+
+    def test_unavailable_static_context_never_runs_diagnostic_on_success_or_failure(self):
+        with self.fixture() as (s,run,now,calls):
+            (run.out/'installed-before.json').unlink()
+            unavailable=R.FailureSample(run,ID,s.installed)
+            unavailable.feed(b'ordinary successful test\n',720)
+            self.assertFalse(unavailable.seen);self.assertIsNone(unavailable.report)
+            self.assertFalse((run.out/'failure-diagnostics').exists())
+            unavailable.feed(unavailable.marker+b'\n',720)
+            self.assertEqual(unavailable.report['status'],'partial');self.assertEqual(calls,[])
+
+    def test_static_preparation_cannot_renew_parent_or_swallow_cancellation(self):
+        with self.fixture() as (s,run,now,calls):
+            regular=R.regular;run.end=4
+            def late_read(*args):
+                now[0]+=3
+                return regular(*args)
+            with patch.object(R,'regular',side_effect=late_read):
+                unavailable=R.FailureSample(run,ID,s.installed)
+            self.assertIsNone(unavailable.prepared);self.assertEqual(run.end,4)
+            unavailable.feed(unavailable.marker+b'\n',720)
+            self.assertEqual(unavailable.report['status'],'skipped_no_parent_time')
+            self.assertEqual(calls,[])
+            run.end=1800
+            with patch.object(R,'regular',side_effect=R.CancellationRequested('Cancellation requested')):
+                with self.assertRaises(R.CancellationRequested):R.FailureSample(run,ID,s.installed)
+
+    def test_replaced_executable_or_changed_owned_device_never_reuses_preparation(self):
+        for mode in ['replacement','device','owner']:
+            with self.subTest(mode=mode),self.fixture() as (s,run,now,calls):
+                if mode=='replacement':
+                    exe=s.installed/'RoomInventory';other=exe.with_name('replacement')
+                    other.write_bytes(exe.read_bytes());other.replace(exe)
+                elif mode=='device':run.device=str(uuid.uuid4()).upper()
+                else:run.owned_device['absent_before']=False
+                s.feed(s.marker+b'\n',720)
+                self.assertEqual(s.report['status'],'partial');self.assertEqual(calls,[])
+
+    def test_late_fresh_file_identity_does_not_admit_process_read(self):
+        with self.fixture() as (s,run,now,calls):
+            lstat=R.Path.lstat
+            def slow_identity(path):
+                now[0]+=11
+                return lstat(path)
+            with patch.object(R.Path,'lstat',autospec=True,side_effect=slow_identity):
+                s.feed(s.marker+b'\n',720)
+            self.assertEqual(s.report['status'],'partial');self.assertEqual(calls,[])
+            self.assertEqual(run.end,1800);self.assertIsNone(run.cleanup_end)
 
     def test_chunked_exact_nonce_triggers_once_before_cleanup(self):
         with self.fixture() as (s,run,now,calls):
@@ -1016,6 +1087,10 @@ class LiveFailureSample(unittest.TestCase):
         self.assertGreater(marker,swift.index('} catch {'))
         source=(SCRIPTS/'rc_acceptance.py').read_text()
         self.assertIn('on_stdout=failure_sample.feed',source)
+        self.assertLess(source.index("save(run.out/'installed-before.json'"),
+                        source.index('failure_sample=FailureSample(run,run_id,installed)'))
+        self.assertLess(source.index('failure_sample=FailureSample(run,run_id,installed)'),
+                        source.index("run.command(['xcodebuild','test-without-building'"))
         self.assertLess(source.index("require(not failure_sample.seen,'Native failure marker received')"),
                         source.index("save(run.out/'installed-after.json'"))
 

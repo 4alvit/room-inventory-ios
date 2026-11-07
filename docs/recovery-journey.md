@@ -186,13 +186,18 @@ and controller deadlines remain active and are never renewed.
 
 In run `42174123340`, the host's exclusive installation-ACK evidence was written
 about 81.5 seconds after the request attachment, after the former 60-second window.
-The controller services bridge requests after guarded resource accounting; a
-device census in that UI command took 103.25 seconds. The installation allowance
+At that time the controller serviced bridge requests only after guarded resource
+accounting; a device census in that UI command took 103.25 seconds. The installation allowance
 therefore includes room for that measured host work and subsequent validation,
 without skipping a census, weakening ACK identity checks or retrying the handshake.
 The retained evidence does not locate the exact runner-ACK publication time or
 attribute the whole delay to one census. The finite allowance is not a guarantee
 of hosted filesystem latency, and it does not extend the 900-second test case.
+
+After installation, pending numbered export requests can now be serviced at
+owned scan checkpoints under the [scoped resource guard](recovery-hosted.md#bridge-service-during-an-unfinished-census).
+This keeps their original 60-second windows and resumes the unfinished full
+census; it does not accept incomplete accounting or retry an acknowledgement.
 
 All runner publications (installation, Photos seed/isolation and numbered export
 requests) write a complete exclusive temporary file in the same directory, then

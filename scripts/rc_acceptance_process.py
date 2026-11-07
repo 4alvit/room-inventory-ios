@@ -98,7 +98,7 @@ class CaptureFailure(RuntimeError):
     pass
 
 
-def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None, cleanup_parent_deadline=None):
+def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, receipt=None, stdout_path=None, stderr_path=None, cleanup_parent_deadline=None, on_stdout=None):
     """One isolated process with cooperative deadlines; preserve primary errors.
 
     An explicit absolute parent deadline lets cleanup retain one four-second
@@ -134,6 +134,12 @@ def bounded_capture(argv, *, cwd=None, env=None, timeout=8, limit=4 * 1024**2, r
                     if len(output[key.data]) + len(chunk) > limit:
                         raise CaptureFailure('Metadata command stream cap exceeded')
                     output[key.data].extend(chunk)
+                    if key.data == 'stdout' and on_stdout is not None:
+                        if time.monotonic() >= work_end:
+                            raise CaptureFailure('Metadata command work deadline exceeded')
+                        on_stdout(chunk, work_end)
+                        if time.monotonic() >= work_end:
+                            raise CaptureFailure('Metadata command work deadline exceeded')
         if time.monotonic() >= work_end:
             raise CaptureFailure('Metadata command completed after work deadline')
         record['returncode'] = process.returncode

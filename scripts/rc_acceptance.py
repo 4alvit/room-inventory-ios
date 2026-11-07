@@ -49,6 +49,7 @@ SOURCE_INPUTS = ['Acceptance/RC/project.yml', 'Acceptance/RC/RCArtifactAcceptanc
     'ExportReturnReadiness']]
 
 class AcceptanceError(RuntimeError): pass
+class CancellationRequested(AcceptanceError): pass
 
 def require(condition, message):
     if not condition: raise AcceptanceError(message)
@@ -316,12 +317,108 @@ def diagnostic_processes(raw, failed_pid):
     return {'scope':'Service counters; PID equality alone does not establish process identity or closure.',
             'processes':rows}
 
+def exact_aut_process(raw, executable):
+    """Select only the exact installed executable; never use a name or argv."""
+    matches=[]
+    for line in raw.decode('utf-8',errors='strict').splitlines():
+        fields=line.split(None,6)
+        if len(fields)!=7 or fields[6]!=str(executable):continue
+        require(re.fullmatch(r'[1-9][0-9]*',fields[0]) is not None,'Invalid AUT PID')
+        started=' '.join(fields[1:6])
+        require(re.fullmatch(r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}',started) is not None,
+                'Invalid AUT start time')
+        matches.append({'pid':int(fields[0]),'started':started,'executable':str(executable)})
+    require(len(matches)==1,'Exact AUT process missing or ambiguous')
+    return matches[0]
+
+class FailureSample:
+    """One diagnostic after the native runner has already declared failure."""
+    def __init__(self, run, run_id, installed):
+        require(str(uuid.UUID(run_id)).upper()==run_id,'Invalid sample journey ID')
+        self.run,self.installed=run,Path(installed)
+        self.marker=('ROOM_RC_SAMPLE_V1 '+run_id).encode('ascii')
+        self.pending=b'';self.discarding=False;self.seen=False;self.report=None
+
+    def feed(self, chunk, work_end):
+        if self.seen:return
+        lines=(self.pending+chunk).split(b'\n');self.pending=lines.pop()
+        for line in lines:
+            if self.discarding:self.discarding=False;continue
+            if line.rstrip(b'\r')!=self.marker:continue
+            self.seen=True  # Latch before any lookup; errors never allow a retry.
+            self.pending=b''
+            try:self.collect(work_end)
+            except CancellationRequested:raise
+            except Exception:
+                if self.report is None:self.report={'status':'unavailable'}
+            return
+        if len(self.pending)>256:self.pending=b'';self.discarding=True
+
+    def collect(self, work_end):
+        run=self.run;started=time.monotonic();deadline=min(work_end,run.end,started+10)
+        self.report={'status':'partial','allowance_seconds':10,'operations':[],
+                     'measurement':'sample transiently suspends threads; this failed run cannot become acceptance.'}
+        if deadline-started<=4:
+            self.report['status']='skipped_no_parent_time';return
+        out=run.out/'failure-diagnostics'/'live-aut';out.mkdir(parents=True,exist_ok=False)
+        try:
+            owned=run.owned_device
+            require(owned is not None and owned['udid']==run.device and owned['absent_before'] is True
+                    and loads(regular(run.out/'owned-device.json',MIB))==owned,'Sample device ownership changed')
+            root=Path.home()/'Library/Developer/CoreSimulator/Devices'/run.device/'data/Containers/Bundle/Application'
+            executable=self.installed/'RoomInventory'
+            require(self.installed.is_absolute() and self.installed.resolve()==self.installed
+                    and self.installed.is_relative_to(root) and not executable.is_symlink()
+                    and executable.is_file(),'Sample executable outside verified installed app')
+
+            def capture(name,argv,cap,limit,*,keep=False):
+                remaining=deadline-time.monotonic()
+                require(remaining>4,'Sample diagnostic deadline')
+                record={};self.report['operations'].append({'name':name,'receipt':record})
+                failure=None
+                try:
+                    raw=bounded_capture(argv,cwd=run.root,env={**os.environ,'LC_ALL':'C'},
+                        timeout=min(cap,remaining-4),limit=limit,receipt=record,
+                        stdout_path=out/(name+'.stdout') if keep else None,
+                        stderr_path=out/(name+'.stderr'),cleanup_parent_deadline=deadline)
+                except BaseException as error:
+                    failure=error;raise
+                finally:
+                    try:save(out/(name+'.json'),record)
+                    except CancellationRequested:raise
+                    except Exception:
+                        if failure is None:raise
+                clean=record.get('cleanup',{})
+                require(time.monotonic()<deadline and clean.get('success') is True
+                        and clean.get('group_state')=='absent' and clean.get('leader_reaped') is True
+                        and clean.get('errors')==[],'Sample diagnostic closure unproved')
+                return raw
+
+            fields=['/bin/ps','-axww','-o','pid=,lstart=,comm=']
+            before=exact_aut_process(capture('identity-before',fields,2,MIB),executable)
+            self.report['before']=before
+            capture('sample',['/usr/bin/sample',str(before['pid']),'1','10','-mayDie','-file','/dev/stdout'],3,2*MIB,keep=True)
+            after=exact_aut_process(capture('identity-after',fields,2,MIB),executable)
+            self.report['after']=after
+            require(before==after,'AUT process identity changed during sample')
+            self.report['status']='collected'
+        except CancellationRequested:raise
+        except Exception:
+            self.report['status']='partial'  # Original native failure remains primary.
+        finally:
+            self.report['elapsed_seconds']=time.monotonic()-started
+            try:save(out/'result.json',self.report)
+            except CancellationRequested:raise
+            except Exception:pass
+
 def collect_failure_diagnostics(run, failed_index):
     """Best-effort host evidence after device cleanup, within the original parent."""
     if run.device is None or run.owned_device is None:return {'status':'skipped_no_owned_device'}
     started=time.monotonic();deadline=min(run.end,started+20)
     if deadline-started<=4:return {'status':'skipped_no_parent_time'}
-    out=run.out/'failure-diagnostics';out.mkdir(exist_ok=False)
+    out=run.out/'failure-diagnostics'
+    require(not out.is_symlink(),'Diagnostic directory symlink')
+    out.mkdir(exist_ok=True)  # May contain the earlier, separately bounded live AUT sample.
     failed=run.commands[failed_index-1] if type(failed_index)is int and 0<failed_index<=len(run.commands) else {}
     predicate='process == "CoreSimulatorService" OR process == "com.apple.CoreSimulator.CoreSimulatorService" OR process == "simulatord" OR process == "launchd_sim" OR process == "installd" OR subsystem BEGINSWITH "com.apple.CoreSimulator"'
     commands=[('processes',['/bin/ps','-axo','pid=,ppid=,pgid=,state=,etime=,pcpu=,pmem=,ucomm='],2,MIB),
@@ -340,6 +437,7 @@ def collect_failure_diagnostics(run, failed_index):
                 stderr_path=out/(name+'.stderr'),cleanup_parent_deadline=deadline)
             if name=='processes':save(out/'processes-selected.json',diagnostic_processes(raw,failed.get('pid')))
             entry['status']='collected'
+        except CancellationRequested:raise
         except Exception:pass  # Detailed bounded receipt remains local; preserve the primary failure.
         report['operations'].append(entry)
         save(out/(name+'.json'),record)
@@ -359,7 +457,7 @@ class Run:
         (self.out/'operations').mkdir()
         self.end=time.monotonic()+1800; self.commands=[]; self.device=None; self.cleanup_end=None
         self.owned_device=None; self.device_cleanup=None
-    def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False):
+    def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False,on_stdout=None):
         if cleanup and self.cleanup_end is None:self.cleanup_end=time.monotonic()+90
         parent_end=self.cleanup_end if cleanup else self.end
         remaining=parent_end-time.monotonic()
@@ -369,7 +467,7 @@ class Run:
             return bounded_capture([str(x) for x in argv],cwd=self.root,env=os.environ.copy(),
                 timeout=min(cap,remaining-4),limit=limit,receipt=record,
                 stdout_path=stem.with_suffix('.stdout'),stderr_path=stem.with_suffix('.stderr'),
-                cleanup_parent_deadline=parent_end)
+                cleanup_parent_deadline=parent_end,**({'on_stdout':on_stdout} if on_stdout is not None else {}))
         finally:
             self.commands.append(record); save(stem.with_suffix('.json'),record)
     def sim(self,*args,cap=30,cleanup=False):
@@ -582,7 +680,7 @@ def execute(args):
     result={'status':'FAILED','expected_rc':args.expected,'scope':{'runtime':RUNTIME,'device_type':DEVICES[args.device],'architecture':'arm64'},
             'limitations':['Hosted Simulator only; no physical device, TestFlight or production StoreKit acceptance.',
                            'Text-only record scenario; no original attachment added.','Human screenshot/AX/PDF review required before acceptance.']}
-    primary=None; cleanup_errors=[]; run_id=None; failed_index=None
+    primary=None; cleanup_errors=[]; run_id=None; failed_index=None; failure_sample=None
     try:
         head=run.command(['git','rev-parse','HEAD'],'source-head',cap=8).decode().strip()
         require(head==args.harness_sha==os.environ.get('GITHUB_SHA') and re.fullmatch('[0-9a-f]{40}',head),'Harness SHA mismatch')
@@ -630,10 +728,12 @@ def execute(args):
         install_application(run,aut)
         installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
         save(run.out/'installed-before.json',inventory(installed))
+        failure_sample=FailureSample(run,run_id,installed)
         run.command(['xcodebuild','test-without-building','-xctestrun',plan,'-destination','platform=iOS Simulator,id='+run.device,
             '-only-testing:'+TARGET+'/'+METHOD,'-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1',
             '-collect-test-diagnostics','never','-resultBundlePath',run.out/'Acceptance.xcresult'],
-            'test-installed-rc',cap=720,limit=64*MIB)
+            'test-installed-rc',cap=720,limit=64*MIB,on_stdout=failure_sample.feed)
+        require(not failure_sample.seen,'Native failure marker received')
         same_installed(aut_inventory,inventory(run.container(BUNDLE,'app')))
         save(run.out/'installed-after.json',inventory(installed))
         summary=loads(run.command(['xcrun','xcresulttool','get','test-results','summary','--path',run.out/'Acceptance.xcresult'],'test-summary',cap=45))
@@ -675,6 +775,7 @@ def execute(args):
         primary=e;result['error']=type(e).__name__+': '+str(e)
         if run.commands and run.commands[-1].get('error'):failed_index=len(run.commands)
     finally:
+        if failure_sample is not None and failure_sample.seen:result['failure_sample']=failure_sample.report
         cleanup_start=len(run.commands)
         try:run.close_device()
         except BaseException as e:
@@ -687,6 +788,10 @@ def execute(args):
         if cleanup_errors:result['status']='FAILED'
         if primary is not None or cleanup_errors:
             try:result['failure_diagnostics']=collect_failure_diagnostics(run,failed_index)
+            except CancellationRequested as error:
+                result['cancellation_requested']=True
+                result['failure_diagnostics']={'status':'unavailable'}
+                if primary is None:primary=error
             except BaseException:result['failure_diagnostics']={'status':'unavailable'}
         save(run.out/'result.json',result)
         if primary is not None or cleanup_errors:
@@ -702,7 +807,7 @@ def main():
     parser.add_argument('--build-only',action='store_true')
     parser.add_argument('--harness-sha',required=True)
     args=parser.parse_args()
-    signal.signal(signal.SIGTERM,lambda *_:(_ for _ in ()).throw(AcceptanceError('Cancellation requested')))
+    signal.signal(signal.SIGTERM,lambda *_:(_ for _ in ()).throw(CancellationRequested('Cancellation requested')))
     if args.build_only:
         require(args.expected is None and args.device is None,'Build-only does not accept RC/runtime inputs')
         build_only(args)

@@ -81,6 +81,32 @@ stalled at the authoritative app-container query before XCTest, even after the
 redundant runner installation was removed; this evidence collection diagnoses
 that unresolved boundary and does not claim to repair it.
 
+For a native-test failure, the runner first writes one journey-ID-bound marker
+before its screenshot/AX calls and before terminating the app. Only that marker
+can trigger a live AUT sample; a passing test performs no extra process lookup
+or sampling. The controller identifies exactly one process whose executable
+path is the verified installed app inside the owned Simulator, then compares
+PID, process start time and executable path before and after sampling. Ambiguous,
+missing or changed identity leaves the diagnostic incomplete. These observations
+are not an atomic process-identity guarantee, and PID equality alone is insufficient.
+
+The fixed `sample` command observes one second at ten-millisecond intervals,
+with a two-MiB captured-stream cap. Its two process reads and sample share at most
+ten seconds, including owned-child cleanup, clipped to the original 720-second
+test command and 1,800-second work deadline. They never consume or extend the
+90-second device-cleanup reserve. The existing upload retains partial receipts
+and stack output under `failure-diagnostics/live-aut/`; other process paths and
+command arguments are not retained by the identity reads. No private XCTest
+setting, debugger, service restart, app relaunch or retry is used.
+
+Apple's `sample(1)` describes transiently suspending threads while collecting
+their stacks. This measurement can affect timing, so a marked or sampled attempt
+remains failed even if Xcode later returns zero. Diagnostic failure never replaces
+the original test error. A collected stack describes the sampled interval after
+failure; it does not prove the state at the earlier tap or resolve the historical
+idle-notification failure by itself. Long-running `xcodebuild` sysdiagnoses remain
+disabled.
+
 Review both rows, screenshots/AX and both PDFs, verify that their RC/manifest/asset identities agree, and record the exact run/attempt and reviewer evidence before checking release-checklist.md's RC item. The protected stable environment remains unchanged; do not approve promotion while evidence is missing or a release criterion remains open. This workflow cannot supply that approval.
 
 ## Descriptor validation and remaining runtime acceptance

@@ -10,6 +10,11 @@
   "version_file": "VERSION",
   "release_notes": "CHANGELOG.md",
   "toolkit_revision": "755c2e66fb1e79fc67d9e4c85ecffcc046b967db",
+  "change_scope": {
+    "documentation_paths": ["Core/README.md"],
+    "required_paths": ["CHANGELOG.md"],
+    "always_validate_workflows": ["codeql.yml"]
+  },
   "notes": [
     "GitHub artifacts contain source and an unsigned iOS Simulator preview. They are not device-installable IPAs, App Store releases, insurance appraisals, or evidence of real purchases.",
     "The app and source archive retain the committed numeric base version. Candidate channel, source commit, build tool versions and payload hashes identify the preview separately.",

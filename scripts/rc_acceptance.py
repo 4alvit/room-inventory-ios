@@ -263,7 +263,7 @@ def install_application(run, aut):
     run.sim('install',run.device,aut,cap=remaining-4)
     require(time.monotonic()<phase_end,'Application installation returned late')
 
-def failure_summary(operations, failed_index, cleanup_failed):
+def failure_summary(operations, failed_index, cleanup_failed, diagnostics=None):
     """A small public diagnostic when uploading the detailed artifact also fails."""
     op=operations[failed_index-1] if type(failed_index) is int and 0<failed_index<=len(operations) else {}
     command=op.get('command',[]);phase='controller'
@@ -280,6 +280,9 @@ def failure_summary(operations, failed_index, cleanup_failed):
     if type(code) is not int or not -255<=code<=255:
         code=cleanup.get('returncode');code_source='cleanup'
     if type(code) is not int or not -255<=code<=255:code=None;code_source=None
+    diagnostic_status=(diagnostics or {}).get('status')
+    if diagnostic_status not in ('collected','partial','unavailable','skipped_no_owned_device','skipped_no_parent_time'):
+        diagnostic_status=None
     return {'schema_version':1,'controller_failed':True,'phase':phase,'operation_index':failed_index if op else None,
             'grant_seconds':number(op.get('timeout_seconds')),'elapsed_seconds':number(op.get('elapsed_seconds')),
             'exit_code':code,'exit_code_source':code_source,
@@ -287,7 +290,67 @@ def failure_summary(operations, failed_index, cleanup_failed):
                                           'CaptureFailure: Metadata command completed after work deadline'),
             'process_closed':cleanup.get('success') is True and cleanup.get('group_state')=='absent'
                 and cleanup.get('leader_reaped') is True and cleanup.get('errors')==[],
-            'cleanup_failed':bool(cleanup_failed)}
+            'cleanup_failed':bool(cleanup_failed),'diagnostics_status':diagnostic_status}
+
+def diagnostic_processes(raw, failed_pid):
+    """Keep service counters only, never process arguments or environment."""
+    rows=[]
+    for line in raw.decode('utf-8',errors='replace').splitlines():
+        fields=line.split()
+        if len(fields)!=8:continue
+        pid,ppid,pgid,state,elapsed,cpu,memory,name=fields
+        if not all(re.fullmatch(r'[0-9]+',x) for x in (pid,ppid,pgid)):continue
+        role=next((label for prefix,label in [('CoreSimulator','core-simulator'),('com.apple.CoreSi','core-simulator'),
+            ('SimulatorTrampol','simulator-launcher'),('simulatord','simulator'),
+            ('launchd_sim','simulator-launchd'),('installd','installer'),('simctl','simctl')]
+            if name.startswith(prefix)),None)
+        recorded_pid=type(failed_pid)is int and int(pid)==failed_pid
+        if role is None and not recorded_pid:continue
+        if not re.fullmatch(r'[A-Za-z+<>-]{1,12}',state) or not re.fullmatch(r'[0-9:-]{1,24}',elapsed):continue
+        try:values=[float(cpu),float(memory)]
+        except ValueError:continue
+        if not all(math.isfinite(x) and x>=0 for x in values):continue
+        rows.append({'pid':int(pid),'ppid':int(ppid),'pgid':int(pgid),'state':state,
+                     'elapsed':elapsed,'cpu_percent':values[0],'memory_percent':values[1],
+                     'role':role or 'recorded-pid','matches_recorded_pid':recorded_pid})
+    return {'scope':'Service counters; PID equality alone does not establish process identity or closure.',
+            'processes':rows}
+
+def collect_failure_diagnostics(run, failed_index):
+    """Best-effort host evidence after device cleanup, within the original parent."""
+    if run.device is None or run.owned_device is None:return {'status':'skipped_no_owned_device'}
+    started=time.monotonic();deadline=min(run.end,started+20)
+    if deadline-started<=4:return {'status':'skipped_no_parent_time'}
+    out=run.out/'failure-diagnostics';out.mkdir(exist_ok=False)
+    failed=run.commands[failed_index-1] if type(failed_index)is int and 0<failed_index<=len(run.commands) else {}
+    predicate='process == "CoreSimulatorService" OR process == "com.apple.CoreSimulator.CoreSimulatorService" OR process == "simulatord" OR process == "launchd_sim" OR process == "installd" OR subsystem BEGINSWITH "com.apple.CoreSimulator"'
+    commands=[('processes',['/bin/ps','-axo','pid=,ppid=,pgid=,state=,etime=,pcpu=,pmem=,ucomm='],2,MIB),
+              ('memory',['/usr/bin/vm_stat'],2,128*1024),
+              ('service-log',['/usr/bin/log','show','--last','10m','--style','json','--info','--predicate',predicate],8,4*MIB)]
+    report={'status':'partial','allowance_seconds':20,'operations':[],
+            'limits':['Failure evidence only; no retry, service repair, app or process-closure acceptance.',
+                      'Service log covers the last ten minutes after device cleanup; an empty log proves no cause.']}
+    for name,argv,cap,limit in commands:
+        remaining=deadline-time.monotonic()
+        if remaining<=4:break
+        record={};entry={'name':name,'status':'failed','receipt':record}
+        try:
+            raw=bounded_capture(argv,cwd=run.root,env=os.environ.copy(),timeout=min(cap,remaining-4),
+                limit=limit,receipt=record,stdout_path=None if name=='processes' else out/(name+'.stdout'),
+                stderr_path=out/(name+'.stderr'),cleanup_parent_deadline=deadline)
+            if name=='processes':save(out/'processes-selected.json',diagnostic_processes(raw,failed.get('pid')))
+            entry['status']='collected'
+        except Exception:pass  # Detailed bounded receipt remains local; preserve the primary failure.
+        report['operations'].append(entry)
+        save(out/(name+'.json'),record)
+        clean=record.get('cleanup',{})
+        if not (clean.get('success') is True and clean.get('group_state')=='absent'
+                and clean.get('leader_reaped') is True and clean.get('errors')==[]):
+            entry['status']='failed';break
+    if len(report['operations'])==3 and all(x['status']=='collected' for x in report['operations']):report['status']='collected'
+    report['elapsed_seconds']=time.monotonic()-started
+    save(out/'result.json',report)
+    return report
 
 class Run:
     def __init__(self, root, out):
@@ -628,9 +691,12 @@ def execute(args):
             except Exception as e:result['failure_evidence_error']=type(e).__name__+': '+str(e)
         result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
         if cleanup_errors:result['status']='FAILED'
+        if primary is not None or cleanup_errors:
+            try:result['failure_diagnostics']=collect_failure_diagnostics(run,failed_index)
+            except BaseException:result['failure_diagnostics']={'status':'unavailable'}
         save(run.out/'result.json',result)
         if primary is not None or cleanup_errors:
-            try:print('ROOM_RC_FAILURE_V1 '+json.dumps(failure_summary(run.commands,failed_index,cleanup_errors)),flush=True)
+            try:print('ROOM_RC_FAILURE_V1 '+json.dumps(failure_summary(run.commands,failed_index,cleanup_errors,result.get('failure_diagnostics'))),flush=True)
             except Exception:pass  # Diagnostic output must not replace the original failure.
     if primary:raise primary
     require(not cleanup_errors,'Device cleanup failed')

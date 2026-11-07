@@ -134,12 +134,30 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         // this deadline or replace positive readiness of the exact destination.
         let window = FilesNavigationReadiness(timeout: 20)
         let rows = app.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ", "))
-        try window.waitAndTapBoundElement(
+        try performBoundTap(window,
             matchingElements: { rows.allElementsBoundByAccessibilityElement },
             enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
         let target = app.navigationBars.matching(identifier: name)
         _ = try window.waitForTargetFolder(titleCount: { target.count },
             enabled: { target.firstMatch.isEnabled }, hittable: { target.firstMatch.isHittable })
+    }
+
+    private func performBoundTap<Element>(_ window: FilesNavigationReadiness,
+                                         matchingElements: @escaping () throws -> [Element],
+                                         enabled: @escaping (Element) throws -> Bool,
+                                         hittable: @escaping (Element) throws -> Bool,
+                                         tap: @escaping (Element) throws -> Void) throws {
+        var reserved: Element?
+        // Consume the existing single-action admission with the exact identity.
+        // This callback only reserves it; it performs no native UI action.
+        try window.waitAndTapBoundElement(matchingElements: matchingElements,
+            enabled: enabled, hittable: hittable, tap: { reserved = $0 })
+        guard let reserved else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+        // The readiness waiter has unwound. The same absolute window still
+        // rejects cancellation, expired admission, late return and native error.
+        // Native synchronization is no longer interrupted by our readiness waiter;
+        // a blocking action may overrun this window but can never qualify late.
+        try window.perform { try tap(reserved) }
     }
 
     private func openItem(_ app: XCUIApplication) throws {
@@ -259,6 +277,41 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         return state
     }
 
+    private func beginFolderCreation(_ app: XCUIApplication, isPad: Bool) throws {
+        let action = FilesNavigationReadiness(timeout: 10)
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        try performBoundTap(action, matchingElements: { () throws -> [XCUIElement] in
+            let owners = try action.perform { pickers.allElementsBoundByAccessibilityElement }
+            guard owners.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            guard let picker = owners.first else { return [] }
+            if isPad {
+                // Require positive direct creation evidence in the iPad picker.
+                // Missing or ambiguous evidence never authorizes sidebar More.
+                return try action.perform {
+                    picker.buttons.matching(identifier: "New Folder").allElementsBoundByAccessibilityElement
+                }
+            }
+            let bars = try action.perform {
+                picker.navigationBars.matching(identifier: FilesNavigationReadiness.navigationBarIdentifier)
+                    .allElementsBoundByAccessibilityElement
+            }
+            guard bars.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            guard let bar = bars.first else { return [] }
+            return try action.perform {
+                bar.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@",
+                    "OverflowBarButtonItem", "More")).allElementsBoundByAccessibilityElement
+            }
+        }, enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
+        if !isPad {
+            // A distinct existing10s action opens creation from the positively
+            // selected content overflow. It is never a fallback for the iPad.
+            let menu = FilesNavigationReadiness(timeout: 10)
+            let newFolder = app.buttons.matching(identifier: "New Folder")
+            try performBoundTap(menu, matchingElements: { newFolder.allElementsBoundByAccessibilityElement },
+                enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
+        }
+    }
+
     private func folder(_ create: Bool, _ app: XCUIApplication) throws {
         let local = UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
         let folder = "RC-" + runID
@@ -299,8 +352,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         try ready(titleQuery(local, app))
         if create {
             try require(fileRow(folder, app).count == 0, "Folder already exists")
-            try tap(app.buttons.matching(NSPredicate(format: "label == 'More' OR label == 'More Actions'")))
-            try tap(app.buttons.matching(identifier: "New Folder"))
+            try beginFolderCreation(app, isPad: UIDevice.current.userInterfaceIdiom == .pad)
             let inline = app.textViews.matching(identifier: "DOC.inlineRenameField")
             if inline.firstMatch.waitForExistence(timeout: 5) {
                 let element = try ready(inline)
@@ -355,7 +407,7 @@ final class RCArtifactAcceptanceTests: XCTestCase {
         // and positive destination readiness. Neither stage renews the deadline.
         let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
         let actions = app.cells.matching(NSPredicate(format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
-        try window.waitAndTapBoundElement(matchingElements: {
+        try performBoundTap(window, matchingElements: {
             actions.allElementsBoundByAccessibilityElement
         }, enabled: { $0.isEnabled }, hittable: { $0.isHittable }, tap: { $0.tap() })
         let save = app.buttons.matching(identifier: "Save")

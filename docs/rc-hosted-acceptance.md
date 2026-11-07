@@ -267,3 +267,73 @@ validation retain their existing contracts. This allocation change does not clai
 a Simulator cause, retroactively accept failed runs, or prove platform readiness.
 The tracked host fixture executes the actual production destination method with
 controlled query/tap timings alongside record-navigation and prior cases.
+
+
+### Native action after readiness returns
+
+The RC record transition keeps one absolute 20-second acceptance window, and the
+Save to Files transition keeps its absolute 30-second window. In these two
+transitions, `performBoundTap` uses the existing bound-element helper to observe
+one exact identity, require enabled/hittable state, and reserve its single-action
+token. The helper's callback only captures that identity; it does not tap. Once
+the readiness waiter has fully returned, `window.perform` invokes the native tap
+exactly once on that captured element. No selector is resolved again, and the
+same window must still admit the action and its return before the exact target
+navigation/Save control can qualify. Cancellation, reentry, late returns and
+throwing transport errors remain failures; no action is retried.
+
+This deliberately changes interruption behavior for these two actions.
+[Apple documents](https://developer.apple.com/documentation/xctest/xctwaiter/result/interrupted)
+that an expiring outer waiter interrupts waiters nested inside it. The prior
+native room tap waited for idleness until the enclosing 10-second and then
+20-second windows expired. That correlation does not establish why the native
+idle notification was missing. A tap outside the readiness waiter no longer
+receives that artificial nested-waiter interruption. Its synchronization may
+block beyond the small acceptance window; a late return still fails, and the
+existing native test/controller limits of 720/1800 seconds remain unchanged.
+This is a cooperative admission/return contract, not a hard real-time action
+limit or a claim that the hosted stall is cured. XCTest assertions and
+Objective-C exceptions are not made catchable by Swift `throws`.
+
+Host fixtures compare real nested XCTest waiters with the candidate action
+outside readiness: the former is interrupted at the outer deadline; the latter
+can complete its own wait but must still fail if its original window expired.
+They also retain exact identity, one-action/reentry protection, cancellation
+between reservation and invocation, and all existing target-readiness tests.
+These fixtures do not launch a Simulator or replace actual installed-RC
+qualification. Shared Files/Recovery helpers and their existing interruption
+contracts are unchanged.
+
+
+### Native folder-creation variants
+
+The installed-RC harness chooses an explicit folder-creation route after the
+existing exact local-root and absent-run-folder checks. On iPad it requires one
+`New Folder` action inside the sole bound `Browse View (Picker)` owner. It never
+opens More when that direct action is absent, ambiguous, disabled, or unhittable.
+On iPhone it requires one content navigation bar
+`FullDocumentManagerViewControllerNavigationBar`, then its exact
+`OverflowBarButtonItem` / `More` action, before the existing exact `New Folder`
+menu action. A sidebar More control cannot satisfy that content-bar selector.
+
+Each action retains the existing 10-second allowance. Every scope query and live
+gate must return before its deadline; the single bound tap runs after its
+readiness waiter returns, under that same deadline. iPad uses one action and
+iPhone uses the existing two actions. Neither path retries an action or switches
+routes after a failure. Rename, exact created-folder proof, generic `tap`, and
+720-second test / 1800-second parent limits keep their existing contracts.
+
+The failed iPad capture showed a folder-plus toolbar icon and an Edit Sidebar
+popover after the old unscoped More action. Its pre-More attachment contained an
+older screen and did not establish the direct button's AX identifier. Using the
+existing exact `New Folder` semantic query inside the owned picker is therefore
+a fail-closed compatibility hypothesis; host fixtures and SDK typechecking do
+not establish that it is exposed on a particular native runtime. Both actual
+installed-RC device rows remain required.
+
+The existing `scripts/test-rc-backup-selection.py --output <new-directory>` host
+entrypoint extracts `beginFolderCreation` from the RC source with fail-closed
+boundaries and records `folder_creation_method_sha256`. It exercises the actual
+body against owned/wrong-owner, sidebar, ambiguous, unready, stale-identity,
+cancellation, and late-return transports. The existing PR harness job invokes
+this entrypoint; no extra workflow or native producer is introduced.

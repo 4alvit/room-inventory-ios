@@ -51,7 +51,29 @@ def materialize(destination, inputs):
         raise ValueError('Filename observer boundary order changed')
     echo_method = source[echo_first:echo_last]
     echo_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], echo_method)
-    tests = fixture.replace(marker, body).replace(echo_marker, echo_body)
+    record_start = '    private func openRecord('
+    record_end = '\n    private func openItem('
+    record_marker = '    // RC_OPEN_RECORD_BODY'
+    if source.count(record_start) != 1 or source.count(record_end) != 1 or fixture.count(record_marker) != 1:
+        raise ValueError('Record transition or fixture boundary changed')
+    record_first, record_last = source.index(record_start), source.index(record_end)
+    if record_last <= record_first:
+        raise ValueError('Record transition boundary order changed')
+    record_method = source[record_first:record_last]
+    record_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], record_method)
+    presentation_start = '    private func openExportDestination('
+    presentation_end = '\n    private func observeExportedFilename('
+    presentation_marker = '    // RC_EXPORT_DESTINATION_BODY'
+    if (source.count(presentation_start) != 1 or source.count(presentation_end) != 1
+            or fixture.count(presentation_marker) != 1):
+        raise ValueError('Export destination or fixture boundary changed')
+    presentation_first, presentation_last = source.index(presentation_start), source.index(presentation_end)
+    if presentation_last <= presentation_first:
+        raise ValueError('Export destination boundary order changed')
+    presentation_method = source[presentation_first:presentation_last]
+    presentation_body = re.sub(r'\b(XCUIApplication|XCUIElement)\b', lambda m: substitutions[m[0]], presentation_method)
+    tests = (fixture.replace(marker, body).replace(echo_marker, echo_body)
+             .replace(record_marker, record_body).replace(presentation_marker, presentation_body))
     cases = re.findall(r'    func (test\w+)\(', fixture)
     if not cases or len(cases) != len(set(cases)):
         raise ValueError('Expected fixture case identities are missing or ambiguous')
@@ -66,6 +88,8 @@ def materialize(destination, inputs):
     return {
         'method_sha256': digest(method.encode()),
         'filename_echo_method_sha256': digest(echo_method.encode()),
+        'open_record_method_sha256': digest(record_method.encode()),
+        'export_destination_method_sha256': digest(presentation_method.encode()),
         'transport_type_substitutions': substitutions,
         'shared_class_rename': 'FilesNavigationReadiness -> Readiness',
         'generated_sources': {p.name: digest(p.read_bytes()) for p in directory.iterdir()},

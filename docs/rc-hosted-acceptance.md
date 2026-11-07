@@ -14,7 +14,7 @@ The fixed matrix is iPhone 17 and iPad Pro 13-inch M4 (16 GB), on iOS 27.0, usin
 
 Each row owns one newly created Simulator UUID. Work is bounded to 1,800 seconds plus one 90-second cleanup reserve, within a 35-minute job. Individual build, boot, test, metadata, reader and output bounds also apply. Test repetition and automatic retry are absent. Any incomplete action, invalid metadata, mismatched installed file, failed command or unproved shutdown fails the row and preserves its available evidence.
 
-The verified RC app is explicitly installed once within a 300-second allowance, clipped to the original 1,800-second work deadline and retaining the four-second command cleanup reserve. A failed or late return prevents the test. The standalone runner is installed by Xcode during `test-without-building`, within the existing 720-second test allowance; it is not manually installed first. The shared boot allowance remains 180 seconds, and metadata commands retain their 30-second caps. This removes a redundant installation, not the underlying Simulator responsiveness or network failures. Hosted run `42330878489` spent 116.265 seconds installing the RC and another 144.857 seconds manually installing the runner before a subsequent container-query timeout; its iPad row failed earlier during a policy read, and artifact upload then reported `ENOTFOUND`. Neither row exercised the corrected descriptor. Fresh CI and both complete installed-device rows remain required, including authoritative installed-byte and final-shutdown checks; unresolved failures remain tracked in [issue 34](https://github.com/4alvit/room-inventory-ios/issues/34).
+Boot, bootstatus and one explicit installation of the verified RC app share the absolute 480-second setup window described below, clipped to the original 1,800-second work deadline and retaining the four-second command cleanup reserve. A failed or late return prevents the test. The standalone runner is installed by Xcode during `test-without-building`, within the existing 720-second test allowance; it is not manually installed first. Metadata commands retain their 30-second caps. The earlier removal of redundant runner installation did not resolve every Simulator responsiveness or network failure. Hosted run `42330878489` spent 116.265 seconds installing the RC and another 144.857 seconds manually installing the runner before a subsequent container-query timeout; its iPad row failed earlier during a policy read, and artifact upload then reported `ENOTFOUND`. Neither row exercised the corrected descriptor. Fresh CI and both complete installed-device rows remain required, including authoritative installed-byte and final-shutdown checks; unresolved failures remain tracked in [issue 34](https://github.com/4alvit/room-inventory-ios/issues/34).
 
 Before boot, the controller validates the fresh device against the before/after censuses and writes an exclusive `owned-device.json` receipt binding its UUID, name, runtime and device type. Cleanup uses that receipt within the existing single 90-second reserve: an initial census failure still permits one targeted shutdown request, followed by an independent final census. A returned census with conflicting ownership blocks shutdown. Missing or changed ownership never permits a device action. The original operation error and all cleanup errors remain failures even if the final device state is `Shutdown`. `device_cleanup.shutdown_requested` records a helper request; the command receipt establishes whether a child was actually admitted. No foreign device, reset, deletion or retry is introduced. This improves cleanup after a failed census; it does not guarantee that an unresponsive Simulator service will shut down. See [issue 33](https://github.com/4alvit/room-inventory-ios/issues/33).
 
@@ -155,3 +155,45 @@ this command before compiling the standalone runner and retains its exact-case
 result, process-closure receipt and bounded logs. The host command allows 180
 seconds plus four seconds for owned-process cleanup; it removes its temporary
 package only after closure is proved. Python-only fixtures remain usable on Linux.
+
+### Exact filename echo after one input
+
+After typing an export name once, the RC harness uses the existing shared
+`waitForFilenameEcho` observer with one 30-second Files allowance. Every probe
+resolves the unique system picker and its exact filename field afresh. Missing,
+partial or different values remain pending; ambiguous matches and native errors
+fail. Only a full exact value returned before the original deadline admits Save.
+The observer never retypes, retaps or renews its window. The 720-second native test
+and 1,800-second controller budgets remain unchanged.
+
+`ROOM_RC_FILES_FILENAME_ECHO_V1` records the stage, read counts, original allowance,
+elapsed time and bounded last returned value, including whether that value was
+truncated in the diagnostic. This addresses an immediate assertion after
+`typeText` in run `42355096821`; the retained screenshot and AX text were scrolled
+or ellipsized and could not establish the original full scalar or whether it
+subsequently settled. It is not evidence that export or installed-RC acceptance
+already passed.
+
+The existing host command also inserts the actual filename observer at
+`RC_FILENAME_ECHO_BODY` and exercises its real shared waiter. Cases cover partial
+and missing echoes, refreshed field identities, duplicate matches, exact values
+returned late, and failure without any further interaction.
+
+### One shared boot and installation window
+
+After the exact owned-device claim, boot, bootstatus and the single verified AUT
+installation share one absolute 480-second window from their former 180 + 300
+allocations, clipped to the original 1,800-second parent. Every child admission
+reserves four seconds, and strict post-return checks include process cleanup.
+The executor receives absolute work and cleanup deadlines, so delayed preparation
+cannot start a fresh relative allowance. These checks are cooperative; a late OS
+return fails qualification.
+Installation never starts a fresh 300-second allowance: slow boot consumes its
+time and may prevent installation. `setup_window` retains the original start,
+deadline, parent boundary and completion status.
+
+Authoritative installed-app inventories, the 720-second UI command cap,
+10-second failure-sample cap and separate 90-second device cleanup remain
+unchanged. The parent does not guarantee a full 720 seconds remains for UI work.
+This reallocates existing setup time; it does not establish or cure the cause of
+the silent Simulator bootstatus and metadata failures.

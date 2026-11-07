@@ -1,5 +1,6 @@
 """Startup redistribution with fake clocks/processes; no native execution."""
 import contextlib
+from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
@@ -211,6 +212,158 @@ class DevicePhaseTests(unittest.TestCase):
             self.assertIsNone(run.record['commands'][0]['post_command_accounting'])
             self.assertTrue(w.cleaned)
             self.assertIsNone(run.command_deadline)
+
+
+class SharedInstallationTests(unittest.TestCase):
+    def setUp(self):
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        denials = stack.enter_context(fixtures.runtime_guard())
+        self.addCleanup(lambda: self.assertEqual(denials, []))
+
+    def configure(self, world, *, elapsed=280, work=(120, 10), preparation=(5, 5), accounting=(8, 8)):
+        run = world.run
+        world.clock.now = run.start + elapsed
+        run.phase('device')
+        run.app, run.runner = Path('/owned/app'), Path('/owned/runner')
+        work, preparation, accounting = list(work), list(preparation), list(accounting)
+        def guard(force=False):
+            if force:
+                self.assertTrue(world.cleaned)
+                world.clock.now += accounting.pop(0)
+            elif run.command_deadline is None:
+                world.cleaned = False
+                world.clock.now += preparation.pop(0)
+            run.tick()
+        run.guard = guard
+        world.process.wait.side_effect = lambda timeout: (
+            setattr(world.clock, 'now', world.clock.now + work.pop(0)) or 0)
+        world.cleanup_action = lambda: setattr(world.clock, 'now', world.clock.now + 1)
+        return run, (run.phase_end, run.work_end, run.outer_end)
+
+    def test_long_first_install_and_fast_second_share_one_window_with_all_costs(self):
+        with fixtures.World() as w:
+            run, original = self.configure(w)
+            run.install_products()
+            window = run.record['installation_window']
+            self.assertEqual(window, dict(start_elapsed=280, end_deadline_elapsed=460,
+                device_phase_end_elapsed=660, maximum_seconds=180, cleanup_per_child_seconds=4,
+                status='COMPLETED', completed_elapsed=438))
+            self.assertEqual([c['name'] for c in run.record['commands']], ['install-app', 'install-runner'])
+            self.assertEqual([c['args'] for c in run.record['commands']], [
+                ['xcrun', 'simctl', 'install', run.device_id, '/owned/app'],
+                ['xcrun', 'simctl', 'install', run.device_id, '/owned/runner']])
+            self.assertEqual([c['start_elapsed'] for c in run.record['commands']], [285, 419])
+            for c in run.record['commands']:
+                self.assertEqual(c['end_deadline_elapsed'], 460)
+                self.assertEqual(c['preparation']['deadline_elapsed'], 456)
+                self.assertEqual(c['post_command_accounting']['deadline_elapsed'], 460)
+                self.assertEqual(c['post_command_accounting']['status'], 'COMPLETED')
+                self.assertTrue(c['cleanup']['success'])
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+            with self.assertRaises(C.ConfigurationFailure):
+                run.install_products()
+            self.assertEqual(sum(e[0] == 'spawn' for e in w.events), 2)
+
+    def test_window_is_clipped_to_original_parent_and_preserves_later_reserves(self):
+        with fixtures.World() as w:
+            run, original = self.configure(w, elapsed=620, work=(10, 5), preparation=(1, 1), accounting=(1, 1))
+            run.install_products()
+            self.assertEqual(run.record['installation_window']['end_deadline_elapsed'], 660)
+            self.assertEqual(run.record['installation_window']['completed_elapsed'], 641)
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+            self.assertEqual(run.work_end - run.phase_end, 1020 + 240)
+            self.assertEqual(run.outer_end - run.work_end, 60)
+
+    def test_first_preparation_expiry_starts_no_child_and_does_not_renew(self):
+        for cost in (176, 180, 181):
+            with self.subTest(cost=cost), fixtures.World() as w:
+                run, original = self.configure(w, preparation=(cost,))
+                with self.assertRaises(C.DeadlineFailure):
+                    run.install_products()
+                self.assertFalse(any(e[0] == 'spawn' for e in w.events))
+                self.assertEqual(run.record['installation_window']['status'], 'FAILED')
+                self.assertEqual(run.record['installation_window']['end_deadline_elapsed'], 460)
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+                with self.assertRaises(C.ConfigurationFailure):
+                    run.install_products()
+
+    def test_late_first_or_second_child_preserves_single_absolute_deadline(self):
+        for work, count in (((176,), 1), ((120, 55), 2)):
+            with self.subTest(work=work), fixtures.World() as w:
+                run, original = self.configure(w, work=work, preparation=(0, 0), accounting=(0, 0))
+                with self.assertRaises(C.DeadlineFailure):
+                    run.install_products()
+                self.assertEqual(sum(e[0] == 'spawn' for e in w.events), count)
+                self.assertEqual(run.record['installation_window']['status'], 'FAILED')
+                self.assertIsNone(run.record['installation_window']['completed_elapsed'])
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_late_full_first_accounting_blocks_second_install(self):
+        for cost in (59, 60):
+            with self.subTest(cost=cost), fixtures.World() as w:
+                run, original = self.configure(w, work=(120,), preparation=(0,), accounting=(cost,))
+                with self.assertRaises(C.DeadlineFailure):
+                    run.install_products()
+                self.assertEqual(sum(e[0] == 'spawn' for e in w.events), 1)
+                self.assertEqual(run.record['commands'][0]['post_command_accounting']['status'], 'FAILED')
+                self.assertEqual(run.record['installation_window']['status'], 'FAILED')
+                self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_second_preparation_cannot_spend_a_fresh_install_allowance(self):
+        with fixtures.World() as w:
+            run, original = self.configure(w, work=(120,), preparation=(0, 58), accounting=(1,))
+            with self.assertRaises(C.DeadlineFailure):
+                run.install_products()
+            self.assertEqual(sum(e[0] == 'spawn' for e in w.events), 1)
+            self.assertEqual(run.record['installation_window']['end_deadline_elapsed'], 460)
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_failed_child_and_cleanup_error_keep_primary_error_and_block_second(self):
+        with fixtures.World() as w:
+            run, original = self.configure(w)
+            w.poll_action = lambda: 3
+            w.process.wait.side_effect = lambda timeout: 3
+            w.cleanup.update(success=False, errors=[{'operation': 'group_probe', 'errno': 1}])
+            with self.assertRaisesRegex(C.RunFailure, 'Command failed.*install-app'):
+                run.install_products()
+            self.assertEqual(sum(e[0] == 'spawn' for e in w.events), 1)
+            self.assertTrue(run.record['cleanup_errors'])
+            self.assertEqual(run.record['installation_window']['status'], 'FAILED')
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_both_installs_retain_actual_uncached_complete_resource_barriers(self):
+        with fixtures.World(actual_guard=True, count=17) as w:
+            run, original = self.configure(w, work=(100, 5))
+            run.guard = lambda force=False: C.RecoveryRun.guard(run, force=force)
+            run.install_products()
+            self.assertEqual(len(run.record['commands']), 2)
+            for command in run.record['commands']:
+                self.assertEqual(command['post_command_accounting']['status'], 'COMPLETED')
+                self.assertEqual(command['post_command_accounting']['deadline_elapsed'], 460)
+                self.assertEqual(command['device_service']['terminal_barrier'],
+                                 {'reached': True, 'completed': True})
+                self.assertEqual(command['derived_service']['terminal_barrier'],
+                                 {'reached': True, 'completed': True})
+            self.assertGreaterEqual(len(run.last_samples), 4)
+            self.assertTrue(all(sample['device']['entries'] == 17 for sample in run.last_samples))
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
+
+    def test_cancellation_restores_parent_and_original_alarm_without_second_command(self):
+        with fixtures.World() as w:
+            run, original = self.configure(w)
+            error = KeyboardInterrupt('injected cancellation')
+            run.command = Mock(side_effect=error)
+            run.arm, run.disarm = Mock(), Mock()
+            run.timer_enabled = True
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                run.install_products()
+            self.assertIs(caught.exception, error)
+            self.assertEqual(run.command.call_count, 1)
+            self.assertEqual([call.args[0] for call in run.arm.call_args_list],
+                             [run.start + 456, original[0]])
+            run.disarm.assert_called_once_with()
+            self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
 
 
 if __name__ == '__main__':

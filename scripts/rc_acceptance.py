@@ -28,6 +28,7 @@ from rc_acceptance_process import bounded_capture
 
 MIB = 1024 * 1024
 INSTALLATION_SECONDS = 300
+SETUP_SECONDS = 180 + INSTALLATION_SECONDS
 REPO = '4alvit/room-inventory-ios'
 BUNDLE = 'com.alvit.roominventory'
 RUNNER = 'com.alvit.roominventory.rcacceptance.xctrunner'
@@ -255,14 +256,34 @@ def validate_created_device(before, after, device_id, name, device_type):
             and current[0].get('state')=='Shutdown', 'Created device identity mismatch')
     return current[0]
 
-def install_application(run, aut):
+def setup_application(run, aut):
     # Normal Simulator testing stages the runner from TestHostPath. Only the
     # separately verified RC application needs an explicit installation here.
-    phase_end=min(time.monotonic()+INSTALLATION_SECONDS,run.end)
-    remaining=phase_end-time.monotonic()
-    require(remaining>4,'Application installation deadline')
-    run.sim('install',run.device,aut,cap=remaining-4)
-    require(time.monotonic()<phase_end,'Application installation returned late')
+    require(run.setup_window is None,'Simulator setup window is not fresh')
+    started=time.monotonic();phase_end=min(started+SETUP_SECONDS,run.end)
+    window=run.setup_window={'start_monotonic':started,'end_monotonic':phase_end,
+        'parent_end_monotonic':run.end,'maximum_seconds':SETUP_SECONDS,
+        'cleanup_per_child_seconds':4,'status':'STARTED','finished_monotonic':None,'admissions':[]}
+    try:
+        for args in [('boot',run.device),('bootstatus',run.device,'-b'),('install',run.device,aut)]:
+            admitted=time.monotonic();remaining=phase_end-admitted
+            require(remaining>4,'Simulator setup deadline')
+            admission={'operation':args[0],'operation_index':len(run.commands)+1,'admission_monotonic':admitted,
+                'granted_seconds':remaining-4,'deadline_monotonic':phase_end,
+                'returned_monotonic':None,'status':'STARTED'}
+            window['admissions'].append(admission)
+            run.sim(*args,cap=remaining-4,deadline=phase_end)
+            returned=time.monotonic()
+            admission.update(returned_monotonic=returned,
+                status='RETURNED_LATE' if returned>=phase_end else 'RETURNED')
+            require(returned<phase_end,'Simulator setup command returned late')
+            admission['status']='COMPLETED'
+        finished=time.monotonic()
+        require(finished<phase_end,'Simulator setup returned late')
+        window.update(status='COMPLETED',finished_monotonic=finished)
+    except BaseException:
+        window['status']='FAILED'
+        raise
 
 def failure_summary(operations, failed_index, cleanup_failed, diagnostics=None):
     """A small public diagnostic when uploading the detailed artifact also fails."""
@@ -477,22 +498,29 @@ class Run:
         self.out.mkdir(parents=True,exist_ok=False)
         (self.out/'operations').mkdir()
         self.end=time.monotonic()+1800; self.commands=[]; self.device=None; self.cleanup_end=None
-        self.owned_device=None; self.device_cleanup=None
-    def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False,on_stdout=None):
+        self.owned_device=None; self.device_cleanup=None; self.setup_window=None
+    def command(self,argv,name,cap=30,limit=16*MIB,cleanup=False,on_stdout=None,deadline=None):
         if cleanup and self.cleanup_end is None:self.cleanup_end=time.monotonic()+90
         parent_end=self.cleanup_end if cleanup else self.end
+        if deadline is not None:
+            require(not cleanup and type(deadline) in (int,float) and math.isfinite(deadline),
+                    'Invalid scoped command deadline')
+            parent_end=min(parent_end,deadline)
+        record={}; stem=self.out/'operations'/f'{len(self.commands)+1:03d}-{name}'
+        arguments=[str(x) for x in argv];environment=os.environ.copy()
+        stdout=stem.with_suffix('.stdout');stderr=stem.with_suffix('.stderr')
         remaining=parent_end-time.monotonic()
         require(remaining>4 and cap>0,'Overall acceptance deadline')
-        record={}; stem=self.out/'operations'/f'{len(self.commands)+1:03d}-{name}'
         try:
-            return bounded_capture([str(x) for x in argv],cwd=self.root,env=os.environ.copy(),
+            return bounded_capture(arguments,cwd=self.root,env=environment,
                 timeout=min(cap,remaining-4),limit=limit,receipt=record,
-                stdout_path=stem.with_suffix('.stdout'),stderr_path=stem.with_suffix('.stderr'),
-                cleanup_parent_deadline=parent_end,**({'on_stdout':on_stdout} if on_stdout is not None else {}))
+                stdout_path=stdout,stderr_path=stderr,cleanup_parent_deadline=parent_end,
+                **({'work_deadline':parent_end-4} if deadline is not None else {}),
+                **({'on_stdout':on_stdout} if on_stdout is not None else {}))
         finally:
             self.commands.append(record); save(stem.with_suffix('.json'),record)
-    def sim(self,*args,cap=30,cleanup=False):
-        return self.command(['xcrun','simctl',*args],str(args[0]),cap=cap,cleanup=cleanup)
+    def sim(self,*args,cap=30,cleanup=False,deadline=None):
+        return self.command(['xcrun','simctl',*args],str(args[0]),cap=cap,cleanup=cleanup,deadline=deadline)
     def container(self,bundle,kind,cleanup=False):
         p=Path(self.sim('get_app_container',self.device,bundle,kind,cleanup=cleanup).decode().strip())
         expected=Path.home()/'Library/Developer/CoreSimulator/Devices'/self.device/'data/Containers'
@@ -741,12 +769,7 @@ def execute(args):
         require(created not in {d['udid'] for group in previous_devices['devices'].values() for d in group}, 'Refusing ownership of a pre-existing device')
         run.device=created;result['device_uuid']=run.device
         result['created_device']=run.claim_created_device(previous_devices,loads(run.sim('list','devices','--json')),created,name,DEVICES[args.device])
-        boot_end=time.monotonic()+180
-        run.sim('boot',run.device,cap=boot_end-time.monotonic())
-        require(time.monotonic()<boot_end,'Boot budget expired')
-        run.sim('bootstatus',run.device,'-b',cap=boot_end-time.monotonic())
-        require(time.monotonic()<boot_end,'Boot status returned late')
-        install_application(run,aut)
+        setup_application(run,aut)
         installed=run.container(BUNDLE,'app');same_installed(aut_inventory,inventory(installed))
         save(run.out/'installed-before.json',inventory(installed))
         failure_sample=FailureSample(run,run_id,installed)
@@ -806,6 +829,7 @@ def execute(args):
         # Failure screenshots, AX and the bounded journey are native attachments
         # in Acceptance.xcresult. Never query runner containers after shutdown.
         result['cleanup_errors']=cleanup_errors;result['device_cleanup']=run.device_cleanup;result['operations']=run.commands
+        result['setup_window']=run.setup_window
         if cleanup_errors:result['status']='FAILED'
         if primary is not None or cleanup_errors:
             try:result['failure_diagnostics']=collect_failure_diagnostics(run,failed_index)

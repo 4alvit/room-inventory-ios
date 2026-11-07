@@ -1,4 +1,4 @@
-// Host regression for the actual RC selectBackup body. The host validation
+// Host regression for the actual RC selection and filename observer bodies. The host validation
 // inserts that method at RC_SELECT_BACKUP_BODY, changing only XCUI type names
 // to the fixtures below, and renames the unchanged shared helper to Readiness.
 // No Simulator, product app, network or private state is involved.
@@ -9,6 +9,14 @@ private final class SelectionFixture {
     static var current: SelectionFixture!
     let runID = "D13A8615-B837-4BC1-A532-8D0196B26F6F"
     var now = 0.0
+    var filenamePickerMatches = [0]
+    var filenameMatches = [101]
+    var filenameValues: [String?] = []
+    var filenameReads: [Int] = []
+    var filenameQueries = 0
+    var filenameWindows: [TimeInterval] = []
+    var beforeFilenameQuery: (() -> Void)?
+    var beforeFilenameValue: (() -> Void)?
     var snapshots = 0
     var resolves = 0
     var gates: [String] = []
@@ -59,6 +67,13 @@ private final class FixtureElement {
     var otherElements: FixtureQuery { .init(f, "owner") }
     var collectionViews: FixtureQuery { .init(f, "list") }
     var cells: FixtureQuery { .init(f, "file") }
+    var textFields: FixtureQuery { .init(f, "filename") }
+    var value: Any? {
+        XCTAssertEqual(scope, "filename")
+        f.filenameReads.append(id)
+        f.beforeFilenameValue?()
+        return f.filenameValues.isEmpty ? nil : f.filenameValues.removeFirst()
+    }
     var isEnabled: Bool {
         f.gates.append("enabled:\(id)"); f.beforeEnabled?()
         return !(f.disabledFirst && f.resolves == 1)
@@ -87,6 +102,15 @@ private final class FixtureQuery {
         return FixtureElement(f, scope)
     }
     var allElementsBoundByAccessibilityElement: [FixtureElement] {
+        if scope == "picker" {
+            XCTAssertEqual(identifier, Readiness.pickerIdentifier)
+            f.filenameQueries += 1; f.beforeFilenameQuery?()
+            return f.filenamePickerMatches.map { FixtureElement(f, scope, $0) }
+        }
+        if scope == "filename" {
+            XCTAssertEqual(identifier, "DOCPicker.filenameTextField")
+            return f.filenameMatches.map { FixtureElement(f, scope, $0) }
+        }
         f.resolves += 1; f.beforeResolve?()
         return f.matches.map { FixtureElement(f, scope, $0) }
     }
@@ -117,6 +141,10 @@ private final class FilesNavigationReadiness {
         native=Readiness(timeout: timeout, clock: { clock.now })
     }
     func perform<T>(_ op: () throws -> T) throws -> T { try native.perform(op) }
+    func waitForFilenameEcho(expected: String, readValue: @escaping () throws -> String?) throws -> String {
+        f.filenameWindows.append(Self.systemProviderAllowance)
+        return try native.waitForFilenameEcho(expected: expected, readValue: readValue)
+    }
     func captureSelection(folder: String, target: SelectionTarget, pickers: FixtureQuery) throws -> SelectionObservation? {
         f.snapshots += 1
         let result = try native.captureSelection(folder: folder, target: target, uniqueSnapshot: {
@@ -146,6 +174,10 @@ private final class RCBody {
         query.f.confirmations += 1
     }
     // RC_SELECT_BACKUP_BODY
+    // RC_FILENAME_ECHO_BODY
+    func echo(_ f: SelectionFixture, _ expected: String) throws -> String {
+        try observeExportedFilename(expected, FixtureApp(f))
+    }
     func run(_ f: SelectionFixture) throws { try selectBackup(FixtureApp(f)) }
 }
 
@@ -259,4 +291,85 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
         XCTAssertThrowsError(try RCBody(f).run(f)) { XCTAssertTrue($0 is NativeError) }
         XCTAssertEqual(f.taps, [1]); XCTAssertEqual(f.resolves, 1); XCTAssertEqual(f.confirmations, 0)
     }
+    @MainActor
+    func testFilenameImmediateExactEchoUsesOneUniqueBoundRead() throws {
+        let f=fixture(); f.filenameValues=["csv-"+f.runID]
+        XCTAssertEqual(try RCBody(f).echo(f, "csv-"+f.runID), "csv-"+f.runID)
+        XCTAssertEqual(f.filenameQueries, 1); XCTAssertEqual(f.filenameReads, [101])
+        XCTAssertEqual(f.filenameWindows, [30]); XCTAssertTrue(f.taps.isEmpty)
+    }
+    @MainActor
+    func testFilenameMissingPartialThenExactEchoRefreshesTheFieldWithoutAction() throws {
+        let f=fixture(); let expected="csv-"+f.runID
+        f.filenameValues=["csv-", expected]
+        f.beforeFilenameQuery={
+            f.now += 1
+            f.filenameMatches=f.filenameQueries == 1 ? [] : [100+f.filenameQueries]
+        }
+        XCTAssertEqual(try RCBody(f).echo(f, expected), expected)
+        XCTAssertEqual(f.filenameQueries, 3); XCTAssertEqual(f.filenameReads, [102,103])
+        XCTAssertEqual(f.filenameWindows, [30]); XCTAssertTrue(f.taps.isEmpty)
+    }
+    @MainActor
+    func testFilenameWrongOrPartialEchoNeverRenewsOrReturnsSuccess() {
+        for value in ["csv-", "wrong", "csv-"+fixture().runID+".csv"] {
+            let f=fixture(); f.filenameValues=[value, value]
+            f.beforeFilenameValue={f.now += 15}
+            XCTAssertThrowsError(try RCBody(f).echo(f, "csv-"+f.runID)) {
+                XCTAssertEqual($0 as? Readiness.Failure, .expired)
+            }
+            XCTAssertEqual(f.filenameReads.count, 2); XCTAssertEqual(f.filenameWindows, [30])
+            XCTAssertTrue(f.taps.isEmpty)
+        }
+    }
+    @MainActor
+    func testFilenameExactValueReturnedAtDeadlineFails() {
+        let f=fixture(); f.filenameValues=["csv-"+f.runID]
+        f.beforeFilenameValue={f.now=30}
+        XCTAssertThrowsError(try RCBody(f).echo(f, "csv-"+f.runID)) {
+            XCTAssertEqual($0 as? Readiness.Failure, .expired)
+        }
+        XCTAssertEqual(f.filenameQueries, 1); XCTAssertEqual(f.filenameReads, [101])
+        XCTAssertTrue(f.taps.isEmpty)
+    }
+    @MainActor
+    func testFilenameDuplicatePickerOrFieldIsTerminalWithoutReadingOrActions() {
+        for picker in [true,false] {
+            let f=fixture()
+            if picker { f.filenamePickerMatches=[0,1] } else { f.filenameMatches=[101,102] }
+            XCTAssertThrowsError(try RCBody(f).echo(f, "csv-"+f.runID)) {
+                XCTAssertEqual($0 as? Readiness.Failure, .invalidSelectionCount)
+            }
+            XCTAssertTrue(f.filenameReads.isEmpty); XCTAssertEqual(f.filenameQueries, 1)
+            XCTAssertTrue(f.taps.isEmpty)
+        }
+    }
+    @MainActor
+    func testFilenameMissingPickerRemainsPendingWithinSameWindow() throws {
+        let f=fixture(); f.filenameValues=["csv-"+f.runID]
+        f.beforeFilenameQuery={
+            f.now += 1; f.filenamePickerMatches=f.filenameQueries == 1 ? [] : [0]
+        }
+        XCTAssertEqual(try RCBody(f).echo(f, "csv-"+f.runID), "csv-"+f.runID)
+        XCTAssertEqual(f.filenameQueries, 2); XCTAssertEqual(f.filenameReads, [101])
+        XCTAssertEqual(f.filenameWindows, [30]); XCTAssertTrue(f.taps.isEmpty)
+    }
+    @MainActor
+    func testFilenameNilValueRemainsPendingThenUsesFreshIdentity() throws {
+        let f=fixture(); f.filenameValues=[nil,"csv-"+f.runID]
+        f.beforeFilenameQuery={f.filenameMatches=[100+f.filenameQueries]}
+        XCTAssertEqual(try RCBody(f).echo(f, "csv-"+f.runID), "csv-"+f.runID)
+        XCTAssertEqual(f.filenameReads, [101,102]); XCTAssertEqual(f.filenameWindows, [30])
+        XCTAssertTrue(f.taps.isEmpty)
+    }
+    @MainActor
+    func testFilenameLatePickerLookupCannotReadOrStartAnotherProbe() {
+        let f=fixture(); f.beforeFilenameQuery={f.now=30;f.filenamePickerMatches=[]}
+        XCTAssertThrowsError(try RCBody(f).echo(f, "csv-"+f.runID)) {
+            XCTAssertEqual($0 as? Readiness.Failure, .expired)
+        }
+        XCTAssertEqual(f.filenameQueries, 1); XCTAssertTrue(f.filenameReads.isEmpty)
+        XCTAssertEqual(f.filenameWindows, [30]); XCTAssertTrue(f.taps.isEmpty)
+    }
+
 }

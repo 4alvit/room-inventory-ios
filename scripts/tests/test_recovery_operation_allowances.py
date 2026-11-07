@@ -29,7 +29,7 @@ class OperationAllowanceTests(base.ControllerCase):
         calls = run.command.call_args_list
         self.assertEqual([c.args[1] for c in calls],
                          ["boot-device", "boot-status", "install-app", "install-runner", "authorize-runner-photos"])
-        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 90, 90, 90])
+        self.assertEqual([c.kwargs["cap"] for c in calls], [30, 300, 180, 180, 90])
         self.assertEqual(calls[1].args[0], ["xcrun", "simctl", "bootstatus", run.device_id, "-b"])
         self.boot_request = calls[1]
         self.assertEqual(calls[4].args[0], ["xcrun", "simctl", "privacy", run.device_id,
@@ -121,7 +121,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_single_install_allows_slow_install_and_requires_fresh_full_accounting(self):
         self.install_requests()
         request = self.install_request
-        for elapsed, work, scan_step in ((270, 80, 2), (620, 30, .25)):
+        for elapsed, work, scan_step in ((270, 170, 2), (620, 30, .25)):
             with self.subTest(elapsed=elapsed), devices.World(module=C, actual_guard=True, count=17) as w:
                 run = w.run
                 w.clock.now = run.start + elapsed
@@ -137,7 +137,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 w.stat_action = inspect
                 run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 90, 660))
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 180, 660))
                 self.assertGreater(record["child_completed_elapsed"] - elapsed, 26)
                 self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
                 self.assertEqual(record["cleanup"]["group_state"], "absent")
@@ -155,7 +155,7 @@ class OperationAllowanceTests(base.ControllerCase):
     def test_single_install_rejects_late_completion_at_own_or_startup_limit(self):
         self.install_requests()
         request = self.install_request
-        for elapsed, work in ((270, 86), (620, 36)):
+        for elapsed, work in ((270, 176), (620, 36)):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 w.clock.now = run.start + elapsed
@@ -166,7 +166,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 with self.assertRaises(C.DeadlineFailure):
                     run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 90, 660))
+                self.assertEqual(record["end_deadline_elapsed"], min(elapsed + 180, 660))
                 self.assertIsNone(record["child_completed_elapsed"])
                 self.assertIsNone(record["post_command_accounting"])
                 self.assertTrue(w.cleaned)
@@ -494,7 +494,7 @@ class OperationAllowanceTests(base.ControllerCase):
                 w.cleanup_action = lambda: setattr(w.clock, "now", w.clock.now + .25)
                 run.command(*request.args, **request.kwargs)
                 record = run.record["commands"][0]
-                self.assertAlmostEqual(record["end_deadline_elapsed"], start - run.start + 90)
+                self.assertAlmostEqual(record["end_deadline_elapsed"], start - run.start + 180)
                 self.assertLess(record["child_completed_elapsed"], record["end_deadline_elapsed"] - 4)
                 self.assertEqual(record["post_command_accounting"]["status"], "COMPLETED")
                 self.assertEqual(record["post_command_accounting"]["deadline_elapsed"], 660)
@@ -503,7 +503,7 @@ class OperationAllowanceTests(base.ControllerCase):
 
     def test_actual_install_admission_rejects_child_boundary_and_startup_exhaustion(self):
         request = self.install_requests()[0]
-        for elapsed, work in ((217.613819, 86), (652, 4), (660, None)):
+        for elapsed, work in ((217.613819, 176), (652, 4), (660, None)):
             with self.subTest(elapsed=elapsed), devices.World(module=C) as w:
                 run = w.run
                 run.phase("device")

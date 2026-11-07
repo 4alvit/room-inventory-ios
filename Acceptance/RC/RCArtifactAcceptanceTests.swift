@@ -130,10 +130,10 @@ final class RCArtifactAcceptanceTests: XCTestCase {
     }
 
     private func openRecord(_ name: String, _ app: XCUIApplication) throws {
-        // Reuse the existing tap10 + target10 allocation as one transition.
-        // Native event delivery may itself wait for idleness; it cannot renew
-        // this deadline or replace positive readiness of the exact destination.
-        let window = FilesNavigationReadiness(timeout: 20)
+        // This explicit record-only allowance accommodates measured native
+        // synchronization; it does not renew after the tap or establish its cause.
+        // The exact destination must still become ready before this same deadline.
+        let window = FilesNavigationReadiness.recordTransition()
         let rows = app.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ", "))
         try performBoundTap(window,
             matchingElements: { rows.allElementsBoundByAccessibilityElement },

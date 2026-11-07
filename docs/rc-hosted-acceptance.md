@@ -239,18 +239,26 @@ alternative is preserved.
 
 ### Record navigation allocation
 
-Opening a home, room or item uses one absolute 20-second window covering the
-existing 10-second tap and 10-second target-readiness allocations. The window
-starts before the row observation, retains one unique accessibility-bound row
-through its enabled/hittable gates, admits one tap, and then requires the exact
-target navigation bar to be unique, enabled and hittable before that same
-original deadline. A late query or action, native error, cancellation, duplicate
-identity or absent target remains failure; there is no second tap or renewal.
-This reallocates the existing transition total and preserves the 720-second UI
-and 1,800-second controller limits. It does not establish why XCTest idleness was
-late, guarantee a transition will complete, or change any historical failure.
-The existing tracked host regression runner executes the actual `openRecord`
-body with the unchanged readiness helper and deterministic clock boundaries.
+Opening a home, room or item explicitly requests one absolute 40-second window
+through `FilesNavigationReadiness.recordTransition()`. Generic initializer calls
+still reject allowances above 30 seconds, and Files-provider windows remain
+30 seconds. The record window starts before the row observation, retains one
+unique accessibility-bound row through its enabled/hittable gates, admits one
+tap, and requires the exact target navigation bar to be unique, enabled and
+hittable before the same original deadline. A late query or action, native error,
+cancellation, duplicate identity or absent target remains failure; there is no
+second tap or renewal.
+
+This is an explicit integration-budget adaptation from the prior 20 seconds.
+A retained native room tap spent approximately 30.5 seconds between its
+post-event idle wait and failure-journal attachment, before any destination
+query. That measurement includes return checks and journal work; it is not a
+fixed XCTest latency guarantee or proof of the idle cause. The 40-second window
+does not guarantee ten seconds remain for destination readiness. It leaves the
+720-second UI and 1,800-second controller limits unchanged and does not accept
+historical failed runs. The tracked host regression executes the actual
+`openRecord` body and factory, including generic-cap rejection, exact/late
+boundaries, native errors, cancellation and no renewal.
 
 ### Shared export destination window
 
@@ -271,7 +279,7 @@ controlled query/tap timings alongside record-navigation and prior cases.
 
 ### Native action after readiness returns
 
-The RC record transition keeps one absolute 20-second acceptance window, and the
+The RC record transition uses its explicit absolute 40-second acceptance window, and the
 Save to Files transition keeps its absolute 30-second window. In these two
 transitions, `performBoundTap` uses the existing bound-element helper to observe
 one exact identity, require enabled/hittable state, and reserve its single-action

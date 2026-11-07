@@ -98,6 +98,7 @@ private final class SelectionFixture {
     var beforeEnabled: (() -> Void)?
     var beforeHittable: (() -> Void)?
     var tapError: Error?
+    var nativeErrorTime = 30.0
     var disabledFirst = false
     var pendingExpires = false
     var root: Node { nodes[0] }
@@ -374,15 +375,24 @@ private final class FilesNavigationReadiness {
         f=SelectionFixture.current!
         let clock=f
         native=Readiness(timeout: timeout, clock: { clock.realClock ? ProcessInfo.processInfo.systemUptime : clock.now })
-        f.activeWindow=native; if timeout == 20 { f.recordWindows.append(timeout) }
+        f.activeWindow=native
         if f.presentationMode { f.presentationWindows.append(timeout) }
         if f.folderMode { f.folderWindows.append(timeout) }
+    }
+    private init(recordWindow: Readiness, fixture: SelectionFixture) {
+        native=recordWindow; f=fixture; f.activeWindow=native
+        f.recordWindows.append(40)
+    }
+    static func recordTransition() -> FilesNavigationReadiness {
+        let f=SelectionFixture.current!
+        return FilesNavigationReadiness(recordWindow: Readiness.recordTransition(
+            clock: { f.realClock ? ProcessInfo.processInfo.systemUptime : f.now }), fixture: f)
     }
     func perform<T>(_ op: () throws -> T) throws -> T {
         try native.perform {
             let before=self.f.taps.count
             let value=try op()
-            if self.f.taps.count > before, let error=self.f.tapError { self.f.now=30; throw error }
+            if self.f.taps.count > before, let error=self.f.tapError { self.f.now=self.f.nativeErrorTime; throw error }
             return value
         }
     }
@@ -395,7 +405,7 @@ private final class FilesNavigationReadiness {
                 let before=self.f.taps.count
                 try tap(element)
                 // Old-path A/B transport only: a reservation is not a native tap.
-                if self.f.taps.count > before, let error=self.f.tapError { self.f.now=30; throw error }
+                if self.f.taps.count > before, let error=self.f.tapError { self.f.now=self.f.nativeErrorTime; throw error }
             })
         } catch { f.readinessDepth -= 1; throw error }
         f.readinessDepth -= 1
@@ -702,17 +712,50 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
     }
 
     @MainActor
-    func testRecordSlowNativeTapUsesRemainingOriginalTargetAllocation() throws {
-        let f=fixture(); f.recordTapSeconds=10.2; f.beforeNavigationQuery={f.now += 0.8}
+    func testGenericAllowanceStillRejectsMoreThanThirtySeconds() throws {
+        let f=fixture()
+        XCTAssertEqual(try Readiness(timeout: 30, clock: { f.now }).remaining(), 30)
+        for timeout in [30.001, 40, 0, -1, Double.infinity, Double.nan] {
+            let window=Readiness(timeout: timeout, clock: { f.now })
+            XCTAssertThrowsError(try window.remaining()) {
+                XCTAssertEqual($0 as? Readiness.Failure, .invalidAllowance)
+            }
+        }
+        XCTAssertEqual(Readiness.systemProviderAllowance, 30)
+    }
+    @MainActor
+    func testRecordFactoryKeepsOneAbsoluteFortySecondDeadline() throws {
+        let f=fixture(); f.now=100
+        let window=Readiness.recordTransition(clock: { f.now })
+        XCTAssertEqual(try window.remaining(), 40)
+        f.now=139.999; XCTAssertEqual(try window.remaining(), 0.001, accuracy: 0.00001)
+        f.now=140
+        XCTAssertThrowsError(try window.remaining()) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+        f.now=141
+        XCTAssertThrowsError(try window.remaining()) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
+    }
+    @MainActor
+    func testRecordFactoryRejectsInvalidAndBackwardClocks() throws {
+        let f=fixture()
+        for now in [Double.nan, Double.infinity] {
+            let window=Readiness.recordTransition(clock: { now })
+            XCTAssertThrowsError(try window.remaining()) { XCTAssertEqual($0 as? Readiness.Failure, .invalidClock) }
+        }
+        f.now=100; let window=Readiness.recordTransition(clock: { f.now }); f.now=99
+        XCTAssertThrowsError(try window.remaining()) { XCTAssertEqual($0 as? Readiness.Failure, .invalidClock) }
+    }
+    @MainActor
+    func testRecordMeasuredNativeTapUsesRemainingExplicitAllowance() throws {
+        let f=fixture(); f.recordTapSeconds=30.5; f.beforeNavigationQuery={f.now += 8.5}
         try RCBody(f).open(f)
-        XCTAssertEqual(f.recordWindows, [20]); XCTAssertEqual(f.now, 11, accuracy: 0.00001)
+        XCTAssertEqual(f.recordWindows, [40]); XCTAssertEqual(f.now, 39, accuracy: 0.00001)
         XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.navigationQueries, 1)
     }
     @MainActor
     func testRecordBoundIdentitySurvivesResolverChangeAndTapsOnce() throws {
         let f=fixture(); f.beforeEnabled={f.recordMatches=[202]}
         try RCBody(f).open(f)
-        XCTAssertEqual(f.recordResolves, 1); XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.recordWindows, [20])
+        XCTAssertEqual(f.recordResolves, 1); XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.recordWindows, [40])
     }
     @MainActor
     func testRecordAmbiguousRowNeverTapsOrChecksDestination() {
@@ -722,31 +765,31 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
     }
     @MainActor
     func testRecordLateRowObservationCannotTap() {
-        let f=fixture(); f.beforeRecordResolve={f.now=20}
+        let f=fixture(); f.beforeRecordResolve={f.now=40}
         XCTAssertThrowsError(try RCBody(f).open(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
         XCTAssertTrue(f.taps.isEmpty); XCTAssertEqual(f.navigationQueries, 0)
     }
     @MainActor
     func testRecordLateNativeTapCannotStartDestinationProbe() {
-        let f=fixture(); f.recordTapSeconds=20
+        let f=fixture(); f.recordTapSeconds=40
         XCTAssertThrowsError(try RCBody(f).open(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
         XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.navigationQueries, 0)
     }
     @MainActor
     func testRecordDestinationUsesRemainingDeadlineWithoutRenewal() {
-        let f=fixture(); f.recordTapSeconds=19; f.beforeNavigationQuery={f.now += 0.6}
+        let f=fixture(); f.recordTapSeconds=39; f.beforeNavigationQuery={f.now += 0.6}
         f.beforeNavigationEnabled={f.now += 0.3}; f.beforeNavigationHittable={f.now += 0.2}
         XCTAssertThrowsError(try RCBody(f).open(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
-        XCTAssertEqual(f.recordWindows, [20]); XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.navigationQueries, 1)
+        XCTAssertEqual(f.recordWindows, [40]); XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.navigationQueries, 1)
     }
     @MainActor
     func testRecordWrongOrMissingDestinationNeverRenewsOrRetaps() {
         for wrong in [true,false] {
-            let f=fixture(); f.recordTapSeconds=10.2
+            let f=fixture(); f.recordTapSeconds=30.5
             if wrong { f.navigationIdentifier="Wrong room" } else { f.navigationCount=0 }
             f.beforeNavigationQuery={f.now += 5}
             XCTAssertThrowsError(try RCBody(f).open(f)) { XCTAssertEqual($0 as? Readiness.Failure, .expired) }
-            XCTAssertEqual(f.recordWindows, [20]); XCTAssertEqual(f.taps, [201])
+            XCTAssertEqual(f.recordWindows, [40]); XCTAssertEqual(f.taps, [201])
         }
     }
     @MainActor
@@ -758,7 +801,7 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
     @MainActor
     func testRecordNativeErrorRemainsPrimaryEvenWhenItReturnsLate() {
         enum NativeError: Error { case expected }
-        let f=fixture(); f.tapError=NativeError.expected
+        let f=fixture(); f.tapError=NativeError.expected; f.nativeErrorTime=40.1
         XCTAssertThrowsError(try RCBody(f).open(f)) { XCTAssertTrue($0 is NativeError) }
         XCTAssertEqual(f.taps, [201]); XCTAssertEqual(f.navigationQueries, 0)
     }
@@ -892,7 +935,7 @@ final class RCBackupSelectionRegressionTests: XCTestCase {
     @MainActor
     func testDeadlineBetweenReservationAndNativeActionNeverTaps() {
         for share in [false,true] {
-            let f=fixture(); f.afterReservation={f.now=share ? 30 : 20}
+            let f=fixture(); f.afterReservation={f.now=share ? 30 : 40}
             XCTAssertThrowsError(try share ? RCBody(f).present(f) : RCBody(f).open(f)) {
                 XCTAssertEqual($0 as? Readiness.Failure, .expired)
             }

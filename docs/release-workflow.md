@@ -14,10 +14,9 @@ The optional `change_scope` policy provides exact `documentation_paths`, exact
 `required_paths` for documentation used as a build input, and
 `always_validate_workflows` for independently required checks. Documentation paths
 cannot exempt source, tests, fixtures, build configuration or dependencies.
-Manual dispatch, scheduled runs and release qualification remain full. Only with
-explicit `change_scope` opt-in does a documentation-only push stop before release
-preparation, version allocation, artifact builds or publication. This does not
-change the configured nightly policy.
+Manual dispatch, scheduled runs and release qualification remain full. The
+documentation optimization applies to pull-request validation; main-branch
+release runs retain full source qualification and the configured nightly policy.
 
 ## Local checks
 
@@ -145,3 +144,28 @@ into consumer repositories.
 References: [GitHub schedules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule),
 [protected environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
 [artifact provenance](https://docs.github.com/en/rest/actions/artifacts).
+
+## Documentation-only pull requests
+
+A complete, verified diff containing only admitted documentation can skip the
+native iOS validation workflow. CodeQL still performs its real Swift build and
+tooling analysis. The existing workflow-contracts job also runs the actual source
+metadata, tracked-file privacy and localization checks. A failed or skipped
+required validator cannot produce a green CI gate.
+
+`Core/README.md` is admitted as package documentation. `CHANGELOG.md` remains a
+release input and requests full validation. Source changes, unknown history and
+explicit full-qualification requests keep native checks enabled. Every main or
+release run retains both outer and inner full-qualification flags.
+
+### Maintaining this repository's custom routing
+
+The shared [documentation-scope guide](https://github.com/victron-venus/venus-os-ci-toolkit/blob/main/docs/CHANGE_SCOPE.md#regenerate-documentation-scope-safely)
+explains the supported generator boundary and safe checkout procedure. This
+repository deliberately retains its cancellation-aware `!cancelled()` CI gate.
+The strict standard scope migrator currently rejects that custom gate; do not
+replace it or regenerate the release stack merely to change documentation paths.
+Review a narrow policy/Quality-gate change together and run the workflow tests,
+source checker and classifier tests on the complete resulting tree. The
+`test_documentation_scope.py` contract preserves this exception and the full
+release flags.

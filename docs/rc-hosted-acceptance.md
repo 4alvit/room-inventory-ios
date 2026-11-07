@@ -86,3 +86,32 @@ Review both rows, screenshots/AX and both PDFs, verify that their RC/manifest/as
 ## Descriptor validation and remaining runtime acceptance
 
 Hosted run `42325874162`, attempt 1, installed the RC and runner, but Xcode rejected the former destination-artifacts mode with exit 70 before UI execution. The regression fixture is the actual generated standalone descriptor from that run. Tests cover both supported descriptor formats, exact runner-only dependencies, rejection of device-only mode or AUT build paths, and the original Products-directory binding even when the output path contains spaces. Fixture and standalone compile checks establish the descriptor contract; they do not prove the installed-RC journey. Both complete device rows, all installed-byte checks, visual/export review and final shutdown remain required before [issue 34](https://github.com/4alvit/room-inventory-ios/issues/34) or release acceptance can be completed. No timeout or retry policy changes accompany this correction.
+
+### Exact backup selection in Files
+
+Files can reopen the run folder while its internal browsing-root identifier still
+names the provider entry location (for example, `On My iPhone`). The RC harness
+uses the shared immutable-picker classifier to verify the current navigation-bar
+title, LocalStorage owner, unique File View and exact run-specific backup. It then
+resolves one live file within that observed owner and keeps its bound identity for
+enabled, hittable and tap checks. Every new probe clears the previous identity.
+The existing 30-second selection window and one-tap limit are unchanged.
+
+The host fixture `scripts/tests/fixtures/rc-backup-selection.swift` exercises the
+actual `selectBackup` method alongside the unchanged shared classifier and waiter.
+The host validation substitutes only the XCUI transport types and inserts that
+method at `RC_SELECT_BACKUP_BODY`; it covers the retained stale-title shape, wrong
+folder/file/provider, ambiguity, cross-owner matches, refreshed identities and
+late observations. It does not launch the app or replace installed-RC acceptance.
+
+On macOS with Xcode selected (or `DEVELOPER_DIR` set), run:
+
+```sh
+python3 scripts/test-rc-backup-selection.py --output "$TMPDIR/rc-backup-selection"
+```
+
+The output directory must be new. The existing required PR harness-build job runs
+this command before compiling the standalone runner and retains its exact-case
+result, process-closure receipt and bounded logs. The host command allows 180
+seconds plus four seconds for owned-process cleanup; it removes its temporary
+package only after closure is proved. Python-only fixtures remain usable on Linux.

@@ -389,14 +389,31 @@ final class RCArtifactAcceptanceTests: XCTestCase {
     private func selectBackup(_ app: XCUIApplication) throws {
         try select("Restore a backup", app); try folder(false, app)
         let w = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
-        let pickers = app.otherElements.matching(identifier: "Browse View (Picker)")
-        let roots = pickers.otherElements.matching(identifier:
-            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: RC-" + runID)
-        let lists = roots.collectionViews.matching(identifier: "File View")
-        let files = lists.cells.matching(identifier: "backup-" + runID + ".roominventory, roominventory")
-        try w.waitAndTapFile(pickerCount: { pickers.count }, folderCount: { roots.count },
-            fileViewCount: { lists.count }, fileCount: { files.count }, enabled: { files.firstMatch.isEnabled },
-            hittable: { files.firstMatch.isHittable }, tap: { files.firstMatch.tap() })
+        let pickers = app.otherElements.matching(identifier: FilesNavigationReadiness.pickerIdentifier)
+        let filename = "backup-" + runID + ".roominventory"
+        var boundFile: XCUIElement?
+        func file() throws -> XCUIElement {
+            guard let boundFile else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            return boundFile
+        }
+        try w.waitAndTapSelection(observe: {
+            boundFile = nil
+            // The provider's root identifier can retain its entry-location title.
+            // Prove the current folder and exact file in the same picker snapshot.
+            guard let observation = try w.captureSelection(folder: "RC-" + self.runID,
+                target: .backup(filename: filename), pickers: pickers) else { return nil }
+            let matches = try w.perform {
+                pickers.element.otherElements.matching(identifier: observation.ownerIdentifier).element
+                    .collectionViews.matching(identifier: "File View").element
+                    .cells.matching(identifier: filename + ", roominventory")
+                    .allElementsBoundByAccessibilityElement
+            }
+            guard matches.count <= 1 else { throw FilesNavigationReadiness.Failure.invalidSelectionCount }
+            guard let element = matches.first else { return nil }
+            boundFile = element
+            return observation
+        }, enabled: { _ in try file().isEnabled }, hittable: { _ in try file().isHittable },
+           tap: { _ in try file().tap() })
         try ready(app.alerts.matching(identifier: "Replace the current inventory?"))
     }
 

@@ -228,6 +228,9 @@ jobs:
           python-version: '3.12'
       - name: Validate RC acceptance provenance and failure fixtures
         run: python3 scripts/tests/test_rc_acceptance.py
+      - name: Check the actual RC backup selection on the host
+        timeout-minutes: 4
+        run: python3 scripts/test-rc-backup-selection.py --output "$RUNNER_TEMP/rc-backup-selection"
       - name: Build runner and validate installed-artifact specification only
         run: |
           python3 scripts/rc_acceptance.py --build-only --harness-sha "$GITHUB_SHA" \
@@ -243,3 +246,6 @@ jobs:
             ${{ runner.temp }}/rc-harness-build/*.json
             ${{ runner.temp }}/rc-harness-build/*.xctestrun
             ${{ runner.temp }}/rc-harness-build/operations
+            ${{ runner.temp }}/rc-backup-selection/*.json
+            ${{ runner.temp }}/rc-backup-selection/*.stdout
+            ${{ runner.temp }}/rc-backup-selection/*.stderr

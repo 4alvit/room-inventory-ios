@@ -163,7 +163,7 @@ def validate_manifest_binding(config, manifest, raw, release, assets):
         require(by_name[x['name']]['size']==x['size'], 'Advertised asset size mismatch')
     return {x['name']:x for x in expected}
 
-def destination_xctestrun(raw, runner_info, run_id):
+def simulator_xctestrun(raw, runner_info, run_id):
     obj = plistlib.loads(raw)
     version = obj.get('__xctestrun_metadata__',{}).get('FormatVersion')
     require(version in (1,2), 'Unsupported xctestrun format')
@@ -178,14 +178,23 @@ def destination_xctestrun(raw, runner_info, run_id):
         target = targets[0]
     require(target.get('BlueprintName')==TARGET and target.get('IsUITestBundle') is True, 'Unexpected test target')
     require(runner_info.get('CFBundleIdentifier')==RUNNER, 'Unexpected test host')
-    require(target.get('TestBundlePath','').endswith('/PlugIns/'+TARGET+'.xctest'), 'Unexpected test bundle path')
-    require(target.get('TestHostPath','').endswith('/'+TARGET+'-Runner.app'), 'Unexpected runner path')
+    host='__TESTROOT__/Release-iphonesimulator/'+TARGET+'-Runner.app'
+    bundle='/PlugIns/'+TARGET+'.xctest'
+    require(target.get('TestHostBundleIdentifier')==RUNNER, 'Unexpected descriptor test host')
+    require(target.get('TestBundlePath')=='__TESTHOST__'+bundle, 'Unexpected test bundle path')
+    require(target.get('TestHostPath')==host, 'Unexpected runner path')
+    dependencies=target.get('DependentProductPaths')
+    require(isinstance(dependencies,list) and len(dependencies)==2
+            and all(isinstance(p,str) for p in dependencies)
+            and set(dependencies)=={host,host+bundle}, 'Expected only runner and test-bundle dependencies')
     require(not target.get('UITargetAppPath') and not target.get('UITargetAppBundleIdentifier'), 'Harness contains an AUT dependency')
-    for k in ('TestBundlePath','TestHostPath','UITargetAppPath','DependentProductPaths','SkipTestIdentifiers'):
-        target.pop(k,None)
-    target.update(UseDestinationArtifacts=True,TestHostBundleIdentifier=RUNNER,
-        TestBundleDestinationRelativePath='__TESTHOST__/PlugIns/'+TARGET+'.xctest',
-        UITargetAppBundleIdentifier=BUNDLE,OnlyTestIdentifiers=[METHOD],
+    require(target.get('UseUITargetAppProvidedByTests') is True, 'Expected test-provided installed AUT')
+    require(target.get('UseDestinationArtifacts',False) is False
+            and 'TestBundleDestinationRelativePath' not in target, 'Device-only artifacts mode is not supported on Simulator')
+    # Keep Xcode's runner paths: Simulator testing may stage this runner, while
+    # XCUIApplication(bundleIdentifier:) launches the separately installed RC.
+    target.pop('SkipTestIdentifiers',None)
+    target.update(OnlyTestIdentifiers=[METHOD],
         EnvironmentVariables={'RC_ACCEPTANCE_ID':run_id},
         UITargetAppEnvironmentVariables={},UITargetAppCommandLineArguments=[])
     return plistlib.dumps(obj)
@@ -436,12 +445,16 @@ def build_harness(run,run_id):
     runners=list(products.glob('Release-iphonesimulator/'+TARGET+'-Runner.app'))
     require(len(runners)==1,'Missing dedicated runner');runner=runners[0]
     apps=list(products.rglob('*.app'));require(len(apps)==1 and apps[0]==runner,'Unexpected application build product')
-    configured=destination_xctestrun(regular(runs[0],2*MIB),plistlib.loads(regular(runner/'Info.plist',MIB)),run_id)
+    configured=simulator_xctestrun(regular(runs[0],2*MIB),plistlib.loads(regular(runner/'Info.plist',MIB)),run_id)
+    # __TESTROOT__ must remain the original Products directory. Copies in
+    # run.out are evidence only and must never be passed to xcodebuild.
     plan=products/'RC-Installed.xctestrun';plan.write_bytes(configured)
     (run.out/'generated.xctestrun').write_bytes(regular(runs[0],2*MIB))
     (run.out/'configured.xctestrun').write_bytes(configured)
     proof={'runner_bundle_id':RUNNER,'only_app_product':str(runner.relative_to(run.out)),
-           'configured_xctestrun_sha256':digest(configured),'mode':'UseDestinationArtifacts',
+           'configured_xctestrun_sha256':digest(configured),'mode':'SimulatorRunnerWithPreinstalledAUT',
+           'test_root':str(products.relative_to(run.out)),
+           'configured_xctestrun':str(plan.relative_to(run.out)),
            'application_built':False,'test_executed':False}
     return products,runner,plan,proof
 

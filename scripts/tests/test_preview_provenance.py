@@ -477,7 +477,7 @@ class PreviewWorkflowTests(unittest.TestCase):
             self.assertEqual(set(workflow["jobs"]), {job_name})
             job = workflow["jobs"][job_name]
             self.assertEqual(job["uses"], "victron-venus/venus-os-ci-toolkit/.github/workflows/" +
-                             callee + "@65c3a644c440fcd5f95d94b6c2fa2be1df58249c")
+                             callee + "@0047a13b5eb79dfa770e31070a83e9696ddd36d1")
             self.assertNotIn("steps", job)
             self.assertNotIn("runs-on", job)
             self.assertNotIn("permissions", job)

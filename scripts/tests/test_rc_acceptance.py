@@ -1556,6 +1556,166 @@ class LiveFailureSample(unittest.TestCase):
         run.command.assert_called_once()
         self.assertEqual(run.command.call_args.kwargs['cap'],720)
 
+class CapturePhaseObservations(unittest.TestCase):
+    @contextmanager
+    def fixture(self, returncode=0):
+        # Inert OS seams exercise the real capture state machine and absolute
+        # deadlines; this does not create a process, signal or Simulator.
+        import rc_acceptance_process as P
+        from types import SimpleNamespace
+        now=[0.0];pipes=[Mock(),Mock()]
+        for fd,pipe in enumerate(pipes,100):pipe.fileno.return_value=fd
+        process=Mock(pid=43000,returncode=None,stdout=pipes[0],stderr=pipes[1])
+        def poll():process.returncode=returncode;return returncode
+        process.poll.side_effect=poll
+        entries={}
+        selector=Mock()
+        def register(pipe,events,label):entries[pipe.fileno()]=SimpleNamespace(fd=pipe.fileno(),fileobj=pipe,data=label)
+        selector.register.side_effect=register
+        selector.get_map.side_effect=lambda:dict(entries)
+        selector.select.side_effect=lambda timeout:[(key,None) for key in list(entries.values())]
+        selector.unregister.side_effect=lambda pipe:entries.pop(pipe.fileno())
+        chunks={100:[b'private stdout\n',b''],101:[b'private stderr\n',b'']}
+        def read(fd,limit):return chunks[fd].pop(0)
+        with patch.object(P.time,'monotonic',side_effect=lambda:now[0]), \
+                patch.object(P.subprocess,'Popen',return_value=process) as spawn, \
+                patch.object(P.selectors,'DefaultSelector',return_value=selector), \
+                patch.object(P.os,'set_blocking'),patch.object(P.os,'read',side_effect=read), \
+                patch.object(P,'kill_owned',return_value={'success':True}) as cleanup:
+            yield P,now,spawn,cleanup,selector,pipes
+
+    def test_default_path_does_not_read_observer_clocks_or_change_stdout_callback(self):
+        with self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+            receipt={};chunks=[]
+            with patch.object(P.time,'monotonic_ns',side_effect=AssertionError('observer clock')), \
+                    patch.object(P.time,'process_time_ns',side_effect=AssertionError('observer CPU clock')):
+                result=P.bounded_capture(['inert'],receipt=receipt,on_stdout=lambda data,end:chunks.append((data,end)))
+            self.assertEqual(result,b'private stdout\n');self.assertEqual(chunks,[(result,8)])
+            self.assertFalse(any(key.startswith('phase_') for key in receipt))
+            cleanup.assert_called_once();self.assertEqual(cleanup.call_args.args[1],12)
+            selector.close.assert_called_once();self.assertTrue(all(pipe.close.called for pipe in pipes))
+
+    def test_observer_only_gets_closed_scalar_events_and_existing_stdout_is_preserved(self):
+        with self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+            trace=P.CaptureTrace();chunks=[]
+            result=P.bounded_capture(['private argv'],phase_sink=trace,on_stdout=lambda data,end:chunks.append((data,end)))
+            rows=trace.result();self.assertEqual(result,b'private stdout\n')
+            self.assertEqual(chunks,[(result,8)]);self.assertTrue(rows['diagnostic_only'])
+            names=[row['phase'] for row in rows['events']]
+            self.assertLess(names.index('popen_begin'),names.index('popen_end'))
+            self.assertLess(names.index('stdout_callback_begin'),names.index('stdout_callback_end'))
+            self.assertLess(names.index('cleanup_begin'),names.index('cleanup_end'))
+            self.assertLess(names.index('cleanup_end'),names.index('pipe_close_begin'))
+            self.assertEqual(names[-1],'persist_end');self.assertNotIn('private',json.dumps(rows))
+            self.assertTrue(all(set(row)<=P.CaptureTrace.FIELDS|{'phase','monotonic_ns','cpu_ns'} for row in rows['events']))
+
+    def test_stream_cap_and_native_failure_still_fail_with_observation(self):
+        for code,limit,message in [(7,1024,'exited 7'),(0,1,'stream cap exceeded')]:
+            with self.subTest(code=code,limit=limit),self.fixture(code) as (P,now,spawn,cleanup,selector,pipes):
+                with self.assertRaisesRegex(P.CaptureFailure,message):
+                    P.bounded_capture(['inert'],phase_sink=P.CaptureTrace(),limit=limit)
+                cleanup.assert_called_once();self.assertEqual(cleanup.call_args.args[1],12)
+
+    def test_observer_exception_is_disabled_without_leaking_or_replacing_primary_error(self):
+        with self.fixture(7) as (P,now,spawn,cleanup,selector,pipes):
+            sink=Mock(side_effect=ValueError('private observer detail'));receipt={}
+            with self.assertRaisesRegex(P.CaptureFailure,'exited 7'):
+                P.bounded_capture(['inert'],phase_sink=sink,receipt=receipt)
+            sink.assert_called_once();self.assertTrue(receipt['phase_observer_error'])
+            self.assertNotIn('private observer detail',json.dumps(receipt));cleanup.assert_called_once()
+
+    def test_observer_cancellation_before_spawn_remains_primary_and_closes_selector(self):
+        with self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+            error=KeyboardInterrupt('fixture cancellation');receipt={}
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                P.bounded_capture(['inert'],phase_sink=Mock(side_effect=error),receipt=receipt)
+            self.assertIs(caught.exception,error);self.assertTrue(receipt['phase_observer_aborted'])
+            spawn.assert_not_called();cleanup.assert_not_called();selector.close.assert_called_once()
+
+    def test_cleanup_observer_cancellation_never_skips_cleanup_or_masks_existing_failure(self):
+        for code in [0,7]:
+            with self.subTest(code=code),self.fixture(code) as (P,now,spawn,cleanup,selector,pipes):
+                cancellation=KeyboardInterrupt('fixture cancellation');receipt={}
+                def sink(name,**fields):
+                    if name=='cleanup_begin':raise cancellation
+                with self.assertRaises(P.CaptureFailure if code else KeyboardInterrupt) as caught:
+                    P.bounded_capture(['inert'],phase_sink=sink,receipt=receipt)
+                if code:self.assertEqual(str(caught.exception),'Metadata command exited 7')
+                else:self.assertIs(caught.exception,cancellation)
+                cleanup.assert_called_once();selector.close.assert_called_once()
+                self.assertTrue(receipt['phase_observer_aborted'])
+
+    def test_slow_observer_cannot_admit_spawn_after_original_absolute_work_deadline(self):
+        with self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+            receipt={}
+            def sink(name,**fields):
+                if name=='admitted':now[0]=5
+            with self.assertRaisesRegex(P.CaptureFailure,'existing command deadline'):
+                P.bounded_capture(['inert'],timeout=30,work_deadline=5,cleanup_parent_deadline=9,
+                                  phase_sink=sink,receipt=receipt)
+            spawn.assert_not_called();cleanup.assert_not_called()
+            self.assertEqual(receipt['work_deadline_monotonic'],5)
+            self.assertEqual(receipt['cleanup_deadline_monotonic'],9)
+
+    def test_slow_observer_during_work_or_cleanup_keeps_original_cleanup_deadline(self):
+        for at in ['read_begin','cleanup_begin']:
+            with self.subTest(at=at),self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+                receipt={}
+                def sink(name,**fields):
+                    if name==at:now[0]=20
+                with self.assertRaisesRegex(P.CaptureFailure,'existing command deadline'):
+                    P.bounded_capture(['inert'],phase_sink=sink,receipt=receipt)
+                cleanup.assert_called_once();self.assertEqual(cleanup.call_args.args[1],12)
+                selector.close.assert_called_once()
+
+    def test_work_expiry_stays_primary_when_its_observer_is_cancelled(self):
+        with self.fixture() as (P,now,spawn,cleanup,selector,pipes):
+            original_map=selector.get_map.side_effect;iterations=[0]
+            def get_map():
+                iterations[0]+=1
+                if iterations[0]==2:now[0]=8
+                return original_map()
+            selector.get_map.side_effect=get_map;selector.select.side_effect=lambda timeout:[]
+            def sink(name,**fields):
+                if name=='work_expired':raise KeyboardInterrupt('later observer cancellation')
+            receipt={}
+            with self.assertRaisesRegex(P.CaptureFailure,'^Metadata command work deadline exceeded$'):
+                P.bounded_capture(['inert'],phase_sink=sink,receipt=receipt)
+            self.assertTrue(receipt['phase_observer_aborted']);cleanup.assert_called_once()
+            self.assertNotIn('later observer cancellation',receipt['error'])
+
+    def test_trace_rejects_private_fields_unknown_phases_and_non_scalar_values(self):
+        import rc_acceptance_process as P
+        for name,fields in [([],{}),('private phase',{}),('admitted',{'argv':'private'}),
+                ('admitted',{'pid':'private'}),('admitted',{'pid':True}),('admitted',{'pid':10**1000}),
+                ('admitted',{'pid':float('inf')}),('admitted',{'pid':float('nan')})]:
+            with self.subTest(name=name,fields=str(fields)[:80]):
+                trace=P.CaptureTrace();trace(name,**fields);result=trace.result()
+                self.assertEqual(result['events'],[]);self.assertTrue(result['incomplete'])
+                self.assertNotIn('private',json.dumps(result))
+        for value in [True,-1,2**63,0.5]:
+            with self.subTest(clock=value),patch.object(P.time,'monotonic_ns',return_value=value):
+                trace=P.CaptureTrace();trace('admitted');self.assertEqual(trace.result()['events'],[])
+
+    def test_saturation_keeps_bounded_last_terminal_counts_and_largest_gap(self):
+        import rc_acceptance_process as P
+        tick=[0]
+        def clock():tick[0]+=1;return tick[0]
+        with patch.object(P.time,'monotonic_ns',side_effect=clock),patch.object(P.time,'process_time_ns',return_value=0):
+            trace=P.CaptureTrace()
+            for _ in range(trace.MAX_EVENTS+20):trace('poll_begin')
+            tick[0]+=100;trace('cleanup_end')
+        result=trace.result();self.assertEqual(len(result['events']),trace.MAX_EVENTS)
+        self.assertEqual(result['dropped'],21);self.assertTrue(result['incomplete'])
+        self.assertEqual(result['last']['phase'],'cleanup_end')
+        self.assertEqual(result['terminal']['cleanup_end'],result['last'])
+        self.assertEqual(result['max_gap_ns'],101)
+        self.assertEqual(result['max_gap_pair']['previous']['phase'],'poll_begin')
+        result['events'][0]['phase']='modified';result['terminal'].clear()
+        self.assertEqual(trace.result()['events'][0]['phase'],'poll_begin')
+        self.assertIn('cleanup_end',trace.result()['terminal'])
+
+
 class ProcessEvidence(unittest.TestCase):
     def test_failed_child_retains_bounded_streams_and_is_reaped(self):
         from rc_acceptance_process import bounded_capture,CaptureFailure

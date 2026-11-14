@@ -408,3 +408,38 @@ remain pending, ambiguity fails, and cancellation/native errors and late returns
 remain failures. Native calls are cooperative and can outlast a deadline; a late
 result cannot pass. The existing actual-method host fixture exercises this full
 selection-to-alert path with the unchanged readiness helper and injected transport.
+
+## Optional command phase observations
+
+The Python `rc_acceptance_process.bounded_capture` helper accepts an optional
+`phase_sink` callback for diagnosing where a command spends time. Existing
+workflows leave it unset. A caller may pass a `CaptureTrace` instance and inspect
+`trace.result()` after capture returns or raises. This does not launch another
+command or change the existing RC acceptance entrypoint.
+
+The observer receives closed phase names around spawn, poll, selector, read,
+the existing stdout callback, cleanup and evidence persistence. `CaptureTrace`
+records only monotonic and process CPU timestamps plus permitted numeric fields:
+timeout, PID, return code, ready count, stream number and byte count. It retains
+at most 2,048 event rows, bounded per-phase counts and dropped count, the last
+event, selected terminal observations and the largest gap between observations.
+Saturation or invalid input sets `incomplete`; a gap is an observation interval,
+not attribution of that interval to a particular OS operation. The trace contains
+no command arguments, stream contents, file paths or exception text. Existing
+command receipts and bounded stdout/stderr files retain their separate contracts
+and must still be handled as potentially private evidence.
+
+Callbacks must be nonblocking. Observer time consumes the original absolute work
+and cleanup deadlines; it never reserves another window or renews a deadline.
+These checks remain cooperative: neither a blocked OS call nor a blocked observer
+is preempted by this helper. An ordinary observer exception disables observation
+and records only a boolean diagnostic flag. Observer cancellation remains a
+failure; cancellation during finalization cannot skip the owned-process cleanup
+attempt or replace an earlier command failure. The original cleanup implementation
+and `on_stdout(chunk, work_deadline)` callback contract are unchanged. With no
+phase observer, the helper does not call the observer clocks or add trace fields.
+
+The bounded trace is diagnostic metadata, never command or release acceptance.
+No new hosted/native probe, timeout change or historical iOS latency result is
+introduced here. The RC installation responsiveness investigation remains open;
+host tests of the observer do not establish why a Simulator or provider stalled.

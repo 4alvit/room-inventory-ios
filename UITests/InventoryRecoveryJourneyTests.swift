@@ -473,10 +473,20 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             print("ROOM_OCR_TAP_GEOMETRY " + text)
         }
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
-        let start = try window.perform { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)) }
-        let end = try window.perform { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)) }
-        let startPoint = try window.perform { start.screenPoint }
-        let endPoint = try window.perform { end.screenPoint }
+        let startOffset = CGVector(dx: frame.width * 0.25, dy: frame.height * 0.5)
+        let endOffset = CGVector(dx: frame.width * 0.75, dy: frame.height * 0.5)
+        let origin = try window.perform { toggle.coordinate(withNormalizedOffset: .zero) }
+        let start = try window.perform { origin.withOffset(startOffset) }
+        let end = try window.perform { origin.withOffset(endOffset) }
+        // Read the actual shared screen origin, then the full current frame.
+        // withOffset uses absolute screen-point vectors; no cache is assumed.
+        let originPoint = try window.perform { origin.screenPoint }
+        let liveFrame = try window.perform { toggle.frame }
+        guard liveFrame == frame, originPoint == liveFrame.origin else {
+            throw RecoveryJourneyFailure.assertion("OCR \(id) live frame/origin", "changed", "admitted full frame and screen origin")
+        }
+        let startPoint = CGPoint(x: originPoint.x + startOffset.dx, y: originPoint.y + startOffset.dy)
+        let endPoint = CGPoint(x: originPoint.x + endOffset.dx, y: originPoint.y + endOffset.dy)
         guard startPoint == dragStart, endPoint == dragEnd,
               frame.contains(startPoint), frame.contains(endPoint) else {
             throw RecoveryJourneyFailure.assertion("OCR \(id) activation geometry",

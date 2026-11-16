@@ -250,6 +250,7 @@ class Collector:
         self.photos_isolation_sha = None
         self.photos_isolated = False
         self.barriers, self.origins, self.nonces = [], [], set()
+        self._bridge_poll_active = False
         self.xc_original = self.xc_copy = self.xc_before = None
         self.readers_started = False
         self.seal_attempted = False
@@ -664,11 +665,21 @@ class Collector:
         The controller brackets this fixed-path lookup with its original deadline
         and owned-process checks. Installation keeps its existing outer callback.
         """
-        if self.installation_state != "accepted" or len(self.barriers) >= 6:
+        if self._bridge_poll_active or self.installation_state != "accepted" or len(self.barriers) >= 6:
             return False
         return os.path.lexists(self.bridge / f"request-{len(self.barriers) + 1:02d}.json")
 
     def poll_bridge(self):
+        # A guarded read/write can yield to the controller's census service.
+        # Keep that scheduler from entering this uncommitted transaction again.
+        check(not self._bridge_poll_active, "recursive bridge poll")
+        self._bridge_poll_active = True
+        try:
+            return self._poll_bridge_once()
+        finally:
+            self._bridge_poll_active = False
+
+    def _poll_bridge_once(self):
         if self.installation_state in ("waiting", "binding"):
             return self._poll_installation()
         check(self.baseline is not None, "capture baseline first")

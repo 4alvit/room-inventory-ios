@@ -1280,3 +1280,71 @@ class InstallationHandshakeTests(unittest.TestCase):
                 path.unlink(); other = state.root / "outside.json"; other.write_bytes(raw); path.symlink_to(other)
             else: path.write_bytes(raw + b" " * 65536)
             with self.assertRaises(C.CollectorError): state.collector.poll_bridge()
+
+
+    def bridge_request(self, state, number=1, nonce="55555555-5555-4555-8555-555555555555"):
+        request = {"schema_version": 1, **state.collector.ids, "sequence": number,
+                   "role": ("source_zip", "backup", "target_zip")[(number - 1) // 2],
+                   "phase": "before" if number % 2 else "after", "nonce": nonce}
+        (state.bridge / f"request-{number:02d}.json").write_bytes(C.canonical(request))
+        return request
+
+    def test_pending_hint_excludes_active_poll_through_durable_ack_publication(self):
+        state = self.photos_state()
+        self.photos_receipt(state)
+        collector = state.collector
+        request = self.bridge_request(state)
+        observed = []
+        def cooperative_checkpoint():
+            if request["nonce"] in collector.nonces and not observed:
+                pending = collector.has_pending_bridge_request()
+                observed.append(pending)
+                if pending:
+                    collector.poll_bridge()
+        state.guard_hook = cooperative_checkpoint
+        self.assertEqual(collector.poll_bridge(), 1)
+        self.assertEqual(observed, [False])
+        self.assertEqual(len(collector.barriers), 1)
+        ack = C.parse((state.bridge / "ack-01.json").read_bytes())
+        self.assertEqual(ack["nonce"], request["nonce"])
+        self.assertFalse(collector.has_pending_bridge_request())
+        for prefix in ("request", "receipt", "ack"):
+            self.assertTrue((collector.root / f"bridge/{prefix}-01.json").is_file())
+
+    def test_failed_active_poll_restores_hint_but_never_reaccepts_consumed_nonce(self):
+        for fault in (TimeoutError("original deadline"), OSError("durable write refused"), KeyboardInterrupt("cancel")):
+            with self.subTest(fault=type(fault).__name__):
+                state = self.photos_state()
+                self.photos_receipt(state)
+                collector = state.collector
+                request = self.bridge_request(state)
+                def fail_after_nonce():
+                    if request["nonce"] in collector.nonces:
+                        raise fault
+                state.guard_hook = fail_after_nonce
+                with self.assertRaises(type(fault)) as caught:
+                    collector.poll_bridge()
+                self.assertIs(caught.exception, fault)
+                state.guard_hook = lambda: None
+                self.assertTrue(collector.has_pending_bridge_request())
+                self.assertEqual(collector.barriers, [])
+                self.assertFalse((state.bridge / "ack-01.json").exists())
+                with self.assertRaisesRegex(C.CollectorError, "reused bridge nonce"):
+                    collector.poll_bridge()
+                self.assertFalse((state.bridge / "ack-01.json").exists())
+
+    def test_direct_recursive_poll_refuses_before_reading_or_consuming_again(self):
+        state = self.photos_state()
+        self.photos_receipt(state)
+        collector = state.collector
+        request = self.bridge_request(state)
+        observed = []
+        def direct_recursion():
+            if request["nonce"] in collector.nonces and not observed:
+                observed.append(True)
+                with self.assertRaisesRegex(C.CollectorError, "recursive bridge poll"):
+                    collector.poll_bridge()
+        state.guard_hook = direct_recursion
+        self.assertEqual(collector.poll_bridge(), 1)
+        self.assertEqual(observed, [True])
+        self.assertEqual(len(collector.barriers), 1)

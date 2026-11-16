@@ -1331,10 +1331,11 @@ class RecoveryRun:
                 self._resource_census = None
 
     def guard_bridge_resources(self):
-        """Fresh affected-root caps while the owned full census is suspended.
+        """Fresh affected-root caps while a full census is suspended or deferred.
 
-        The device/DerivedData totals remain incomplete, never cached-as-fresh.
-        Their original walk must resume, and any later cap failure is terminal.
+        Device/DerivedData totals remain incomplete, never cached-as-fresh.
+        A suspended walk resumes or a due deferred census runs before continuation.
+        Any later cap failure is terminal.
         """
         scope = self._bridge_scan_guard
         require(scope is not None and scope["census"] is self._resource_census
@@ -1343,6 +1344,8 @@ class RecoveryRun:
                 "Invalid or recursive bridge resource guard", ConfigurationFailure)
         scope["validate"]()
         self.tick()
+        if scope.get("defer_full_census"):
+            scope["full_census_due"] |= self.clock() - self.last_resource_check >= 2
         if self.clock() - scope["last_check"] < 2:
             return
         scope["busy"] = True
@@ -1536,6 +1539,41 @@ class RecoveryRun:
                     and entry["state"].get("group_state") != "absent",
                     "Stale DerivedData scan owner", ConfigurationFailure)
             self.validate_derived_resource_root(derived_root, derived_identity)
+
+        def poll_bridge_callback():
+            # An ordinary callback is also an uncommitted collector transaction.
+            # Its guards retain fresh affected-root caps, while any newly due
+            # full census must finish after the callback and before continuation.
+            require(self._resource_census is None and self._bridge_scan_guard is None,
+                    "Nested ordinary bridge callback", ConfigurationFailure)
+            def validate():
+                require(self.collector is bridge_collector and on_poll == bridge_collector.poll_bridge
+                        and (device_root is not None or derived_identity is not None),
+                        "Changed or unbound bridge callback owner", ConfigurationFailure)
+                if device_root is not None:
+                    require_device_owner(active_scan=False)
+                if derived_identity is not None:
+                    require_derived_owner(active_scan=False)
+            validate()
+            census = object()
+            scope = {"census": census, "collector": bridge_collector,
+                     "validate": validate, "busy": False, "last_check": float("-inf"),
+                     "defer_full_census": True, "full_census_due": False}
+            self._resource_census = census
+            self._bridge_scan_guard = scope
+            try:
+                self.guard()
+                on_poll()
+                self.tick()
+                require(self._resource_census is census and self._bridge_scan_guard is scope
+                        and not scope["busy"], "Changed ordinary bridge resource scope", ConfigurationFailure)
+                validate()
+                full_due = scope["full_census_due"] or self.clock() - self.last_resource_check >= 2
+            finally:
+                self._bridge_scan_guard = None
+                self._resource_census = None
+            if full_due:
+                self.guard(force=True)  # Never continue with the due full census omitted.
 
         def service_derived_scan():
             service_scan()
@@ -1783,7 +1821,10 @@ class RecoveryRun:
                     allow_scan_handoff = False
                 self.tick()
                 if on_poll:
-                    on_poll()
+                    if bridge_collector is not None and getattr(bridge_collector, "installation_state", None) == "accepted":
+                        poll_bridge_callback()
+                    else:
+                        on_poll()
                 self.tick()
                 if scan_handoff is not None:
                     # Preserve the normal callback boundary outside the walker.

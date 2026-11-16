@@ -49,6 +49,12 @@ private final class OCRFixture {
     var attributes = [1: OCRPredicateObject(identifier: "ocr.select.model")]
     var hittable = true
     var endpointOffset = 0.0
+    var liveFrameOverride: CGRect?
+    var wrongOwner = false
+    var producedNormalizedOffset = 0.0
+    var pointRounding = 0.0
+    var reverseNormalizedX = false
+    var currentFrame: CGRect { liveFrameOverride ?? frame.offsetBy(dx: endpointOffset, dy: 0) }
     var dragged = false
     var failSelected = false
     var snapshotError = false
@@ -74,22 +80,38 @@ private final class OCRFixtureElement {
     let f: OCRFixture
     let identity: Int
     init(_ f: OCRFixture, _ identity: Int) { self.f = f; self.identity = identity }
+    var frame: CGRect { f.event("frame:\(identity)"); return f.currentFrame }
     var isHittable: Bool { f.event("hit:\(identity)"); return f.hittable }
     func coordinate(withNormalizedOffset point: CGVector) -> OCRFixtureCoordinate {
         f.event("coordinate:\(identity):\(point.dx)")
-        return OCRFixtureCoordinate(f, identity, point.dx)
+        return OCRFixtureCoordinate(self, CGVector(dx: point.dx + f.producedNormalizedOffset, dy: point.dy))
     }
 }
 @MainActor
 private final class OCRFixtureCoordinate {
-    let f: OCRFixture
-    let identity: Int
-    let x: Double
+    let owner: OCRFixtureElement
+    let normalized: CGVector
+    let offset: CGVector
+    var f: OCRFixture { owner.f }
+    var identity: Int { owner.identity }
     enum Velocity { case slow }
-    init(_ f: OCRFixture, _ identity: Int, _ x: Double) { self.f = f; self.identity = identity; self.x = x }
+    init(_ owner: OCRFixtureElement, _ normalized: CGVector, offset: CGVector = .zero) {
+        self.owner = owner; self.normalized = normalized; self.offset = offset
+    }
+    func withOffset(_ vector: CGVector) -> OCRFixtureCoordinate {
+        f.event("offset:\(identity):\(vector.dx)")
+        return OCRFixtureCoordinate(owner, normalized,
+            offset: CGVector(dx: offset.dx + vector.dx, dy: offset.dy + vector.dy))
+    }
+    var referencedElement: OCRFixtureElement {
+        f.event("owner:\(identity):\(offset.dx)")
+        return f.wrongOwner ? OCRFixtureElement(f, 99) : owner
+    }
     var screenPoint: CGPoint {
-        f.event("point:\(identity):\(x)")
-        return CGPoint(x: f.frame.minX + f.frame.width * x + f.endpointOffset, y: f.frame.midY)
+        f.event("point:\(identity):\(normalized.dx):\(offset.dx)")
+        let x = f.reverseNormalizedX ? 1 - normalized.dx : normalized.dx
+        return CGPoint(x: f.currentFrame.minX + f.currentFrame.width * x + offset.dx + f.pointRounding + (f.wrongOwner ? 50 : 0),
+                       y: f.currentFrame.minY + f.currentFrame.height * normalized.dy + offset.dy)
     }
     func press(forDuration: Double, thenDragTo other: OCRFixtureCoordinate, withVelocity: Velocity, thenHoldForDuration: Double) {
         f.event("drag:\(identity):\(other.identity)"); f.dragged = true
@@ -161,8 +183,11 @@ final class RecoveryOCRSelectionRegressionTests: XCTestCase {
         f.onEvent = { event in if event == "hit:1" { f.liveIDs = [2]; f.attributes[2] = .init(identifier: "ocr.select.model") } }
         try OCRBody(f).run()
         XCTAssertEqual(f.events.filter { $0 == "bind" }.count, 1)
-        XCTAssertEqual(f.events.filter { $0.hasPrefix("coordinate:") }, ["coordinate:1:0.25", "coordinate:1:0.75"])
-        XCTAssertEqual(f.events.filter { $0.hasPrefix("point:") }, ["point:1:0.25", "point:1:0.75"])
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("coordinate:") }, ["coordinate:1:0.0"])
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("offset:") }, ["offset:1:15.25", "offset:1:45.75"])
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("point:") }, ["point:1:0.0:0.0"])
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("frame:") }, ["frame:1"])
+        XCTAssertEqual(f.events.suffix(3), ["frame:1", "drag:1:1", "selected-snapshot"])
         XCTAssertEqual(f.events.filter { $0.hasPrefix("drag:") }, ["drag:1:1"])
         XCTAssertTrue(f.events.contains("selected-snapshot"))
     }
@@ -197,7 +222,7 @@ final class RecoveryOCRSelectionRegressionTests: XCTestCase {
         XCTAssertFalse(f.events.contains("hit:1"))
     }
     @MainActor func testActualOCRLateOrEqualRemoteStageNeverAdmitsNextOperation() {
-        let ordered = ["bind", "hit:1", "coordinate:1:0.25", "coordinate:1:0.75", "point:1:0.25", "point:1:0.75"]
+        let ordered = ["bind", "hit:1", "coordinate:1:0.0", "offset:1:15.25", "offset:1:45.75", "point:1:0.0:0.0", "frame:1"]
         for stage in ordered {
             for elapsed in [10.0, 10.001] {
                 let f = fixture(); f.onEvent = { if $0 == stage { f.now = elapsed } }
@@ -249,4 +274,46 @@ final class RecoveryOCRSelectionRegressionTests: XCTestCase {
         XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertTrue(f.dragged)
         XCTAssertEqual(f.events.filter { $0.hasPrefix("drag:") }.count, 1)
     }
+    @MainActor func testFreshFrameRejectsWidthTranslationWithSameOldStartPoint() {
+        let f = fixture(); f.liveFrameOverride = CGRect(x: 307, y: 352, width: 69, height: 28)
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testFreshFrameRejectsHeightWithSameOldEndpoints() {
+        let f = fixture(); f.liveFrameOverride = CGRect(x: 309, y: 348, width: 61, height: 36)
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testChangedActualOriginIsRejected() {
+        let f = fixture(); f.wrongOwner = true
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testWrongNormalizedProducerArgumentIsRejected() {
+        let f = fixture(); f.producedNormalizedOffset = 0.1
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testActualOriginRoundingDiscrepancyIsRejected() {
+        let f = fixture(); f.pointRounding = 0.25
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testActualOriginRotationDiscrepancyIsRejected() {
+        let f = fixture(); f.reverseNormalizedX = true
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+    }
+    @MainActor func testBothLiveObservationCostsStillConsumeOriginalTenSeconds() {
+        let f = fixture()
+        f.onEvent = { event in
+            if event == "bind" { f.now += 2 }
+            if event.hasPrefix("point:") || event.hasPrefix("frame:") { f.now += 5 }
+        }
+        XCTAssertThrowsError(try OCRBody(f).run()); XCTAssertFalse(f.dragged)
+        XCTAssertEqual(f.now, 12)
+    }
+    @MainActor func testSourceUsesFixedAbsoluteVectorsFromOneOrigin() throws {
+        let f = fixture(); try OCRBody(f).run()
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("coordinate:") }.count, 1)
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("offset:") }, ["offset:1:15.25", "offset:1:45.75"])
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("point:") }.count, 1)
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("frame:") }.count, 1)
+        XCTAssertEqual(f.events.filter { $0.hasPrefix("drag:") }, ["drag:1:1"])
+    }
+
 }

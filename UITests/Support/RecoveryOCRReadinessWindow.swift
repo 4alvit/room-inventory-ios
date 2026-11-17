@@ -11,6 +11,27 @@ struct RecoveryOCRReadinessWindow {
         }
     }
 
+    /// Closed diagnostic vocabulary: never interpolate native/UI error descriptions.
+    enum Stage: String, CaseIterable {
+        case snapshot, scan, state, liveMatches, hittability
+        case coordinate, origin, currentFrame, gestureAdmission
+    }
+
+    static func failureLine(stage: Stage, error: Error) -> String {
+        let kind: String
+        switch error {
+        case Failure.expired: kind = "expired"
+        case Failure.invalidAllowance: kind = "invalid_allowance"
+        default: kind = "native"
+        }
+        return "ROOM_OCR_STAGE_FAILURE stage=\(stage.rawValue) kind=\(kind)"
+    }
+
+    private func report(stage: Stage?, error: Error) {
+        guard let stage else { return }
+        print(Self.failureLine(stage: stage, error: error))
+    }
+
     private let clock: () -> TimeInterval
     private let end: TimeInterval
     private let validAllowance: Bool
@@ -37,11 +58,16 @@ struct RecoveryOCRReadinessWindow {
         end = clock() + timeout
     }
 
-    func remaining() throws -> TimeInterval {
-        guard validAllowance else { throw Failure.invalidAllowance }
-        let value = end - clock()
-        guard value > 0 else { throw Failure.expired }
-        return value
+    func remaining(stage: Stage? = nil) throws -> TimeInterval {
+        do {
+            guard validAllowance else { throw Failure.invalidAllowance }
+            let value = end - clock()
+            guard value > 0 else { throw Failure.expired }
+            return value
+        } catch {
+            report(stage: stage, error: error)
+            throw error
+        }
     }
 
     /// Start the first probe inside the active waiter, without the predicate
@@ -107,21 +133,27 @@ struct RecoveryOCRReadinessWindow {
         }
     }
 
-    func perform<Value>(_ operation: () throws -> Value) throws -> Value {
-        _ = try remaining()
-        let value = try operation()
-        _ = try remaining()
-        return value
+    func perform<Value>(stage: Stage? = nil, _ operation: () throws -> Value) throws -> Value {
+        do {
+            _ = try remaining()
+            let value = try operation()
+            _ = try remaining()
+            return value
+        } catch {
+            report(stage: stage, error: error)
+            throw error
+        }
     }
 
     /// State and geometry can reuse this same snapshot after a successful probe.
     /// Never start another remote query after an earlier stage returned late.
-    func probe<Snapshot>(snapshot: () throws -> Snapshot,
+    func probe<Snapshot>(snapshotStage: Stage? = nil, stateStage: Stage? = nil,
+                         hittabilityStage: Stage? = nil, snapshot: () throws -> Snapshot,
                          stateReady: (Snapshot) throws -> Bool,
                          hittable: () throws -> Bool) throws -> Snapshot? {
-        let observation = try perform(snapshot)
-        guard try perform({ try stateReady(observation) }) else { return nil }
-        guard try perform(hittable) else { return nil }
+        let observation = try perform(stage: snapshotStage, snapshot)
+        guard try perform(stage: stateStage, { try stateReady(observation) }) else { return nil }
+        guard try perform(stage: hittabilityStage, hittable) else { return nil }
         return observation
     }
 }

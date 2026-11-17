@@ -352,11 +352,11 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         typealias Observation = (snapshot: any XCUIElementSnapshot, nodes: [Node], switches: [Node], navigation: [Node])
         func observeForm() throws -> Observation {
             let snapshot = try app.snapshot()
-            _ = try window.remaining()
+            _ = try window.remaining(stage: .scan)
             var pending: [Node] = [(snapshot, nil, false)]
             var nodes: [Node] = []
             while let next = pending.popLast() {
-                _ = try window.remaining()
+                _ = try window.remaining(stage: .scan)
                 guard nodes.count < 10_000 else {
                     throw RecoveryJourneyFailure.assertion("OCR geometry node bound", "exceeded", "10000 nodes")
                 }
@@ -383,7 +383,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
             boundToggle = nil
             var candidateToggle: XCUIElement?
             do {
-                observation = try window.probe(snapshot: observeForm, stateReady: { candidate in
+                observation = try window.probe(snapshotStage: .snapshot, stateStage: .state, hittabilityStage: .hittability, snapshot: observeForm, stateReady: { candidate in
                     let targets = candidate.switches
                     guard targets.count <= 1, candidate.navigation.count <= 1 else {
                         throw RecoveryJourneyFailure.assertion("OCR \(id) unique form target",
@@ -395,13 +395,13 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                     observedState = "switches=\(targets.count); enabled=\(enabled); value=\(value ?? "<missing>")"
                     return target?.form != nil && candidate.navigation.count == 1 && enabled && value == "0"
                 }, hittable: {
-                    let matches = try window.perform { toggles.allElementsBoundByAccessibilityElement }
+                    let matches = try window.perform(stage: .liveMatches) { toggles.allElementsBoundByAccessibilityElement }
                     guard matches.count <= 1 else {
                         throw RecoveryJourneyFailure.assertion("OCR \(id) unique live target",
                             "matches=\(matches.count)", "one exact identifier")
                     }
                     guard let toggle = matches.first else { return false }
-                    let hittable = try window.perform { toggle.isHittable }
+                    let hittable = try window.perform(stage: .hittability) { toggle.isHittable }
                     observedState += "; hittable=\(hittable)"
                     if hittable { candidateToggle = toggle }
                     return hittable
@@ -475,13 +475,13 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         try ledger.require("OCR \(id) entire switch is unobscured", checks.values.allSatisfy { $0 })
         let startOffset = CGVector(dx: frame.width * 0.25, dy: frame.height * 0.5)
         let endOffset = CGVector(dx: frame.width * 0.75, dy: frame.height * 0.5)
-        let origin = try window.perform { toggle.coordinate(withNormalizedOffset: .zero) }
-        let start = try window.perform { origin.withOffset(startOffset) }
-        let end = try window.perform { origin.withOffset(endOffset) }
+        let origin = try window.perform(stage: .coordinate) { toggle.coordinate(withNormalizedOffset: .zero) }
+        let start = try window.perform(stage: .coordinate) { origin.withOffset(startOffset) }
+        let end = try window.perform(stage: .coordinate) { origin.withOffset(endOffset) }
         // Read the actual shared screen origin, then the full current frame.
         // withOffset uses absolute screen-point vectors; no cache is assumed.
-        let originPoint = try window.perform { origin.screenPoint }
-        let liveFrame = try window.perform { toggle.frame }
+        let originPoint = try window.perform(stage: .origin) { origin.screenPoint }
+        let liveFrame = try window.perform(stage: .currentFrame) { toggle.frame }
         guard liveFrame == frame, originPoint == liveFrame.origin else {
             throw RecoveryJourneyFailure.assertion("OCR \(id) live frame/origin", "changed", "admitted full frame and screen origin")
         }
@@ -493,7 +493,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
                 "resolved start=\(startPoint), end=\(endPoint); admitted start=\(dragStart), end=\(dragEnd)",
                 "unchanged drag endpoints inside the verified switch")
         }
-        _ = try window.remaining() // Geometry and evidence cannot authorize a late gesture.
+        _ = try window.remaining(stage: .gestureAdmission) // Geometry and evidence cannot authorize a late gesture.
         start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
         let selectionWindow = RecoveryOCRSelectionWindow()
         var selectionObservation: RecoveryOCRSelectionWindow.Observation?

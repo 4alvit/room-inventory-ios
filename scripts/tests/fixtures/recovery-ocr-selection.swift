@@ -147,12 +147,17 @@ private struct OCRLedger {
 }
 @MainActor
 private struct RecoveryOCRReadinessWindow {
+    typealias Stage = OCRNativeReadinessWindow.Stage
     let actual: OCRNativeReadinessWindow
     init() { let f = OCRFixture.current!; actual = .init(clock: { f.now }) }
-    func remaining() throws -> TimeInterval { try actual.remaining() }
-    func perform<T>(_ body: () throws -> T) throws -> T { try actual.perform(body) }
-    func probe<T>(snapshot: () throws -> T, stateReady: (T) throws -> Bool, hittable: () throws -> Bool) throws -> T? {
-        try actual.probe(snapshot: snapshot, stateReady: stateReady, hittable: hittable)
+    func remaining(stage: Stage? = nil) throws -> TimeInterval { try actual.remaining(stage: stage) }
+    func perform<T>(stage: Stage? = nil, _ body: () throws -> T) throws -> T { try actual.perform(stage: stage, body) }
+    func probe<T>(snapshotStage: Stage? = nil, stateStage: Stage? = nil,
+                  hittabilityStage: Stage? = nil, snapshot: () throws -> T,
+                  stateReady: (T) throws -> Bool, hittable: () throws -> Bool) throws -> T? {
+        try actual.probe(snapshotStage: snapshotStage, stateStage: stateStage,
+                         hittabilityStage: hittabilityStage, snapshot: snapshot,
+                         stateReady: stateReady, hittable: hittable)
     }
     func waitForProbe(_ probe: @escaping @MainActor () -> Bool) throws -> XCTWaiter.Result { try actual.waitForProbe(probe) }
 }

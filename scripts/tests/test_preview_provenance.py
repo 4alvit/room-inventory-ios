@@ -476,8 +476,10 @@ class PreviewWorkflowTests(unittest.TestCase):
             self.assertEqual(workflow["permissions"], {"contents": "read", "pull-requests": "write"})
             self.assertEqual(set(workflow["jobs"]), {job_name})
             job = workflow["jobs"][job_name]
-            self.assertEqual(job["uses"], "victron-venus/venus-os-ci-toolkit/.github/workflows/" +
-                             callee + "@486d9b959599bed009f9fdafb55f0820070ce860")
+            reference = job["uses"]
+            self.assertEqual(reference.partition("@")[0],
+                             "victron-venus/venus-os-ci-toolkit/.github/workflows/" + callee)
+            CONTRACTS.validate_action_reference(name, reference, pins=None)
             self.assertNotIn("steps", job)
             self.assertNotIn("runs-on", job)
             self.assertNotIn("permissions", job)

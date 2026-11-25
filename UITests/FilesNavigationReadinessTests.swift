@@ -2220,6 +2220,36 @@ final class FilesNavigationReadinessTests: XCTestCase {
     }
 
     @MainActor
+    func testSharePresentationAdmitsNinetySecondsAtTheMeasuredHostedProbeCost() throws {
+        XCTAssertEqual(FilesNavigationReadiness.sharePresentationAllowance, 90)
+        let slack = FilesNavigationReadiness.sharePresentation(clock: { 0 })
+        XCTAssertEqual(try slack.remaining(), 90)
+        // A degraded hosted runner spent about ten seconds inside each probe of
+        // the remote share hierarchy (run 45479826377); the former thirty second
+        // window admitted three observations and then expired.
+        var now = 0.0
+        let window = FilesNavigationReadiness.sharePresentation(clock: { now })
+        var observations = 0
+        var taps = 0
+        try window.waitAndTapBoundElement(matchingElements: {
+            observations += 1
+            now += 10
+            return observations == 8 ? [1] : []
+        }, enabled: { _ in true }, hittable: { _ in true }, tap: { _ in taps += 1 })
+        XCTAssertEqual(observations, 8)
+        XCTAssertEqual(taps, 1)
+        XCTAssertEqual(try window.remaining(), 10)
+    }
+
+    @MainActor
+    func testSharePresentationAllowanceIsNotAdmittedByTheGenericInitializer() {
+        XCTAssertThrowsError(try FilesNavigationReadiness(
+            timeout: FilesNavigationReadiness.sharePresentationAllowance, clock: { 0 }).remaining()) {
+            XCTAssertEqual($0 as? FilesNavigationReadiness.Failure, .invalidAllowance)
+        }
+    }
+
+    @MainActor
     func testProviderCreatedFolderCanCrossTenSecondsWithoutAnotherSnapshot() throws {
         var now = 0.0
         let window = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance, clock: { now })

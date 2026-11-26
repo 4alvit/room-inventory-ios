@@ -9,6 +9,25 @@ final class FilesNavigationReadiness {
     /// Generic explicit windows keep their existing deadline and maximum.
     static let systemProviderAllowance: TimeInterval = 30
 
+    /// One allowance for the share sheet to publish and admit its exact action.
+    /// The action is discovered by serialized probes of the remote share
+    /// hierarchy. A warm hosted runner answered one probe in about 0.2 seconds
+    /// and reached the action in about 5.5 seconds, while a degraded hosted run
+    /// spent about 10 seconds per probe and expired after three observations
+    /// (run 45479826377). This matches the existing first-use provider
+    /// allowance; it stays one absolute deadline, including the tap.
+    static let sharePresentationAllowance: TimeInterval = 90
+
+    /// The share presentation needs an allowance above the generic thirty
+    /// second maximum, so it carries its own explicit maximum. Only this
+    /// transition opts in; every other provider window keeps thirty seconds.
+    static func sharePresentation(
+        clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) -> FilesNavigationReadiness {
+        FilesNavigationReadiness(timeout: sharePresentationAllowance,
+                                 maximum: sharePresentationAllowance, clock: clock)
+    }
+
     enum State: Equatable { case targetFolder, localRoot, localEntry, browse, back }
     enum TitleKind { case application, navigationBar, text, button, other, collectionView, cell, unrelated }
     struct TitleItem {

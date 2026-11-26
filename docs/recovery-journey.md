@@ -95,10 +95,14 @@ evidence; repair and review the cause before separately authorizing another run.
    `RoomInventoryUITests/InventoryRecoveryJourneyTests/testPhotosOCRExportRestoreIntoFreshNamespace`,
    an attempt-owned result bundle,
    `-parallel-testing-enabled NO`, `-maximum-concurrent-test-simulator-destinations 1`,
-   `-test-timeouts-enabled YES`, and `-maximum-test-execution-time-allowance 960`.
-   The selected test has an explicit 900-second execution allowance within the
-   controller's single 1,020-second test phase and command cap; launch, finalization
-   and accounting still consume that same absolute phase budget.
+   `-test-timeouts-enabled YES`, and `-maximum-test-execution-time-allowance 1200`.
+   The selected test has an explicit 1,140-second execution allowance within the
+   controller's single 1,320-second test phase and command cap. The three limits are
+   deliberately ordered: the cap stays 120 seconds above Xcode's maximum so
+   xcodebuild launch, result-bundle finalization and accounting are budgeted on
+   top of the native limit instead of being killed by the cap. Measured overhead
+   was 42 seconds on a fast hosted host and 91 seconds on a slow one, against 60
+   seconds before this change.
    Omit repetition and retry flags for this single invocation: Xcode 16.4 rejects
    `-test-iterations 1` before XCTest starts. Keep the
    effective xctestrun/selection proving no unit commerce tests were selected.
@@ -153,7 +157,7 @@ The grant is a JSON object with exactly these fields: `schema_version` (integer 
 `controller_sha256`, `collector_sha256`, `xcodegen_sha256` (64-character lowercase
 hashes), absolute `worktree`, `output_root`, `xcodegen_path`, `developer_dir`,
 explicit installed `device_type` and `runtime` identifiers, and a new uppercase
-canonical `journey_run_id`. The active grant must have at least 1,980 seconds left.
+canonical `journey_run_id`. The active grant must have at least 2,280 seconds left.
 The controller creates two additional distinct namespace UUIDs. The grant is a
 reviewed coordination input, not a cryptographic authorization service.
 
@@ -192,7 +196,7 @@ therefore includes room for that measured host work and subsequent validation,
 without skipping a census, weakening ACK identity checks or retrying the handshake.
 The retained evidence does not locate the exact runner-ACK publication time or
 attribute the whole delay to one census. The finite allowance is not a guarantee
-of hosted filesystem latency, and it does not extend the 900-second test case.
+of hosted filesystem latency, and it does not extend the 1,140-second test case.
 
 After installation, pending numbered export requests can now be serviced at
 owned scan checkpoints under the [scoped resource guard](recovery-hosted.md#bridge-service-during-an-unfinished-census).
@@ -259,7 +263,7 @@ read must match these exact bytes before creation. The PhotoKit original filenam
 remains `SyntheticRecoveryReceipt.png`; no image decoding or re-encoding occurs.
 
 The seed has one nonrenewable 86-second monotonic window inside the unchanged
-900-second native test and 1,020-second controller test limits. Authorization retains
+1,140-second native test and 1,320-second controller test limits. Authorization retains
 its own maximum 20 seconds, clipped to the seed window. The runner requires zero
 to 63 distinct local asset IDs and no existing resource with the fixture filename.
 A fresh inventory check inside the change block must match that initial set. One
@@ -362,7 +366,7 @@ accessibility tree at 16:07:39.797 contained the real photo, 68.281 seconds afte
 the wait began; it does not establish exactly when the photo first became ready.
 The 90-second allowance accommodates this observed first-use delay with bounded
 headroom, without claiming to repair its underlying cause or guarantee a future
-pass. It remains inside the same 900-second native test allowance and existing
+pass. It remains inside the same 1,140-second native test allowance and existing
 controller limits; no negative probe renews the deadline.
 
 Run `41721079406` still reached the 90-second deadline with the picker showing
@@ -604,7 +608,7 @@ neither Continue nor input had run. Cold setup now uses the explicitly named
 90-second allowance to give those native observations and the guarded dismissal
 more time. The ordinary readiness initializer still rejects allowances above
 30 seconds; autofocus input and Localization's readiness/tap window use thirty seconds, and the
-complete Recovery case remains capped at 900 seconds. No phase renews its timer.
+complete Recovery case remains capped at 1,140 seconds. No phase renews its timer.
 This accommodates slow accessibility observation; it does not establish the
 underlying OS cause or guarantee that any native call will finish in time.
 
@@ -781,7 +785,7 @@ later probes do not overlap. Only a zero count returned within the original
 monotonic window proves absence. The generic default remains ten seconds; the
 Recovery journey's private helper explicitly uses thirty seconds for its four
 existing Save, Apply, name-entry and Cancel query sites. This uses the existing
-generic thirty-second maximum and does not extend the 900-second case or any
+generic thirty-second maximum and does not extend the 1,140-second case or any
 controller budget. An error or late result cannot
 authorize progress, and XCTest issues remain failures. The preceding action
 still happens once. The helper is shared by OCR Apply, editor Save/Cancel, name
@@ -821,7 +825,7 @@ presentation and navigation, created-folder observation, save-dialog readiness,
 exact filename echo, fresh Save admission and backup selection. Each phase has
 one fixed deadline, with the existing exact identity, cardinality, fresh-state
 and single-action checks. Generic app/Localization waits, inline-editor detection,
-input actions, the 900-second case and outer controller budgets are unchanged.
+input actions, the 1,140-second case and outer controller budgets are unchanged.
 
 In actual-main run `42207985117`, Done returned before a fresh ten-second creation
 window began. Remote provider resolution took about 9.796 seconds; the exact
@@ -1233,13 +1237,13 @@ non-poll operations and clock boundaries; this does not imply zero scheduling co
 
 One outer controller owns the complete attempt and every subprocess process group.
 Use monotonic absolute deadlines; no phase may renew the outer budget. The total
-ceiling is 1,980 seconds, reserving the last 60 seconds for cleanup. Phase caps are
+ceiling is 2,280 seconds, reserving the last 60 seconds for cleanup. Phase caps are
 preflight/project generation 120s, build 720s, nominal create/boot/seed 180s, UI execution
-1020s, evidence collection/verification 240s; each is additionally capped by the
+1320s, evidence collection/verification 240s; each is additionally capped by the
 remaining outer budget minus cleanup reserve. These caps are limits, not a promise
 that a cold build fits. The device phase's shared startup deadline is clipped to
-660 seconds from controller start, reserving the full 1,020-second test and
-240-second collection phases within the 1,920-second work budget. Do not begin a
+660 seconds from controller start, reserving the full 1,320-second test and
+240-second collection phases within the 2,220-second work budget. Do not begin a
 phase without enough cleanup time left.
 
 An absolute process alarm backs up cooperative deadline checks during filesystem
@@ -1414,11 +1418,11 @@ does not prove simulator or DerivedData quiescence, so no root is cached or skip
 Accounting and subsequent device commands share the original nominal startup
 allocation of 120 seconds for preflight + 720 for build + 180 for device, but its
 1,020-second sum is clipped to 660 seconds from controller start. This reserves
-the full 1,020-second test and 240-second collection allowances within the existing
-1,920-second work budget. Preflight and build retain their own phase caps; unused
+the full 1,320-second test and 240-second collection allowances within the existing
+2,220-second work budget. Preflight and build retain their own phase caps; unused
 time remains available for device preparation and its full accounting only before
 that fixed 660-second boundary. A build that consumes its entire nominal allowance
-cannot then enter device preparation. The 1,980-second outer deadline and
+cannot then enter device preparation. The 2,280-second outer deadline and
 60-second cleanup reserve remain unchanged. Reentering the device phase cannot
 renew its absolute startup deadline. Every command remains clipped to this phase
 and its own finite cap; all resource walks, identity checks and cleanup requirements
@@ -1584,7 +1588,7 @@ they do not claim fresh device sizes. Root identities, free space, total output,
 original and copied xcresult, attachments and logs remain checked. The three
 ordered readers accept only the verified copy, never the original or a live
 container. Each retains its 40-second cap; collection retains 240 seconds and the
-whole run retains 1980 seconds, including shutdown and the final census.
+whole run retains 2280 seconds, including shutdown and the final census.
 
 The single normal-path `collection-shutdown` command allows 90 seconds, including
 four seconds for owned-process cleanup. Its 86-second work window is still
@@ -1699,7 +1703,7 @@ The single `xcrun simctl list --json` discovery request has a 90-second maximum:
 86 seconds for work and the existing four seconds for owned-group cleanup. This
 reallocates up to 30 seconds within the same absolute 120-second discovery window.
 It does not establish an OS or product repair and does not retry the command.
-The 1,980-second controller, 180-second retention reservation, 2,280-second adapter
+The 2,280-second controller, 180-second retention reservation, 2,580-second adapter
 envelope, 48-minute job timeout, ownership checks and resource limits are not
 changed by that discovery allowance; the result-lifecycle limits are defined above.
 
@@ -1709,7 +1713,7 @@ If R seconds remain at inventory entry, its total command deadline is at most
 `max(0, R - 90)` seconds remain for the installer; its work deadline is four
 seconds earlier. Every command still needs at least eight seconds remaining to
 start. An exhausted discovery window cannot borrow from the full controller plus
-retention reservation of 2,160 seconds.
+retention reservation of 2,460 seconds.
 
 The retained run 40660819848 reached inventory at monotonic 85.627825208,
 2.386114708 seconds after the first recorded source command. The adapter's
@@ -1794,12 +1798,13 @@ properties are not repeatedly sampled to construct one classification.
 In run `42196759995`, XCTest reported its former 720-second case limit during
 the final ZIP filename operation; checkpoint 17 arrived at 763.45 seconds, then
 the controller test-phase deadline expired during teardown. Reaching all
-checkpoints did not make that run pass. The case now allows 900 seconds, below
-the 960-second Xcode ceiling and 1,020-second test phase/command. The controller
-allows 1,980 seconds so the 660-second startup allocation, 240-second collection
-and 60-second cleanup reserves remain intact. The hosted adapter allows 2,280
-seconds, its step 39 minutes and the Recovery job 48 minutes, preserving the
-previous setup/upload margins. All 17 checkpoints, assertions, source/byte checks
+checkpoints did not make that run pass. The case now allows 1,140 seconds, below
+the 1,200-second Xcode maximum and the 1,320-second test phase/command, so the
+command cap still carries xcodebuild launch and result finalization beyond the
+native limit. The controller allows 2,280 seconds so the 660-second startup
+allocation, 240-second collection and 60-second cleanup reserves remain intact.
+The hosted adapter allows 2,580 seconds, its step 44 minutes and the Recovery job
+48 minutes, preserving four minutes of setup/upload margin inside that job. All 17 checkpoints, assertions, source/byte checks
 and actual successful test completion remain required; there is no retry loop
 ([issue #28](https://github.com/4alvit/room-inventory-ios/issues/28)).
 

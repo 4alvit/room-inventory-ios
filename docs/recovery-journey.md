@@ -916,7 +916,7 @@ has the same label, so an all-element label query does not identify only the
 action. The existing `FilesNavigationReadiness` selection path, also used by
 the standalone RC runner, checks zero/one/multiple matches, enabled state and
 native hittability, then performs one direct tap in the same active waiter.
-This share transition has one 30-second monotonic allowance, including the tap;
+This share transition has one 90-second monotonic allowance, including the tap;
 there is no second generic wait or scrolling fallback. In-flight native queries
 cannot be preempted by this helper, but late results cannot authorize a tap.
 
@@ -929,6 +929,19 @@ An earlier successful trace also exceeded the nominal ten-second existence
 wait before tapping the cell. The combined allowance replaces that wait plus
 subsequent unshared checks; it does not claim to cure native service latency.
 Current hosted execution must still verify all three exports and their bytes.
+
+In PR run `45479826377`, the menu tap preceded every probe: the first probe
+began 17.2 seconds later, and the three admitted probes inside the former
+30-second window each occupied about ten seconds without a match. The passing
+run `45048775385` answered the same query in about 0.2 seconds and reached the
+action about 5.5 seconds after its tap; its runner image, runtime and Xcode were
+otherwise identical. The failing runner also reported an unblessed simulator
+service hub before the share sheet appeared. The ninety-second allowance admits
+about eight observations at the measured slow cadence inside one absolute
+deadline, matching the first-use provider allowance already used elsewhere. It
+does not claim to repair the accessibility bridge, and the generic provider
+windows keep their thirty-second cap; only this presentation carries the larger
+explicit maximum.
 
 Save readiness captures the uniquely resolved `Browse View (Picker)` once per
 probe and checks its bounded, immutable hierarchy. It requires one local-storage

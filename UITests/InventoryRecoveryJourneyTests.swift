@@ -580,7 +580,7 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         // the typed action, not every element in the remote share hierarchy.
         let saveToFiles = app.cells.matching(NSPredicate(
             format: "identifier == %@ AND label == %@", "actionGroupCell", "Save to Files"))
-        let shareAction = FilesNavigationReadiness(timeout: FilesNavigationReadiness.systemProviderAllowance)
+        let shareAction = FilesNavigationReadiness.sharePresentation()
         // Resolve the exact action once per probe and retain its accessibility
         // identity through the live gates and one tap, inside the same window.
         try shareAction.waitAndTapBoundElement(

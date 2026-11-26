@@ -403,9 +403,12 @@ fields, plus a fixed format category when already known. They contain no image
 content, filenames, paths or hashes. Counts/dimensions use `-1` for unavailable
 values; statuses use `1`, and diagnostic dimensions are integer approximations.
 A valid seeded original does not establish that Photos delivered the same intact
-representation. These rows diagnose the import failure tracked in [issue 24](https://github.com/4alvit/room-inventory-ios/issues/24);
-they preserve the public error, validation order and limits, and do not establish
-that the failure is fixed or justify extending the OCR wait.
+representation. These rows diagnose the provider-read and metadata-rejection
+stages of that path; they preserve the public error, validation order and limits,
+and do not by themselves justify extending the OCR wait. The rejection described
+in issue 24 is no longer observed: later hosted journeys imported the seeded
+Photos original, reached OCR and completed the export and restore steps. The rows
+are retained so a future rejection still reports its stage without new noise.
 
 ### Explicit OCR selection
 

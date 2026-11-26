@@ -26,7 +26,10 @@ final class InventoryRecoveryJourneyTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["RUN_INVENTORY_RECOVERY_JOURNEY"] == "1",
                           "Requires a fresh controller-owned Simulator for the exact synthetic Photos receipt.")
-        executionTimeAllowance = 900
+        // A slow hosted host drove this case to 920 seconds of its own clock.
+        // Keep the case below Xcode's 1200-second maximum and the controller's
+        // 1320-second command cap, with launch and finalization budgeted on top.
+        executionTimeAllowance = 1140
         continueAfterFailure = false
         let journeyID = try requiredUUID("RECOVERY_JOURNEY_RUN_ID", environment)
         let sourceID = try requiredUUID("RECOVERY_SOURCE_RUN_ID", environment)

@@ -42,7 +42,7 @@ POLICY = {
     "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
     "allowed_caller_workflows": [".github/workflows/quality-gate.yml", ".github/workflows/release-pipeline.yml"],
     "allowed_events": ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
-    "discovery_seconds": 120, "recovery_seconds": 1980, "retention_seconds": 180,
+    "discovery_seconds": 120, "recovery_seconds": 2280, "retention_seconds": 180,
     "job_timeout_minutes": 48, "admission_free_bytes": 24 * controller.GIB,
     "abort_free_bytes": 8 * controller.GIB, "device_cap_bytes": 8 * controller.GIB,
     "derived_data_cap_bytes": 4 * controller.GIB, "output_cap_bytes": controller.GIB,
@@ -1094,7 +1094,8 @@ def source_identity(discovery, env, event_identity=None, audit=None):
 def make_envelope(root, work, profile_hash, workflow_hash, host, source, selection, developer_dir, xcodegen, hashes):
     now = controller.utc_now()
     grant = {"schema_version": 1, "native_execution_authorized": True,
-             "not_before": now.isoformat(), "expires_at": (now + dt.timedelta(seconds=2040)).isoformat(),
+             "not_before": now.isoformat(),
+             "expires_at": (now + dt.timedelta(seconds=POLICY["recovery_seconds"] + 60)).isoformat(),
              "source_commit": source[0], "source_tree": source[1], "worktree": str(root), "output_root": str(work / "run"),
              "controller_sha256": hashes["controller"], "collector_sha256": hashes["collector"],
              "device_type": selection["device_type"], "runtime": selection["runtime"],
@@ -1205,7 +1206,11 @@ def small_failure_diagnostic(work, context, guard):
 def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usage=shutil.disk_usage):
     env = dict(os.environ if env is None else env)
     start = clock()
-    outer_end = start + 2280
+    # Discovery, the controller grant and retention share one envelope that ends
+    # 60 seconds before this step's own timeout, leaving that much slack for the
+    # step to end rather than being killed by it.
+    outer_end = start + (POLICY["discovery_seconds"] + POLICY["recovery_seconds"]
+                         + POLICY["retention_seconds"])
     work, upload, runner, discovery = None, None, None, None
     context, primary, code = {}, None, 1
     controller_anchor, execute_returned = None, False
@@ -1295,7 +1300,8 @@ def run_hosted(expected, *, root=ROOT, env=None, clock=time.monotonic, disk_usag
             envelope["runtime_readiness"] = context["runtime_readiness"]
             controller.write_json(work / "hosted-grant-envelope.json", envelope)
             discovery.check()
-        require(outer_end - clock() >= 2160, "Insufficient full controller and retention budget", Deadline)
+        require(outer_end - clock() >= POLICY["recovery_seconds"] + POLICY["retention_seconds"],
+                "Insufficient full controller and retention budget", Deadline)
         controller.validate_grant(envelope["controller_grant"], now=controller.utc_now(), script_root=root)
         runner = HostedRecoveryRun(envelope["controller_grant"], clock=clock, disk_usage=disk_usage)
         controller_anchor = controller_clock_anchor(clock)

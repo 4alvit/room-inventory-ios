@@ -300,7 +300,7 @@ class TransactionWorld(BridgeWorld):
     def __init__(self, mode, *, write_delay=2.1):
         super().__init__()
         self.mode = mode
-        self.run.phase("test")  # The actual UI command runs in its existing1020s phase.
+        self.run.phase("test")  # The actual UI command runs in its existing 1320s phase.
         self.documents, self.evidence = {}, {}
         self.transaction_request_time = self.ack_time = None
         self.delayed = False

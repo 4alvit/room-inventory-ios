@@ -162,7 +162,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         digest = hashlib.sha256(self.profile_raw).hexdigest()
         self.assertEqual(runs[0]["run"], "python3 scripts/recovery_hosted.py --profile-sha256 " + digest)
         self.assertNotIn("if", runs[0])
-        self.assertEqual(int(runs[0]["timeout-minutes"]), 39)
+        self.assertEqual(int(runs[0]["timeout-minutes"]), 44)
 
     def test_profile_and_job_agree_on_standard_runner_and_finite_budgets(self):
         self.assertEqual(self.profile["workflow_path"], ".github/workflows/ci.yml")
@@ -171,9 +171,9 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.job["runs-on"], "xcode-27")
         self.assertEqual(self.profile["job_timeout_minutes"], int(self.job["timeout-minutes"]))
         stages = sum(self.profile[key] for key in ("discovery_seconds", "recovery_seconds", "retention_seconds"))
-        self.assertEqual(39 * 60 - stages, 60)
+        self.assertEqual(44 * 60 - stages, 60)
         self.assertEqual(self.profile["job_timeout_minutes"] - 39, 9)
-        self.assertEqual(self.profile["recovery_seconds"], 1980)
+        self.assertEqual(self.profile["recovery_seconds"], 2280)
         self.assertEqual(self.profile["admission_free_bytes"], 24 * 2**30)
         self.assertEqual(self.profile["abort_free_bytes"], 8 * 2**30)
         self.assertEqual(set(self.profile["allowed_events"]),

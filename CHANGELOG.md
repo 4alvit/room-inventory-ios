@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Order the Recovery journey's three test limits so the controller's 1,320-second command cap sits 120 seconds above Xcode's 1,200-second maximum instead of 60 seconds above it; the case's own allowance rises to 1,140 seconds, both above the 920-second journey a slow hosted host produced.
+
 - Complete phase-bounded resource admission before starting a Recovery command's existing execution allowance, preserving cleanup reserves, resource checks and all numeric limits.
 
 - Handle the exact keyboard introduction if it appears while waiting for a typed name, retaining one Continue action, one native input and the original input deadline.

@@ -111,7 +111,7 @@ class DevicePhaseTests(unittest.TestCase):
             run.phase('device')
             w.clock.now = run.phase_end
             run.phase('test')
-            self.assertEqual(run.phase_end - w.clock.now, 1020)
+            self.assertEqual(run.phase_end - w.clock.now, 1320)
             w.clock.now = run.phase_end
             run.phase('collect')
             self.assertEqual(run.phase_end - w.clock.now, 240)
@@ -139,12 +139,12 @@ class DevicePhaseTests(unittest.TestCase):
                     w.clock.now += 2
                 return info
             w.stat_action = inspect
-            self.assertEqual(run.command(['fake-child'], 'ui-test', cap=1020), b'')
+            self.assertEqual(run.command(['fake-child'], 'ui-test', cap=1320), b'')
             record = run.record['commands'][0]
-            self.assertEqual(record['end_deadline_elapsed'], 1680)
+            self.assertEqual(record['end_deadline_elapsed'], 1980)
             self.assertEqual(record['child_completed_elapsed'], 1560)
             self.assertEqual(record['post_command_accounting']['status'], 'COMPLETED')
-            self.assertEqual(record['post_command_accounting']['deadline_elapsed'], 1680)
+            self.assertEqual(record['post_command_accounting']['deadline_elapsed'], 1980)
             self.assertEqual(w.barrier_walked, 17)
             self.assertEqual(run.last_samples[-1]['device']['entries'], 17)
             self.assertTrue(record['cleanup']['leader_reaped'])
@@ -154,7 +154,7 @@ class DevicePhaseTests(unittest.TestCase):
             self.assertEqual(run.outer_end - run.work_end, 60)
 
     def test_expanded_test_rejects_late_child_or_incomplete_terminal_accounting(self):
-        for work, accounting in ((1016, False), (1010, True)):
+        for work, accounting in ((1316, False), (1310, True)):
             with self.subTest(work=work), fixtures.World(actual_guard=True, count=17) as w:
                 run = w.run
                 w.clock.now = run.start + 660
@@ -170,7 +170,7 @@ class DevicePhaseTests(unittest.TestCase):
                     return info
                 w.stat_action = inspect
                 with self.assertRaises(C.DeadlineFailure):
-                    run.command(['fake-child'], 'ui-test', cap=1020)
+                    run.command(['fake-child'], 'ui-test', cap=1320)
                 record = run.record['commands'][0]
                 if accounting:
                     self.assertEqual(record['post_command_accounting']['status'], 'FAILED')
@@ -192,7 +192,7 @@ class DevicePhaseTests(unittest.TestCase):
                 deadline = run.phase_end
                 w.clock.now = deadline - remaining
                 with self.assertRaises(C.DeadlineFailure):
-                    run.command(['never-spawn'], 'ui-test', cap=1020)
+                    run.command(['never-spawn'], 'ui-test', cap=1320)
                 self.assertFalse(any(e[0] == 'spawn' for e in w.events))
                 self.assertEqual(run.record['commands'], [])
                 self.assertEqual(run.phase_end, deadline)
@@ -272,7 +272,7 @@ class SharedInstallationTests(unittest.TestCase):
             self.assertEqual(run.record['installation_window']['end_deadline_elapsed'], 660)
             self.assertEqual(run.record['installation_window']['completed_elapsed'], 641)
             self.assertEqual((run.phase_end, run.work_end, run.outer_end), original)
-            self.assertEqual(run.work_end - run.phase_end, 1020 + 240)
+            self.assertEqual(run.work_end - run.phase_end, 1320 + 240)
             self.assertEqual(run.outer_end - run.work_end, 60)
 
     def test_first_preparation_expiry_starts_no_child_and_does_not_renew(self):

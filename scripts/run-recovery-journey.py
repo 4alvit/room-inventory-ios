@@ -27,8 +27,15 @@ import time
 import uuid
 
 GIB, MIB = 2**30, 2**20
-OUTER_SECONDS, CLEANUP_SECONDS = 1980, 60
-PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 1020, "collect": 240}
+# The test's own allowance, Xcode's maximum and this controller's test cap must
+# stay ordered, and the cap must also cover xcodebuild launch plus result-bundle
+# finalization. Hosted runs measured that overhead at 42 seconds on a fast host
+# and 91 seconds on a slow one, while a slow host drove the native case itself to
+# 920 seconds, so 1320 = 1200 + 120 keeps the cap above Xcode's maximum with the
+# whole measured overhead still available.
+TEST_ALLOWANCE_SECONDS = 1200
+OUTER_SECONDS, CLEANUP_SECONDS = 2280, 60
+PHASE_SECONDS = {"preflight": 120, "build": 720, "device": 180, "test": 1320, "collect": 240}
 ADMISSION_BYTES, ABORT_BYTES = 24 * GIB, 8 * GIB
 DEVICE_CAP, DERIVED_CAP, OUTPUT_CAP = 8 * GIB, 4 * GIB, GIB
 XCRESULT_CAP, ATTACHMENT_CAP, LOG_CAP = 192 * MIB, 128 * MIB, 64 * MIB
@@ -180,7 +187,8 @@ def validate_grant(grant, *, now, script_root):
     try:
         start, end = [dt.datetime.fromisoformat(grant[key].replace("Z", "+00:00")) for key in ("not_before", "expires_at")]
         require(start.tzinfo is not None and end.tzinfo is not None, "Grant times must have timezones", ConfigurationFailure)
-        require(start <= now and (end - now).total_seconds() >= OUTER_SECONDS, "Grant inactive or less than 1980 seconds remain", ConfigurationFailure)
+        require(start <= now and (end - now).total_seconds() >= OUTER_SECONDS,
+                f"Grant inactive or less than {OUTER_SECONDS} seconds remain", ConfigurationFailure)
     except (ValueError, TypeError, AttributeError) as error:
         raise ConfigurationFailure("Invalid grant times") from error
     return grant
@@ -2262,15 +2270,17 @@ class RecoveryRun:
         self.xcresult = self.output / "original.xcresult"
         test_error = None
         try:
-            # The test's explicit 900s allowance stays below Xcode's 960s
-            # maximum and this phase/command's 1020s cap. Native launch and
-            # finalization still share the same absolute phase deadline.
+            # The test's explicit 1140s allowance stays below Xcode's 1200s
+            # maximum and this phase/command's 1320s cap, so native launch and
+            # finalization keep 120s beyond Xcode's own limit instead of dying
+            # at the cap. All three still share the absolute phase deadline.
             self.command(["xcodebuild", "test-without-building", "-xctestrun", self.xctestrun,
                           "-destination", "platform=iOS Simulator,id=" + self.device_id,
                           "-resultBundlePath", self.xcresult, "-only-testing:" + CASE,
                           "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
                           "-test-timeouts-enabled", "YES",
-                          "-maximum-test-execution-time-allowance", "960"], "ui-test", cap=1020,
+                          "-maximum-test-execution-time-allowance", str(TEST_ALLOWANCE_SECONDS)], "ui-test",
+                         cap=PHASE_SECONDS["test"],
                          on_poll=self.collector.poll_bridge, xcresult_producer=True)
         except BaseException as error:
             test_error = error
